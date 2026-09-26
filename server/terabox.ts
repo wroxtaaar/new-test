@@ -835,6 +835,105 @@ function createTeraboxFileMetadata(
   };
 }
 
+const DEFAULT_TERABOX_PROXY_URL =
+  "https://tbx-proxy.shakir-ansarii075.workers.dev/";
+
+function getTeraboxProxyUrl(): string {
+  return process.env.TERABOX_PROXY_URL?.trim() || DEFAULT_TERABOX_PROXY_URL;
+}
+
+function normalizeProxySurl(surl: string): string {
+  // The proxy normalizes the public /s/1... form to the API's shorturl form.
+  return surl.length === 23 && surl.startsWith("1") ? surl.slice(1) : surl;
+}
+
+async function resolveTeraboxViaProxy(rawUrl: string): Promise<ResolvedMetadata | null> {
+  const surl = extractSurl(rawUrl);
+  if (!surl) return null;
+
+  const proxyUrl = getTeraboxProxyUrl();
+  const endpoint = new URL(proxyUrl);
+  endpoint.searchParams.set("mode", "resolve");
+  endpoint.searchParams.set("surl", normalizeProxySurl(surl));
+  endpoint.searchParams.set("raw", "1");
+  endpoint.searchParams.set("refresh", "1");
+
+  const response = await fetch(endpoint, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      Accept: "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`TeraBox proxy returned HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as any;
+  if (payload?.error) {
+    throw new Error(
+      `TeraBox proxy failed: ${payload.error}${payload.details ? ` (${String(payload.details).slice(0, 200)})` : ""}`
+    );
+  }
+
+  const upstream = payload?.upstream || payload?.data || payload;
+  const rawItems = Array.isArray(upstream?.list) ? upstream.list : [];
+  const files: ResolvedTeraboxFile[] = [];
+
+  for (const item of rawItems) {
+    const file = createTeraboxFileMetadata(
+      item,
+      upstream?.shareid ? String(upstream.shareid) : upstream?.share_id ? String(upstream.share_id) : undefined,
+      upstream?.uk ? String(upstream.uk) : undefined,
+      upstream?.sign ? String(upstream.sign) : undefined,
+      upstream?.timestamp ? String(upstream.timestamp) : undefined
+    );
+    if (file) files.push(file);
+  }
+
+  // The proxy returns a compact record on D1 cache hits. Convert that record
+  // into the same metadata shape used by the normal resolver.
+  if (files.length === 0 && upstream?.dlink) {
+    const filename = cleanFilename(String(upstream.name || "terabox_download"));
+    const size = Number(upstream.size) || 0;
+    const ext = path.extname(filename).toLowerCase();
+    files.push({
+      filename,
+      sizeBytes: size,
+      sizeFormatted: size > 0 ? formatBytes(size) : "Unknown size",
+      isVideo: VIDEO_EXTENSIONS.has(ext),
+      isZip: /\.(zip|rar|7z)$/i.test(filename),
+      downloadUrl: String(upstream.dlink),
+      fsId: upstream.fid ? String(upstream.fid) : undefined,
+    });
+  }
+
+  const downloadableFiles = files.filter((file) => file.downloadUrl || file.streamUrl);
+  if (downloadableFiles.length === 0) return null;
+
+  console.log(
+    "TeraBox resolver fallback succeeded through proxy for surl=" +
+      normalizeProxySurl(surl) +
+      " files=" +
+      downloadableFiles.length
+  );
+
+  return {
+    shareId: upstream?.shareid ? String(upstream.shareid) : upstream?.share_id ? String(upstream.share_id) : undefined,
+    uk: upstream?.uk ? String(upstream.uk) : undefined,
+    sign: upstream?.sign ? String(upstream.sign) : undefined,
+    timestamp: upstream?.timestamp ? String(upstream.timestamp) : undefined,
+    title: upstream?.title
+      ? cleanFilename(String(upstream.title))
+      : downloadableFiles[0]?.filename || "TeraBox Files",
+    files: downloadableFiles,
+    directDownloadPossible: true,
+    cookies: undefined,
+    refererUrl: "https://www.terabox.app/",
+  };
+}
+
 export async function resolveTeraboxLink(rawUrl: string): Promise<ResolvedMetadata> {
   const cleanUrl = rawUrl.trim();
   const shortCode = extractSurl(cleanUrl);
@@ -1046,7 +1145,24 @@ export async function resolveTeraboxLink(rawUrl: string): Promise<ResolvedMetada
     }
   }
 
-  const downloadableFiles = files.filter((file) => file.downloadUrl || file.streamUrl);
+  let downloadableFiles = files.filter((file) => file.downloadUrl || file.streamUrl);
+
+  // TeraBox now frequently answers direct Render/server requests with
+  // errno=400141 ("need verify") before exposing jsToken. A separate
+  // resolver/proxy can fetch the share page from a different egress and has
+  // its own short-lived metadata cache. Use it only after the direct path
+  // produced no usable downloadable files.
+  if (downloadableFiles.length === 0) {
+    try {
+      const proxyMetadata = await resolveTeraboxViaProxy(cleanUrl);
+      if (proxyMetadata?.files?.length) {
+        return proxyMetadata;
+      }
+    } catch (proxyError) {
+      console.warn("TeraBox proxy fallback failed:", proxyError);
+    }
+  }
+
   if (downloadableFiles.length === 0) {
     const diagnostic = [
       "surl=" + (finalSurl || "missing"),
