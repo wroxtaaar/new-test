@@ -842,6 +842,20 @@ function getTeraboxProxyUrl(): string {
   return process.env.TERABOX_PROXY_URL?.trim() || DEFAULT_TERABOX_PROXY_URL;
 }
 
+function getConfiguredTeraboxCookieHeader(): string {
+  const raw = process.env.TERABOX_COOKIE_HEADER?.trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.entries(parsed)
+        .map(([name, value]) => `${name}=${String(value)}`)
+        .join("; ");
+    }
+  } catch {}
+  return raw;
+}
+
 function normalizeProxySurl(surl: string): string {
   // The proxy normalizes the public /s/1... form to the API's shorturl form.
   return surl.length === 23 && surl.startsWith("1") ? surl.slice(1) : surl;
@@ -874,6 +888,7 @@ async function resolveTeraboxViaProxy(rawUrl: string): Promise<ResolvedMetadata 
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
           Accept: "application/json",
+          ...(getConfiguredTeraboxCookieHeader() ? { Cookie: getConfiguredTeraboxCookieHeader() } : {}),
         },
       });
 
@@ -984,6 +999,7 @@ export async function resolveTeraboxLink(rawUrl: string): Promise<ResolvedMetada
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     Referer: "https://www.terabox.app/",
+    ...(getConfiguredTeraboxCookieHeader() ? { Cookie: getConfiguredTeraboxCookieHeader() } : {}),
   };
 
   let pageText = "";
