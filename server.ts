@@ -27,7 +27,7 @@ import { MTProtoService } from "./server/mtproto.ts";
 import type { DownloadJob, ProcessedFile, BotStatus } from "./src/types.ts";
 import { formatLinkCounter, getLinkCounterForUrl, normalizeLink } from "./src/linkCounter.ts";
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 10000;
 const MAX_QUEUE_SIZE = Number(process.env.MAX_QUEUE_SIZE) || 100;
 const MAX_RETRY_ATTEMPTS = 1;
 const RETRY_DELAY_MS = 1500;
@@ -69,7 +69,8 @@ async function withRetries<T>(operation: () => Promise<T>, label: string): Promi
 // Track public base URL for direct download links
 let appPublicUrl =
   process.env.APP_URL ||
-  "https://ais-dev-jya4lggt2drjhja3yk5vs7-856843567695.asia-east1.run.app";
+  process.env.RENDER_EXTERNAL_URL ||
+  "";
 
 app.use((req, res, next) => {
   if (req.headers.host) {
