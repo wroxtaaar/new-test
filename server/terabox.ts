@@ -929,7 +929,7 @@ async function resolveTeraboxViaProxy(rawUrl: string): Promise<ResolvedMetadata 
           sizeBytes: size,
           sizeFormatted: size > 0 ? formatBytes(size) : "Unknown size",
           isVideo: VIDEO_EXTENSIONS.has(ext),
-          isZip: /\\.(zip|rar|7z)\\$/i.test(filename),
+          isZip: /\.(zip|rar|7z)$/i.test(filename),
           downloadUrl: String(upstream.dlink),
           fsId: upstream.fid ? String(upstream.fid) : undefined,
         });
