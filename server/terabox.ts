@@ -852,86 +852,127 @@ async function resolveTeraboxViaProxy(rawUrl: string): Promise<ResolvedMetadata 
   if (!surl) return null;
 
   const proxyUrl = getTeraboxProxyUrl();
-  const endpoint = new URL(proxyUrl);
-  endpoint.searchParams.set("mode", "resolve");
-  endpoint.searchParams.set("surl", normalizeProxySurl(surl));
-  endpoint.searchParams.set("raw", "1");
-  endpoint.searchParams.set("refresh", "1");
+  const normalizedSurl = normalizeProxySurl(surl);
+  const attempts = [
+    { mode: "lookup", raw: false, refresh: false },
+    { mode: "resolve", raw: false, refresh: false },
+    { mode: "resolve", raw: true, refresh: true },
+  ];
 
-  const response = await fetch(endpoint, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      Accept: "application/json",
-    },
-  });
+  const failures: string[] = [];
 
-  if (!response.ok) {
-    throw new Error(`TeraBox proxy returned HTTP ${response.status}`);
+  for (const attempt of attempts) {
+    try {
+      const endpoint = new URL(proxyUrl);
+      endpoint.searchParams.set("mode", attempt.mode);
+      endpoint.searchParams.set("surl", normalizedSurl);
+      if (attempt.raw) endpoint.searchParams.set("raw", "1");
+      if (attempt.refresh) endpoint.searchParams.set("refresh", "1");
+
+      const response = await fetch(endpoint, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+      });
+
+      const rawText = await response.text();
+      let payload: any = null;
+      try {
+        payload = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        payload = null;
+      }
+
+      if (!response.ok) {
+        const detail =
+          payload?.error ||
+          payload?.message ||
+          payload?.details ||
+          (rawText ? rawText.slice(0, 200) : "");
+        failures.push(
+          `mode=${attempt.mode} HTTP ${response.status}${detail ? `: ${detail}` : ""}`
+        );
+        continue;
+      }
+
+      if (payload?.error) {
+        failures.push(
+          `mode=${attempt.mode}: ${payload.error}${payload.details ? ` (${String(payload.details).slice(0, 200)})` : ""}`
+        );
+        continue;
+      }
+
+      const upstream = payload?.upstream || payload?.data || payload;
+      const rawItems = Array.isArray(upstream?.list) ? upstream.list : [];
+      const files: ResolvedTeraboxFile[] = [];
+
+      for (const item of rawItems) {
+        const file = createTeraboxFileMetadata(
+          item,
+          upstream?.shareid ? String(upstream.shareid) : upstream?.share_id ? String(upstream.share_id) : undefined,
+          upstream?.uk ? String(upstream.uk) : undefined,
+          upstream?.sign ? String(upstream.sign) : undefined,
+          upstream?.timestamp ? String(upstream.timestamp) : undefined
+        );
+        if (file) files.push(file);
+      }
+
+      // The proxy returns a compact record on D1 cache hits.
+      if (files.length === 0 && upstream?.dlink) {
+        const filename = cleanFilename(String(upstream.name || "terabox_download"));
+        const size = Number(upstream.size) || 0;
+        const ext = path.extname(filename).toLowerCase();
+        files.push({
+          filename,
+          sizeBytes: size,
+          sizeFormatted: size > 0 ? formatBytes(size) : "Unknown size",
+          isVideo: VIDEO_EXTENSIONS.has(ext),
+          isZip: /\\.(zip|rar|7z)\\$/i.test(filename),
+          downloadUrl: String(upstream.dlink),
+          fsId: upstream.fid ? String(upstream.fid) : undefined,
+        });
+      }
+
+      const downloadableFiles = files.filter((file) => file.downloadUrl || file.streamUrl);
+      if (downloadableFiles.length === 0) {
+        failures.push(`mode=${attempt.mode}: no downloadable files`);
+        continue;
+      }
+
+      console.log(
+        "TeraBox resolver fallback succeeded through proxy mode=" +
+          attempt.mode +
+          " surl=" +
+          normalizedSurl +
+          " files=" +
+          downloadableFiles.length
+      );
+
+      return {
+        shareId: upstream?.shareid ? String(upstream.shareid) : upstream?.share_id ? String(upstream.share_id) : undefined,
+        uk: upstream?.uk ? String(upstream.uk) : undefined,
+        sign: upstream?.sign ? String(upstream.sign) : undefined,
+        timestamp: upstream?.timestamp ? String(upstream.timestamp) : undefined,
+        title: upstream?.title
+          ? cleanFilename(String(upstream.title))
+          : downloadableFiles[0]?.filename || "TeraBox Files",
+        files: downloadableFiles,
+        directDownloadPossible: true,
+        cookies: undefined,
+        refererUrl: "https://www.terabox.app/",
+      };
+    } catch (error) {
+      failures.push(
+        `mode=${attempt.mode}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
-  const payload = (await response.json()) as any;
-  if (payload?.error) {
-    throw new Error(
-      `TeraBox proxy failed: ${payload.error}${payload.details ? ` (${String(payload.details).slice(0, 200)})` : ""}`
-    );
-  }
-
-  const upstream = payload?.upstream || payload?.data || payload;
-  const rawItems = Array.isArray(upstream?.list) ? upstream.list : [];
-  const files: ResolvedTeraboxFile[] = [];
-
-  for (const item of rawItems) {
-    const file = createTeraboxFileMetadata(
-      item,
-      upstream?.shareid ? String(upstream.shareid) : upstream?.share_id ? String(upstream.share_id) : undefined,
-      upstream?.uk ? String(upstream.uk) : undefined,
-      upstream?.sign ? String(upstream.sign) : undefined,
-      upstream?.timestamp ? String(upstream.timestamp) : undefined
-    );
-    if (file) files.push(file);
-  }
-
-  // The proxy returns a compact record on D1 cache hits. Convert that record
-  // into the same metadata shape used by the normal resolver.
-  if (files.length === 0 && upstream?.dlink) {
-    const filename = cleanFilename(String(upstream.name || "terabox_download"));
-    const size = Number(upstream.size) || 0;
-    const ext = path.extname(filename).toLowerCase();
-    files.push({
-      filename,
-      sizeBytes: size,
-      sizeFormatted: size > 0 ? formatBytes(size) : "Unknown size",
-      isVideo: VIDEO_EXTENSIONS.has(ext),
-      isZip: /\.(zip|rar|7z)$/i.test(filename),
-      downloadUrl: String(upstream.dlink),
-      fsId: upstream.fid ? String(upstream.fid) : undefined,
-    });
-  }
-
-  const downloadableFiles = files.filter((file) => file.downloadUrl || file.streamUrl);
-  if (downloadableFiles.length === 0) return null;
-
-  console.log(
-    "TeraBox resolver fallback succeeded through proxy for surl=" +
-      normalizeProxySurl(surl) +
-      " files=" +
-      downloadableFiles.length
+  throw new Error(
+    `TeraBox proxy could not resolve the share (surl=${normalizedSurl}; ${failures.join(" | ")})`
   );
-
-  return {
-    shareId: upstream?.shareid ? String(upstream.shareid) : upstream?.share_id ? String(upstream.share_id) : undefined,
-    uk: upstream?.uk ? String(upstream.uk) : undefined,
-    sign: upstream?.sign ? String(upstream.sign) : undefined,
-    timestamp: upstream?.timestamp ? String(upstream.timestamp) : undefined,
-    title: upstream?.title
-      ? cleanFilename(String(upstream.title))
-      : downloadableFiles[0]?.filename || "TeraBox Files",
-    files: downloadableFiles,
-    directDownloadPossible: true,
-    cookies: undefined,
-    refererUrl: "https://www.terabox.app/",
-  };
 }
 
 export async function resolveTeraboxLink(rawUrl: string): Promise<ResolvedMetadata> {
