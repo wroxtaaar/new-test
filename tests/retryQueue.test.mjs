@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getRetryLabel, shouldRetryLink } from '../src/retryQueue.ts';
-import { isDiskwalaUrl, extractDiskwalaId } from '../server/terabox.ts';
+import { isTeraboxUrl, extractSurl } from '../server/terabox.ts';
 
 test('retry decisions disable retries and fail immediately', () => {
   assert.equal(shouldRetryLink(0, 1), false);
@@ -15,9 +15,9 @@ test('retry labels include the file name and retry number', () => {
   );
 });
 
-test('Diskwala links are detected and normalized', () => {
-  assert.equal(isDiskwalaUrl('https://www.diskwala.com/app/abc123xyz'), true);
-  assert.equal(extractDiskwalaId('https://dw.link/abc123xyz'), 'abc123xyz');
-  assert.equal(extractDiskwalaId('https://www.diskwala.com/file/demo-link'), 'demo-link');
+test('TeraBox links are detected and normalized', () => {
+  assert.equal(isTeraboxUrl('https://terabox.com/s/1abc123xyz'), true);
+  assert.equal(isTeraboxUrl('https://1024tera.com/sharing/link?surl=abc123xyz'), true);
+  assert.equal(extractSurl('https://terabox.com/s/abc123xyz'), 'abc123xyz');
 });
 

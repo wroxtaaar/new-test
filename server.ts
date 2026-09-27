@@ -5,11 +5,8 @@ import { pipeline } from "stream/promises";
 import { Readable } from "stream";
 import {
   isTeraboxUrl,
-  isDiskwalaUrl,
-  extractDiskwalaId,
   extractUrlFromText,
   resolveTeraboxLink,
-  resolveDiskwalaLink,
   cleanFilename,
   formatBytes,
   detectExtensionFromBuffer,
@@ -27,7 +24,15 @@ import { MTProtoService } from "./server/mtproto.ts";
 import type { DownloadJob, ProcessedFile, BotStatus } from "./src/types.ts";
 import { formatLinkCounter, getLinkCounterForUrl, normalizeLink } from "./src/linkCounter.ts";
 
-const PORT = Number(process.env.PORT) || 10000;
+if (fs.existsSync(".env") && typeof process.loadEnvFile === "function") {
+  try {
+    process.loadEnvFile(".env");
+  } catch {
+    // Ignore .env parsing errors
+  }
+}
+
+const PORT = Number(process.env.PORT) || 3000;
 const MAX_QUEUE_SIZE = Number(process.env.MAX_QUEUE_SIZE) || 100;
 const MAX_RETRY_ATTEMPTS = 1;
 const RETRY_DELAY_MS = 1500;
@@ -298,9 +303,8 @@ function getKnownDownloadedSize(url: string): number | undefined {
 
 async function resolveQueuedFileNames(task: DownloadQueueTask) {
   try {
-    const resolver = isDiskwalaUrl(task.url) ? resolveDiskwalaLink : resolveTeraboxLink;
     const metadata = await withRetries(
-      () => resolver(task.url),
+      () => resolveTeraboxLink(task.url),
       "Queued link inspection"
     );
     task.fileNames = metadata.files.map((file) => cleanFilename(file.filename));
@@ -580,7 +584,7 @@ async function pollTelegramUpdates() {
         continue;
       }
 
-      if (isTeraboxUrl(text) || isDiskwalaUrl(text)) {
+      if (isTeraboxUrl(text)) {
         const adjustedText = extractUrlFromText(text);
         const taskUrl = adjustedText || text;
         const queuePosition = getTotalQueueLength() + (isDownloadInProgress ? 1 : 0);
@@ -684,16 +688,16 @@ async function processDownloadJob(
   };
 
   try {
-    await updateStatus("resolving", 25, isDiskwalaUrl(url) ? "Checking your Diskwala link..." : "Checking your TeraBox link...");
+    await updateStatus("resolving", 25, "Checking your TeraBox link...");
     const metadata = await withRetries(
-      () => (isDiskwalaUrl(url) ? resolveDiskwalaLink(url) : resolveTeraboxLink(url)),
-      isDiskwalaUrl(url) ? "Diskwala link resolution" : "TeraBox link resolution"
+      () => resolveTeraboxLink(url),
+      "TeraBox link resolution"
     );
 
     const processedFiles: ProcessedFile[] = [];
     const sourceFiles = metadata.files.filter((file) => file.downloadUrl || file.streamUrl);
     if (sourceFiles.length === 0) {
-      throw new Error(isDiskwalaUrl(url) ? "No downloadable files were found in this Diskwala link." : "No downloadable files were found in this TeraBox link.");
+      throw new Error("No downloadable files were found in this TeraBox link.");
     }
     if (sourceFiles.length > MAX_FILES_PER_LINK) {
       throw new Error(`This link contains too many files. The maximum is ${MAX_FILES_PER_LINK}.`);
@@ -871,7 +875,7 @@ async function processDownloadJob(
     }
 
     if (processedFiles.length === 0) {
-      throw new Error(isDiskwalaUrl(url) ? "None of the files in this Diskwala link could be downloaded." : "None of the files in this TeraBox link could be downloaded.");
+      throw new Error("None of the files in this TeraBox link could be downloaded.");
     }
 
     if (failedFiles.length > 0 && chatId && telegramService) {
@@ -1059,6 +1063,73 @@ updateBotInfo().then(() => {
 // REST API ROUTES
 // ==========================================
 
+app.get("/", (req, res) => {
+  const activeCount = jobs.filter(
+    (j) => j.status !== "completed" && j.status !== "failed"
+  ).length;
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TeraBox Telegram Bot</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 20px; background: #0f172a; color: #f8fafc; }
+    h1 { color: #38bdf8; display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    p.lead { color: #94a3b8; margin-top: 0; margin-bottom: 24px; }
+    .card { background: #1e293b; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #334155; }
+    .card h2 { margin-top: 0; font-size: 1.15rem; color: #cbd5e1; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 13px; font-weight: 600; }
+    .badge-ok { background: #065f46; color: #34d399; }
+    .badge-warn { background: #854d0e; color: #fde047; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-top: 16px; }
+    .stat-item { background: #0f172a; padding: 12px; border-radius: 6px; border: 1px solid #334155; }
+    .stat-val { font-size: 1.3rem; font-weight: 700; color: #38bdf8; }
+    .stat-lbl { font-size: 0.8rem; color: #94a3b8; }
+    a { color: #38bdf8; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code { background: #0f172a; padding: 3px 6px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+    ul { line-height: 1.8; margin-bottom: 0; }
+  </style>
+</head>
+<body>
+  <h1>🤖 TeraBox Telegram Bot</h1>
+  <p class="lead">Backend bot service that downloads and delivers TeraBox files and videos to Telegram.</p>
+
+  <div class="card">
+    <h2>Service Status</h2>
+    <p>
+      <strong>Telegram Bot:</strong>
+      <span class="badge ${botInfo ? 'badge-ok' : 'badge-warn'}">
+        ${botInfo ? `Online (@${botInfo.username})` : (botToken ? 'Token configured, connecting...' : 'Waiting for TELEGRAM_BOT_TOKEN')}
+      </span>
+      &nbsp;&nbsp;
+      <strong>Polling:</strong>
+      <span class="badge ${isPolling ? 'badge-ok' : 'badge-warn'}">${isPolling ? 'Active' : 'Idle'}</span>
+    </p>
+    <div class="stats">
+      <div class="stat-item"><div class="stat-val">${activeCount}</div><div class="stat-lbl">Active Jobs</div></div>
+      <div class="stat-item"><div class="stat-val">${downloadQueue.length}</div><div class="stat-lbl">Ready in Queue</div></div>
+      <div class="stat-item"><div class="stat-val">${jobs.length}</div><div class="stat-lbl">Total Processed</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>API Endpoints</h2>
+    <ul>
+      <li><a href="/api/health"><code>GET /api/health</code></a> — Health check and uptime</li>
+      <li><a href="/api/status"><code>GET /api/status</code></a> — Bot status, credentials, and job counts</li>
+      <li><a href="/api/jobs"><code>GET /api/jobs</code></a> — List active and historical download jobs</li>
+      <li><code>POST /api/jobs</code> — Submit a TeraBox URL to queue</li>
+      <li><code>POST /api/bot/config</code> — Configure Telegram bot token and MTProto credentials</li>
+      <li><code>POST /api/bot/toggle-polling</code> — Toggle Telegram update polling</li>
+    </ul>
+  </div>
+</body>
+</html>`);
+});
+
 app.get("/api/status", (req, res) => {
   const status: BotStatus = {
     hasToken: !!botToken,
@@ -1139,11 +1210,11 @@ app.post("/api/terabox/resolve", async (req, res) => {
   if (!url) {
     return res.status(400).json({ error: "URL is required" });
   }
-  if (!isTeraboxUrl(url) && !isDiskwalaUrl(url)) {
-    return res.status(400).json({ error: "URL does not match supported TeraBox or Diskwala domains" });
+  if (!isTeraboxUrl(url)) {
+    return res.status(400).json({ error: "URL does not match supported TeraBox domains" });
   }
   try {
-    const meta = isDiskwalaUrl(url) ? await resolveDiskwalaLink(url) : await resolveTeraboxLink(url);
+    const meta = await resolveTeraboxLink(url);
     res.json(meta);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -1155,8 +1226,8 @@ app.post("/api/jobs", async (req, res) => {
   if (!url) {
     return res.status(400).json({ error: "URL is required" });
   }
-  if (!isTeraboxUrl(url) && !isDiskwalaUrl(url)) {
-    return res.status(400).json({ error: "Invalid TeraBox or Diskwala URL format" });
+  if (!isTeraboxUrl(url)) {
+    return res.status(400).json({ error: "Invalid TeraBox URL format" });
   }
 
   if (req.headers.host) {
@@ -1245,7 +1316,7 @@ app.get("/api/health", (req, res) => {
 app.post("/api/telegram/webhook", async (req, res) => {
   // Webhook handler support
   const update = req.body;
-  if (update?.message?.text && (isTeraboxUrl(update.message.text) || isDiskwalaUrl(update.message.text))) {
+  if (update?.message?.text && isTeraboxUrl(update.message.text)) {
     const chatId = update.message.chat.id;
     const url = extractUrlFromText(update.message.text) || update.message.text;
     enqueueDownloadJob(url, chatId).catch(console.error);
