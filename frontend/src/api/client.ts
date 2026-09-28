@@ -42,7 +42,7 @@ const API_BASE = (
   configuredApiBase ||
   (isRenderFullStackHost
     ? window.location.origin
-    : 'https://torrent-studio-vercel-render-seedr-26fd.onrender.com')
+    : 'https://new-test-dmkr.onrender.com')
 ).replace(/\/+$/, '');
 const makeSeedrError = (data: any, body: string, status: number, fallback: string) => {
   const error = new Error(
@@ -467,7 +467,7 @@ export const api = {
   },
 
   async startSeedrConnection(): Promise<{
-    status: 'pending' | 'connected';
+    status: 'pending' | 'connected' | 'error';
     connected: boolean;
     userCode?: string;
     verificationUrl?: string;
@@ -486,6 +486,7 @@ export const api = {
     status: 'idle' | 'pending' | 'connected' | 'expired' | 'error';
     connected: boolean;
     message?: string;
+    code?: string;
     expiresIn?: number;
   }> {
     const res = await apiFetch('/api/seedr/connect/status');
