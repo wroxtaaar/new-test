@@ -57,9 +57,26 @@ const makeSeedrError = (data: any, body: string, status: number, fallback: strin
   return error;
 };
 
+let seedrCsrfToken = '';
+
 const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const value = String(input);
-  return fetch(value.startsWith('/') ? API_BASE + value : value, init);
+  const url = value.startsWith('/') ? API_BASE + value : value;
+  const method = String(init?.method || 'GET').toUpperCase();
+  const isSeedrMutation =
+    value.startsWith('/api/seedr/') &&
+    !['GET', 'HEAD', 'OPTIONS'].includes(method);
+
+  const headers = new Headers(init?.headers || undefined);
+  if (isSeedrMutation && seedrCsrfToken) {
+    headers.set('X-Torrent-Studio-CSRF', seedrCsrfToken);
+  }
+
+  return fetch(url, {
+    ...init,
+    headers,
+    credentials: 'include',
+  });
 };
 
 export const api = {
@@ -430,6 +447,62 @@ export const api = {
       throw error;
     }
     return data;
+  },
+
+  async getSeedrSession(): Promise<{
+    connected: boolean;
+    csrfToken: string;
+  }> {
+    const res = await apiFetch('/api/seedr/session');
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw makeSeedrError(data, body, res.status, 'Failed to initialize Seedr session');
+
+    seedrCsrfToken = typeof data?.csrfToken === 'string' ? data.csrfToken : '';
+    return {
+      connected: Boolean(data?.connected),
+      csrfToken: seedrCsrfToken,
+    };
+  },
+
+  async startSeedrConnection(): Promise<{
+    status: 'pending' | 'connected';
+    connected: boolean;
+    userCode?: string;
+    verificationUrl?: string;
+    expiresIn?: number;
+  }> {
+    const res = await apiFetch('/api/seedr/connect/start', { method: 'POST' });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw makeSeedrError(data, body, res.status, 'Failed to start Seedr account connection');
+    return data;
+  },
+
+  async pollSeedrConnection(): Promise<{
+    status: 'idle' | 'pending' | 'connected' | 'expired' | 'error';
+    connected: boolean;
+    message?: string;
+    expiresIn?: number;
+  }> {
+    const res = await apiFetch('/api/seedr/connect/status');
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw makeSeedrError(data, body, res.status, 'Failed to check Seedr connection');
+    return data;
+  },
+
+  async disconnectSeedr(): Promise<void> {
+    const res = await apiFetch('/api/seedr/connect/disconnect', { method: 'POST' });
+    const body = await res.text();
+    if (!res.ok) {
+      let data: any = null;
+      try { data = body ? JSON.parse(body) : null; } catch {}
+      throw makeSeedrError(data, body, res.status, 'Failed to disconnect Seedr account');
+    }
   },
 
   async getSeedrTokenDiagnostic(): Promise<any> {
