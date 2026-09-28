@@ -472,6 +472,7 @@ export const api = {
     userCode?: string;
     verificationUrl?: string;
     expiresIn?: number;
+    interval?: number;
   }> {
     const res = await apiFetch('/api/seedr/connect/start', { method: 'POST' });
     const body = await res.text();
