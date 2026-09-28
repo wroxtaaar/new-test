@@ -5,6 +5,7 @@ import secrets
 from datetime import datetime, timezone
 from collections import deque
 import json
+import hashlib
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlsplit
 
 import httpx
 import libtorrent as lt
+from cryptography.fernet import Fernet, InvalidToken
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +43,13 @@ SEEDR_DEVICE_CODE_URL = "https://www.seedr.cc/api/device/code"
 SEEDR_DEVICE_AUTHORIZE_URL = "https://www.seedr.cc/api/device/authorize"
 SEEDR_SESSION_COOKIE = os.getenv("SEEDR_SESSION_COOKIE", "torrent_studio_seedr_session").strip() or "torrent_studio_seedr_session"
 SEEDR_SESSION_TTL_SECONDS = int(float(os.getenv("SEEDR_SESSION_TTL_SECONDS", str(30 * 24 * 60 * 60))))
+SEEDR_SESSION_SECRET = os.getenv("SEEDR_SESSION_SECRET", "").strip()
+if SEEDR_SESSION_SECRET:
+    _seedr_fernet_key = base64.urlsafe_b64encode(hashlib.sha256(SEEDR_SESSION_SECRET.encode("utf-8")).digest())
+else:
+    _seedr_fernet_key = Fernet.generate_key()
+    logger.warning("SEEDR_SESSION_SECRET is not configured; personal Seedr connections will reset on backend restart.")
+_seedr_fernet = Fernet(_seedr_fernet_key)
 
 _seedr_sessions: dict[str, dict[str, Any]] = {}
 _seedr_request_token: contextvars.ContextVar[str] = contextvars.ContextVar("seedr_request_token", default="")
@@ -149,33 +158,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def _seedr_new_session() -> tuple[str, dict[str, Any]]:
-    session_id = secrets.token_urlsafe(32)
-    session = {
+def _seedr_empty_session() -> dict[str, Any]:
+    now = time.time()
+    return {
         "csrf_token": secrets.token_urlsafe(32),
         "access_token": "",
         "refresh_token": "",
         "token_type": "Bearer",
         "device": None,
-        "created_at": time.time(),
-        "last_seen": time.time(),
+        "created_at": now,
+        "last_seen": now,
     }
+
+def _seedr_new_session() -> tuple[str, dict[str, Any]]:
+    session_id = secrets.token_urlsafe(32)
+    session = _seedr_empty_session()
     _seedr_sessions[session_id] = session
     return session_id, session
 
 def _seedr_get_session(session_id: str) -> dict[str, Any]:
-    return _seedr_sessions.setdefault(
-        session_id,
-        {
-            "csrf_token": secrets.token_urlsafe(32),
-            "access_token": "",
-            "refresh_token": "",
-            "token_type": "Bearer",
-            "device": None,
-            "created_at": time.time(),
-            "last_seen": time.time(),
-        },
+    return _seedr_sessions.setdefault(session_id, _seedr_empty_session())
+
+def _seedr_session_cookie_value(session_id: str, session: dict[str, Any]) -> str:
+    payload = {
+        "v": 1,
+        "sid": session_id,
+        "csrf": str(session.get("csrf_token") or ""),
+        "access": str(session.get("access_token") or ""),
+        "refresh": str(session.get("refresh_token") or ""),
+        "type": str(session.get("token_type") or "Bearer"),
+        "device": session.get("device") if isinstance(session.get("device"), dict) else None,
+        "created": float(session.get("created_at") or time.time()),
+        "last": time.time(),
+    }
+    encrypted = _seedr_fernet.encrypt(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     )
+    return "v1." + encrypted.decode("ascii")
+
+def _seedr_restore_session(raw_cookie: str) -> tuple[str, dict[str, Any]] | None:
+    if not raw_cookie.startswith("v1."):
+        return None
+    try:
+        payload = json.loads(_seedr_fernet.decrypt(raw_cookie[3:].encode("ascii")).decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        session_id = str(payload.get("sid") or "").strip()
+        csrf_token = str(payload.get("csrf") or "").strip()
+        if not session_id or not csrf_token:
+            return None
+        now = time.time()
+        last_seen = float(payload.get("last") or 0)
+        if not last_seen or now - last_seen > SEEDR_SESSION_TTL_SECONDS:
+            return None
+        return session_id, {
+            "csrf_token": csrf_token,
+            "access_token": normalize_seedr_token(str(payload.get("access") or "")),
+            "refresh_token": str(payload.get("refresh") or "").strip(),
+            "token_type": str(payload.get("type") or "Bearer").strip() or "Bearer",
+            "device": payload.get("device") if isinstance(payload.get("device"), dict) else None,
+            "created_at": float(payload.get("created") or now),
+            "last_seen": now,
+        }
+    except (InvalidToken, ValueError, TypeError, json.JSONDecodeError):
+        return None
 
 def current_seedr_token() -> str:
     """Return the Seedr token for the current request's connected account."""
@@ -205,12 +251,18 @@ def _clear_seedr_session_token(session_id: str | None = None) -> None:
 
 @app.middleware("http")
 async def attach_seedr_session(request: Request, call_next):
-    session_id = str(request.cookies.get(SEEDR_SESSION_COOKIE) or "").strip()
-    if session_id not in _seedr_sessions:
+    raw_cookie = str(request.cookies.get(SEEDR_SESSION_COOKIE) or "").strip()
+    restored = _seedr_restore_session(raw_cookie)
+    is_new = False
+
+    if restored:
+        session_id, restored_session = restored
+        _seedr_sessions[session_id] = restored_session
+    elif raw_cookie in _seedr_sessions:
+        session_id = raw_cookie
+    else:
         session_id, _ = _seedr_new_session()
         is_new = True
-    else:
-        is_new = False
 
     session = _seedr_get_session(session_id)
     session["last_seen"] = time.time()
@@ -224,10 +276,7 @@ async def attach_seedr_session(request: Request, call_next):
             if not _seedr_session_csrf_ok(request):
                 response = JSONResponse(
                     status_code=403,
-                    content={
-                        "error": "Seedr session security check failed.",
-                        "code": "SEEDR_CSRF_INVALID",
-                    },
+                    content={"error": "Seedr session security check failed.", "code": "SEEDR_CSRF_INVALID"},
                 )
             else:
                 response = await call_next(request)
@@ -237,23 +286,24 @@ async def attach_seedr_session(request: Request, call_next):
         _seedr_request_token.reset(token_ctx)
         _seedr_request_session_id.reset(session_ctx)
 
-    if is_new:
-        is_https = request.url.scheme.lower() == "https"
-        response.set_cookie(
-            SEEDR_SESSION_COOKIE,
-            session_id,
-            max_age=SEEDR_SESSION_TTL_SECONDS,
-            httponly=True,
-            secure=is_https,
-            samesite="none" if is_https else "lax",
-            path="/",
-        )
+    is_https = (
+        request.url.scheme.lower() == "https"
+        or str(request.headers.get("x-forwarded-proto") or "").lower() == "https"
+    )
+    response.set_cookie(
+        SEEDR_SESSION_COOKIE,
+        _seedr_session_cookie_value(session_id, session),
+        max_age=SEEDR_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=is_https,
+        samesite="none" if is_https else "lax",
+        path="/",
+    )
 
     now = time.time()
     if len(_seedr_sessions) > 2000:
         stale = [
-            sid
-            for sid, item in _seedr_sessions.items()
+            sid for sid, item in _seedr_sessions.items()
             if now - float(item.get("last_seen") or now) > SEEDR_SESSION_TTL_SECONDS
         ]
         for sid in stale:
