@@ -466,6 +466,30 @@ export const api = {
     };
   },
 
+  async connectSeedrPat(pat: string): Promise<{
+    status: 'connected' | 'error';
+    connected: boolean;
+  }> {
+    const value = String(pat || '').trim();
+    if (!value) throw new Error('Enter your Seedr Personal Access Token.');
+
+    const res = await apiFetch('/api/seedr/connect/pat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pat: value }),
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw makeSeedrError(data, body, res.status, 'Seedr rejected this Personal Access Token.');
+    }
+    return {
+      status: data?.status === 'connected' ? 'connected' : 'error',
+      connected: Boolean(data?.connected),
+    };
+  },
+
   async startSeedrConnection(): Promise<{
     status: 'pending' | 'connected' | 'error';
     connected: boolean;
