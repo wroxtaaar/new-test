@@ -84,6 +84,7 @@ export default function App() {
   const [seedrConnectCode, setSeedrConnectCode] = useState('');
   const [seedrVerificationUrl, setSeedrVerificationUrl] = useState('https://www.seedr.cc/devices');
   const [seedrConnectExpiresIn, setSeedrConnectExpiresIn] = useState(0);
+  const [seedrConnectPollInterval, setSeedrConnectPollInterval] = useState(5);
   const [seedrConnectError, setSeedrConnectError] = useState('');
 
   const startSeedrConnection = useCallback(async () => {
@@ -103,6 +104,9 @@ export default function App() {
         String(result.verificationUrl || 'https://www.seedr.cc/devices')
       );
       setSeedrConnectExpiresIn(Number(result.expiresIn || 0));
+      setSeedrConnectPollInterval(
+        Math.max(2, Math.min(30, Number(result.interval || 5)))
+      );
       setSeedrConnectStatus('pending');
     } catch (error: any) {
       setSeedrConnectStatus('error');
@@ -207,7 +211,10 @@ export default function App() {
     };
 
     void poll();
-    const timer = window.setInterval(() => { void poll(); }, 2000);
+    const timer = window.setInterval(
+      () => { void poll(); },
+      Math.max(2000, seedrConnectPollInterval * 1000)
+    );
     return () => {
       stopped = true;
       window.clearInterval(timer);
@@ -215,7 +222,8 @@ export default function App() {
   }, [
     seedrOnboardingOpen,
     seedrOnboardingStep,
-    seedrConnectStatus
+    seedrConnectStatus,
+    seedrConnectPollInterval
   ]);
 
   const [activeTab, setActiveTab] = useState<'search' | 'files' | 'shared' | 'activity' | 'storage'>(() => {
@@ -3540,6 +3548,7 @@ export default function App() {
                       onClick={() => {
                         setSeedrConnectCode('');
                         setSeedrConnectExpiresIn(0);
+                        setSeedrConnectPollInterval(5);
                         setSeedrConnectError('');
                         setSeedrConnectStatus('idle');
                       }}
@@ -3555,6 +3564,7 @@ export default function App() {
                   onClick={() => {
                     setSeedrOnboardingStep('welcome');
                     setSeedrConnectStatus('idle');
+                    setSeedrConnectPollInterval(5);
                     setSeedrConnectError('');
                   }}
                   className="mt-5 w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700"
