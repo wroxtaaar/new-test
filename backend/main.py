@@ -31,6 +31,7 @@ logger = logging.getLogger("torrent-studio")
 SEEDR_BASE = "https://www.seedr.cc/api/v0.1/p"
 SEEDR_MEDIA_BASE = "https://www.seedr.cc/api"
 SEEDR_V2_BASE = "https://v2.seedr.cc/api/v0.1/p"
+SEEDR_PAT_BASE = "https://www.seedr.cc/api/v0.1/p"
 # Legacy developer-level Seedr credentials remain supported only when explicitly enabled.
 # Normal requests use a per-browser Seedr connection established through device auth.
 SEEDR_TOKEN = os.getenv("SEEDR_API_TOKEN", "").strip()
@@ -165,6 +166,7 @@ def _seedr_empty_session() -> dict[str, Any]:
         "access_token": "",
         "refresh_token": "",
         "token_type": "Bearer",
+        "auth_mode": "legacy",
         "device": None,
         "created_at": now,
         "last_seen": now,
@@ -187,6 +189,7 @@ def _seedr_session_cookie_value(session_id: str, session: dict[str, Any]) -> str
         "access": str(session.get("access_token") or ""),
         "refresh": str(session.get("refresh_token") or ""),
         "type": str(session.get("token_type") or "Bearer"),
+        "mode": str(session.get("auth_mode") or "legacy"),
         "device": session.get("device") if isinstance(session.get("device"), dict) else None,
         "created": float(session.get("created_at") or time.time()),
         "last": time.time(),
@@ -216,6 +219,7 @@ def _seedr_restore_session(raw_cookie: str) -> tuple[str, dict[str, Any]] | None
             "access_token": normalize_seedr_token(str(payload.get("access") or "")),
             "refresh_token": str(payload.get("refresh") or "").strip(),
             "token_type": str(payload.get("type") or "Bearer").strip() or "Bearer",
+            "auth_mode": str(payload.get("mode") or "legacy").strip().lower() or "legacy",
             "device": payload.get("device") if isinstance(payload.get("device"), dict) else None,
             "created_at": float(payload.get("created") or now),
             "last_seen": now,
@@ -237,6 +241,12 @@ def _seedr_session_token(session_id: str) -> str:
     return normalize_seedr_token(str(session.get("access_token") or "")) if session else ""
 
 
+def _seedr_session_auth_mode(session_id: str) -> str:
+    session = _seedr_sessions.get(session_id)
+    mode = str(session.get("auth_mode") or "legacy").strip().lower() if session else "legacy"
+    return mode if mode in {"legacy", "pat"} else "legacy"
+
+
 def _seedr_session_fingerprint(session_id: str) -> str:
     """Short non-secret identifier for correlating session logs."""
     if not session_id:
@@ -253,6 +263,7 @@ def _clear_seedr_session_token(session_id: str | None = None) -> None:
     session["access_token"] = ""
     session["refresh_token"] = ""
     session["token_type"] = "Bearer"
+    session["auth_mode"] = "legacy"
     session["device"] = None
     session["last_seen"] = time.time()
 
@@ -1279,7 +1290,10 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
         )
 
     request_path = str(path).lstrip("/")
-    url = f"{str(base_url).rstrip("/")}/{request_path}"
+    selected_base_url = base_url
+    if base_url == SEEDR_BASE and _seedr_session_auth_mode(_seedr_request_session_id.get().strip()) == "pat":
+        selected_base_url = SEEDR_PAT_BASE
+    url = f"{str(selected_base_url).rstrip("/")}/{request_path}"
     token = normalize_seedr_token(current_seedr_token())
 
     kwargs: dict[str, Any] = {}
@@ -2783,7 +2797,7 @@ async def seedr_session(request: Request):
         try:
             token_ctx = _seedr_request_token.set(token)
             try:
-                await seedr_request("/user")
+                await seedr_request("/tasks" if _seedr_session_auth_mode(session_id) == "pat" else "/user")
             finally:
                 _seedr_request_token.reset(token_ctx)
             connected = True
@@ -2794,6 +2808,112 @@ async def seedr_session(request: Request):
         "connected": connected,
         "csrfToken": str(session.get("csrf_token") or ""),
     }
+
+
+async def _validate_seedr_pat(token: str) -> None:
+    token = normalize_seedr_token(token)
+    if not token:
+        raise SeedrError("SEEDR_PAT_MISSING", 400, "A Seedr Personal Access Token is required.")
+
+    endpoints = (
+        f"{SEEDR_PAT_BASE}/fs/root/contents",
+        f"{SEEDR_PAT_BASE}/tasks",
+        f"{SEEDR_V2_BASE}/fs/root/contents",
+        f"{SEEDR_V2_BASE}/tasks",
+    )
+    saw_unauthorized = False
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        for url in endpoints:
+            try:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                logger.info("Seedr PAT validation transport error: %s", exc)
+                continue
+
+            raw = response.text
+            if 200 <= response.status_code < 300:
+                logger.info("Seedr PAT validation succeeded")
+                return
+
+            if response.status_code == 401:
+                saw_unauthorized = True
+                continue
+
+            if response.status_code in {404, 405, 403}:
+                continue
+
+            try:
+                data = response.json() if raw else {}
+                reason = str(
+                    data.get("error_description")
+                    or data.get("reason_phrase")
+                    or data.get("message")
+                    or data.get("error")
+                    or ""
+                ).strip()
+            except Exception:
+                reason = ""
+
+            raise SeedrError(
+                "SEEDR_PAT_REJECTED",
+                502,
+                reason or f"Seedr PAT validation failed (HTTP {response.status_code}).",
+            )
+
+    if saw_unauthorized:
+        raise SeedrError(
+            "SEEDR_PAT_REJECTED",
+            401,
+            "Seedr rejected the Personal Access Token. Copy a fresh PAT from Seedr and try again.",
+        )
+
+    raise SeedrError(
+        "SEEDR_PAT_VALIDATION_FAILED",
+        502,
+        "Seedr could not validate the Personal Access Token right now.",
+    )
+
+
+@app.post("/api/seedr/connect/pat")
+async def seedr_connect_pat(request: Request):
+    session_id = _seedr_request_session_id.get().strip()
+    session = _seedr_get_session(session_id)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Request body must be JSON.")
+
+    raw_pat = payload.get("pat") or payload.get("token")
+    if not isinstance(raw_pat, str):
+        raise HTTPException(400, "A Seedr Personal Access Token is required.")
+
+    pat = normalize_seedr_token(raw_pat)
+    if not pat:
+        raise HTTPException(400, "A Seedr Personal Access Token is required.")
+
+    await _validate_seedr_pat(pat)
+
+    session["access_token"] = pat
+    session["refresh_token"] = ""
+    session["token_type"] = "Bearer"
+    session["auth_mode"] = "pat"
+    session["device"] = None
+    session["last_seen"] = time.time()
+
+    logger.info(
+        "Seedr PAT connected: session=%s token_length=%s",
+        _seedr_session_fingerprint(session_id),
+        len(pat),
+    )
+    return {"status": "connected", "connected": True}
 
 
 @app.post("/api/seedr/connect/start")
@@ -3111,7 +3231,7 @@ async def seedr_token_diagnostic():
         "tokenLength": len(token),
         "tokenFingerprint": fingerprint,
         "checks": {
-            "user": await check("/user"),
+            "user": await check("/tasks" if _seedr_session_auth_mode(_seedr_request_session_id.get().strip()) == "pat" else "/user"),
         },
     }
 
@@ -3130,7 +3250,9 @@ async def seedr_auth_status():
         # The old working integration treats a successful /user call as the
         # authentication test. Do the same here; /user is explicitly documented
         # by Seedr for Bearer-authenticated requests.
-        await seedr_request("/user")
+        await seedr_request(
+            "/tasks" if _seedr_session_auth_mode(_seedr_request_session_id.get().strip()) == "pat" else "/user"
+        )
         return {
             "configured": True,
             "authenticated": True,
@@ -3152,27 +3274,42 @@ async def seedr_quota():
         return {"configured": False, "maxSpace": 0, "usedSpace": 0, "remainingSpace": 0}
 
     try:
-        result = seedr_data(await seedr_request("/user"))
+        is_pat = _seedr_session_auth_mode(_seedr_request_session_id.get().strip()) == "pat"
+        result = seedr_data(await seedr_request("/fs/root/contents" if is_pat else "/user"))
         storage = result.get("account", {}).get("storage", {}) if isinstance(result, dict) else {}
         if not isinstance(storage, dict):
             storage = result.get("storage", {}) if isinstance(result, dict) else {}
         result_dict = result if isinstance(result, dict) else {}
-        max_space = int(float(
-            storage.get("limit")
-            or storage.get("max_space")
-            or storage.get("maxSpace")
-            or result_dict.get("max_space", 0)
-            or result_dict.get("space_max", 0)
-            or 0
-        ))
-        used = int(float(
-            storage.get("used")
-            or storage.get("used_space")
-            or storage.get("usedSpace")
-            or result_dict.get("used_space", 0)
-            or result_dict.get("space_used", 0)
-            or 0
-        ))
+        if is_pat:
+            max_space = int(float(
+                result_dict.get("space_max", 0)
+                or result_dict.get("max_space", 0)
+                or result_dict.get("maxSpace", 0)
+                or storage.get("limit", 0)
+            ))
+            used = int(float(
+                result_dict.get("space_used", 0)
+                or result_dict.get("used_space", 0)
+                or result_dict.get("usedSpace", 0)
+                or storage.get("used", 0)
+            ))
+        else:
+            max_space = int(float(
+                storage.get("limit")
+                or storage.get("max_space")
+                or storage.get("maxSpace")
+                or result_dict.get("max_space", 0)
+                or result_dict.get("space_max", 0)
+                or 0
+            ))
+            used = int(float(
+                storage.get("used")
+                or storage.get("used_space")
+                or storage.get("usedSpace")
+                or result_dict.get("used_space", 0)
+                or result_dict.get("space_used", 0)
+                or 0
+            ))
     except SeedrError:
         raise
     except Exception as exc:
