@@ -236,6 +236,13 @@ def _seedr_session_token(session_id: str) -> str:
     session = _seedr_sessions.get(session_id)
     return normalize_seedr_token(str(session.get("access_token") or "")) if session else ""
 
+
+def _seedr_session_fingerprint(session_id: str) -> str:
+    """Short non-secret identifier for correlating session logs."""
+    if not session_id:
+        return "none"
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
+
 def _clear_seedr_session_token(session_id: str | None = None) -> None:
     sid = session_id or _seedr_request_session_id.get().strip()
     if not sid:
@@ -1268,7 +1275,7 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
         raise SeedrError(
             "SEEDR_TOKEN_MISSING",
             503,
-            "Seedr API token is not configured. Set SEEDR_API_TOKEN in Render.",
+            "No Seedr account is connected to this browser session.",
         )
 
     request_path = str(path).lstrip("/")
@@ -1288,11 +1295,8 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
 
     async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
         tried_tokens: list[str] = []
+        # Never fall back from one browser session to another Seedr credential.
         candidates = [token]
-        # The legacy helper may discover a token hidden in a base64 JSON export.
-        legacy = seedr_access_token()
-        if legacy and legacy != token:
-            candidates.append(legacy)
 
         last_status = 0
         last_data: Any = None
@@ -1335,10 +1339,6 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
                 (raw[:500] if raw else "<empty>"),
             )
 
-            # If a token-export wrapper was copied into Render, retry once with
-            # its extracted access_token before classifying it as rejected.
-            if response.status_code == 401 and candidate != candidates[-1]:
-                continue
             break
 
     code, status_code, detail = seedr_problem(last_status, last_data, last_raw)
@@ -2801,6 +2801,14 @@ async def seedr_connect_start(request: Request):
     session_id = _seedr_request_session_id.get().strip()
     session = _seedr_get_session(session_id)
 
+    logger.info(
+        "Seedr connect start: session=%s cookie_present=%s has_device=%s has_token=%s",
+        _seedr_session_fingerprint(session_id),
+        bool(request.cookies.get(SEEDR_SESSION_COOKIE)),
+        bool(isinstance(session.get("device"), dict)),
+        bool(_seedr_session_token(session_id)),
+    )
+
     token = current_seedr_token()
     if token:
         return {"status": "connected", "connected": True}
@@ -2850,6 +2858,12 @@ async def seedr_connect_start(request: Request):
         poll_interval = int(float(data.get("interval") or 5))
         poll_interval = max(2, min(30, poll_interval))
         session["device"]["interval"] = poll_interval
+        logger.info(
+            "Seedr connect start stored device: session=%s expires_in=%s interval=%s",
+            _seedr_session_fingerprint(session_id),
+            expires_in,
+            poll_interval,
+        )
         return {
             "status": "pending",
             "connected": False,
@@ -2891,6 +2905,15 @@ async def seedr_connect_status(request: Request):
     session_id = _seedr_request_session_id.get().strip()
     session = _seedr_get_session(session_id)
     token = _seedr_session_token(session_id)
+    device = session.get("device")
+
+    logger.info(
+        "Seedr connect status: session=%s cookie_present=%s has_device=%s has_token=%s",
+        _seedr_session_fingerprint(session_id),
+        bool(request.cookies.get(SEEDR_SESSION_COOKIE)),
+        bool(isinstance(device, dict)),
+        bool(token),
+    )
 
     if token:
         try:
@@ -2909,7 +2932,12 @@ async def seedr_connect_status(request: Request):
 
     device = session.get("device")
     if not isinstance(device, dict):
-        return {"status": "idle", "connected": False}
+        return {
+            "status": "error",
+            "connected": False,
+            "code": "SEEDR_SESSION_LOST",
+            "message": "The Seedr connection session was lost. Start the connection again.",
+        }
 
     expires_at = float(device.get("expires_at") or 0)
     if expires_at and time.time() >= expires_at:
