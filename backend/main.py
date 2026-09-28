@@ -218,7 +218,21 @@ async def attach_seedr_session(request: Request, call_next):
     token_ctx = _seedr_request_token.set(_seedr_session_token(session_id))
     session_ctx = _seedr_request_session_id.set(session_id)
     try:
-        response = await call_next(request)
+        path = request.url.path or ""
+        method = request.method.upper()
+        if path.startswith("/api/seedr/") and method not in {"GET", "HEAD", "OPTIONS"}:
+            if not _seedr_session_csrf_ok(request):
+                response = JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": "Seedr session security check failed.",
+                        "code": "SEEDR_CSRF_INVALID",
+                    },
+                )
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
     finally:
         _seedr_request_token.reset(token_ctx)
         _seedr_request_session_id.reset(session_ctx)
@@ -256,17 +270,6 @@ def _seedr_session_csrf_ok(request: Request) -> bool:
     supplied = str(request.headers.get("X-Torrent-Studio-CSRF") or "")
     return bool(expected and supplied and secrets.compare_digest(expected, supplied))
 
-@app.middleware("http")
-async def enforce_seedr_mutation_csrf(request: Request, call_next):
-    path = request.url.path or ""
-    method = request.method.upper()
-    if path.startswith("/api/seedr/") and method not in {"GET", "HEAD", "OPTIONS"}:
-        if not _seedr_session_csrf_ok(request):
-            return JSONResponse(
-                status_code=403,
-                content={"error": "Seedr session security check failed.", "code": "SEEDR_CSRF_INVALID"},
-            )
-    return await call_next(request)
 
 @app.middleware("http")
 async def add_timing_allow_origin(request: Request, call_next):
@@ -958,7 +961,7 @@ def normalize_seedr_token(value: str) -> str:
 
 def seedr_access_token() -> str:
     """Access token used only by Seedr's legacy resource.php API."""
-    return normalize_seedr_token(SEEDR_TOKEN)
+    return normalize_seedr_token(current_seedr_token())
 
 
 async def legacy_seedr_request(
@@ -1056,7 +1059,7 @@ async def legacy_seedr_list_contents(folder_id: str = "0") -> Any:
     filesystem endpoint while still permitting list_contents through Seedr's
     legacy resource API.
     """
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     access_token = seedr_access_token()
@@ -1120,7 +1123,7 @@ async def legacy_seedr_list_contents(folder_id: str = "0") -> Any:
 
 async def seedr_root_request() -> Any:
     """Fetch the Seedr account root using Seedr's dedicated root endpoint."""
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     url = "https://www.seedr.cc/api/folder"
@@ -1211,7 +1214,7 @@ def seedr_error_message(status_code: int, data: Any, raw: str) -> str:
     return seedr_problem(status_code, data, raw)[2]
 
 async def seedr_request(path: str, method: str = "GET", body: Any = None, form: bool = False, base_url: str = SEEDR_BASE) -> Any:
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise SeedrError(
             "SEEDR_TOKEN_MISSING",
             503,
@@ -2988,7 +2991,7 @@ async def seedr_connect_disconnect(request: Request):
 
 @app.get("/api/seedr/token-diagnostic")
 async def seedr_token_diagnostic():
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         return {
             "configured": False,
             "code": "SEEDR_TOKEN_MISSING",
@@ -2997,7 +3000,7 @@ async def seedr_token_diagnostic():
             "checks": {},
         }
 
-    token = normalize_seedr_token(SEEDR_TOKEN)
+    token = normalize_seedr_token(current_seedr_token())
     fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else None
 
     async def check(path: str) -> dict[str, Any]:
@@ -3022,7 +3025,7 @@ async def seedr_token_diagnostic():
 
 @app.get("/api/seedr/auth-status")
 async def seedr_auth_status():
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         return {
             "configured": False,
             "authenticated": False,
@@ -3052,7 +3055,7 @@ async def seedr_auth_status():
 
 @app.get("/api/seedr/quota")
 async def seedr_quota():
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         return {"configured": False, "maxSpace": 0, "usedSpace": 0, "remainingSpace": 0}
 
     try:
@@ -3239,7 +3242,7 @@ async def seedr_add_selected(request: Request):
 
 @app.post("/api/seedr/add")
 async def seedr_add(request: Request):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     # Direct Seedr mode:
@@ -3640,7 +3643,7 @@ async def build_seedr_metadata_tree(
 async def get_seedr_metadata_tree(force_refresh: bool = False) -> dict[str, Any]:
     global _seedr_metadata_cache, _seedr_metadata_task
 
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         return {"configured": False, "root": None, "folders": []}
 
     now = asyncio.get_running_loop().time()
@@ -3776,7 +3779,7 @@ async def seedr_library_metadata(fresh: bool = Query(False)):
 
 @app.get("/api/seedr/folders/{folder_id}/contents")
 async def seedr_folder_contents(folder_id: str):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         return {"configured": False, "folderId": folder_id, "files": [], "folders": []}
 
     payload = await seedr_folder_payload(folder_id)
@@ -3803,7 +3806,7 @@ async def seedr_folder_contents(folder_id: str):
 async def seedr_files():
     # Backwards-compatible full file endpoint. New UI code uses
     # /api/seedr/library + /api/seedr/folders/{id}/contents instead.
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         return {"configured": False, "files": []}
 
     root = "0"
@@ -3963,7 +3966,7 @@ def seedr_v2_bearer_token() -> str:
 
 
 async def seedr_v2_request(path: str) -> Any:
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
     bearer = seedr_v2_bearer_token()
     if not bearer:
@@ -4201,7 +4204,7 @@ async def seedr_file_stream(
     type: str = Query("video"),
     name: str = Query(""),
 ):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     resolved_id = await resolve_seedr_stream_id(file_id, name)
@@ -4255,7 +4258,7 @@ async def seedr_file_stream(
 
 @app.get("/api/seedr/hls/{file_id}")
 async def seedr_hls_manifest(file_id: str):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     manifest, final_url = await _fetch_seedr_hls_manifest(file_id)
@@ -4276,7 +4279,7 @@ async def seedr_hls_manifest(file_id: str):
 
 @app.get("/api/seedr/hls/{file_id}/resource")
 async def seedr_hls_resource(request: Request, file_id: str, u: str = Query(...)):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     target = _decode_hls_target(u)
@@ -4354,7 +4357,7 @@ async def seedr_video_media_stats(file_id: str):
 
 @app.get("/api/seedr/media/video/{file_id}")
 async def seedr_video_media(file_id: str, request: Request):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     upstream_url = await seedr_v2_video_url(file_id)
@@ -4416,7 +4419,7 @@ async def seedr_video_media(file_id: str, request: Request):
 
 
 async def seedr_audio_media(file_id: str, request: Request):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     headers = {"Accept": "*/*"}
@@ -4441,7 +4444,7 @@ async def seedr_audio_media(file_id: str, request: Request):
 
 @app.delete("/api/seedr/tasks/{tid}")
 async def seedr_task_delete(tid: str):
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
     global _seedr_metadata_cache
     try:
