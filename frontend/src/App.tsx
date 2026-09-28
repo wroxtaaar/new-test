@@ -74,47 +74,15 @@ import { TorrentSearchPanel } from './components/TorrentSearchPanel.tsx';
 
 export default function App() {
   // Navigation & Theme
-  // Seedr is connected per browser session through Seedr's device-code flow.
-  // No Seedr password or developer token is collected by the frontend.
-  const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'connect'>('welcome');
+  // Seedr is connected per browser session using the user's Personal Access Token.
+  // The PAT is sent only to our backend over HTTPS and is never stored in localStorage.
+  const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'pat'>('welcome');
   const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(true);
   const [seedrConnected, setSeedrConnected] = useState(false);
   const [seedrSessionReady, setSeedrSessionReady] = useState(false);
-  const [seedrConnectStatus, setSeedrConnectStatus] = useState<'idle' | 'starting' | 'pending' | 'connected' | 'expired' | 'error'>('idle');
-  const [seedrConnectCode, setSeedrConnectCode] = useState('');
-  const [seedrVerificationUrl, setSeedrVerificationUrl] = useState('https://www.seedr.cc/devices');
-  const [seedrConnectExpiresIn, setSeedrConnectExpiresIn] = useState(0);
-  const [seedrConnectPollInterval, setSeedrConnectPollInterval] = useState(5);
+  const [seedrPat, setSeedrPat] = useState('');
+  const [seedrPatSubmitting, setSeedrPatSubmitting] = useState(false);
   const [seedrConnectError, setSeedrConnectError] = useState('');
-
-  const startSeedrConnection = useCallback(async () => {
-    setSeedrConnectStatus('starting');
-    setSeedrConnectError('');
-    try {
-      const result = await api.startSeedrConnection();
-      if (result.connected) {
-        setSeedrConnected(true);
-        setSeedrConfigured(true);
-        setSeedrConnectStatus('connected');
-        return;
-      }
-
-      setSeedrConnectCode(String(result.userCode || ''));
-      setSeedrVerificationUrl(
-        String(result.verificationUrl || 'https://www.seedr.cc/devices')
-      );
-      setSeedrConnectExpiresIn(Number(result.expiresIn || 0));
-      setSeedrConnectPollInterval(
-        Math.max(2, Math.min(30, Number(result.interval || 5)))
-      );
-      setSeedrConnectStatus('pending');
-    } catch (error: any) {
-      setSeedrConnectStatus('error');
-      setSeedrConnectError(
-        String(error?.message || 'Could not start the Seedr account connection.')
-      );
-    }
-  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -125,7 +93,6 @@ export default function App() {
         if (session.connected) {
           setSeedrConnected(true);
           setSeedrConfigured(true);
-          setSeedrConnectStatus('connected');
           setSeedrOnboardingOpen(false);
         }
       })
@@ -138,93 +105,31 @@ export default function App() {
     };
   }, []);
 
-  // Start the device flow as soon as the user chooses "Connect Seedr account".
-  useEffect(() => {
-    if (
-      !seedrSessionReady ||
-      !seedrOnboardingOpen ||
-      seedrOnboardingStep !== 'connect' ||
-      seedrConnected ||
-      seedrConnectStatus !== 'idle'
-    ) {
-      return;
-    }
-    void startSeedrConnection();
-  }, [
-    seedrSessionReady,
-    seedrOnboardingOpen,
-    seedrOnboardingStep,
-    seedrConnected,
-    seedrConnectStatus,
-    startSeedrConnection
-  ]);
-
-  // Poll Seedr until the user approves the device code.
-  useEffect(() => {
-    if (
-      !seedrOnboardingOpen ||
-      seedrOnboardingStep !== 'connect' ||
-      seedrConnectStatus !== 'pending'
-    ) {
+  const connectSeedrWithPat = useCallback(async () => {
+    const pat = seedrPat.trim();
+    if (!pat) {
+      setSeedrConnectError('Paste your Seedr Personal Access Token.');
       return;
     }
 
-    let stopped = false;
-    const poll = async () => {
-      try {
-        const result = await api.pollSeedrConnection();
-        if (stopped) return;
-
-        if (result.status === 'connected' || result.connected) {
-          setSeedrConnected(true);
-          setSeedrConfigured(true);
-          setSeedrConnectStatus('connected');
-          return;
-        }
-
-        if (result.status === 'expired') {
-          setSeedrConnectStatus('expired');
-          setSeedrConnectError(
-            result.message || 'The Seedr authorization code expired.'
-          );
-          return;
-        }
-
-        if (result.status === 'error') {
-          setSeedrConnectStatus('error');
-          setSeedrConnectError(
-            result.message || 'Seedr could not authorize this connection.'
-          );
-          return;
-        }
-
-        if (typeof result.expiresIn === 'number') {
-          setSeedrConnectExpiresIn(result.expiresIn);
-        }
-      } catch (error: any) {
-        if (!stopped) {
-          setSeedrConnectError(
-            String(error?.message || 'Waiting for Seedr authorization...')
-          );
-        }
+    setSeedrPatSubmitting(true);
+    setSeedrConnectError('');
+    try {
+      const result = await api.connectSeedrPat(pat);
+      if (!result.connected) {
+        throw new Error('Seedr did not accept the Personal Access Token.');
       }
-    };
-
-    void poll();
-    const timer = window.setInterval(
-      () => { void poll(); },
-      Math.max(2000, seedrConnectPollInterval * 1000)
-    );
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [
-    seedrOnboardingOpen,
-    seedrOnboardingStep,
-    seedrConnectStatus,
-    seedrConnectPollInterval
-  ]);
+      setSeedrPat('');
+      setSeedrConnected(true);
+      setSeedrConfigured(true);
+    } catch (error: any) {
+      setSeedrConnectError(
+        String(error?.message || 'Seedr rejected the Personal Access Token.')
+      );
+    } finally {
+      setSeedrPatSubmitting(false);
+    }
+  }, [seedrPat]);
 
   const [activeTab, setActiveTab] = useState<'search' | 'files' | 'shared' | 'activity' | 'storage'>(() => {
     try {
@@ -3431,8 +3336,8 @@ export default function App() {
                   {seedrConnected
                     ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
                     : seedrOnboardingStep === 'welcome'
-                      ? 'Torrent Studio uses your personal Seedr storage. Create a Seedr account or continue if you already have one.'
-                      : 'Securely connect your Seedr account. Your login stays on Seedr — Torrent Studio never receives your password.'}
+                      ? 'Use your own Seedr account so your torrents and storage stay separate from other users.'
+                      : 'Paste your Seedr Personal Access Token. Your Seedr password is never entered into Torrent Studio.'}
                 </p>
               </div>
             </div>
@@ -3440,9 +3345,9 @@ export default function App() {
             {seedrOnboardingStep === 'welcome' && !seedrConnected ? (
               <>
                 <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                  <p className="text-sm font-semibold text-slate-200">New to Seedr?</p>
+                  <p className="text-sm font-semibold text-slate-200">Use your own Seedr account</p>
                   <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Create your Seedr account using email and password, then return here and connect it. For the simplest setup, don’t use Google or Facebook sign-in.
+                    Create a free Seedr account, then generate a Personal Access Token from Seedr Settings. Existing Seedr users can use an existing PAT.
                   </p>
                 </div>
                 <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -3452,7 +3357,11 @@ export default function App() {
                   <button
                     type="button"
                     disabled={!seedrSessionReady}
-                    onClick={() => setSeedrOnboardingStep('connect')}
+                    onClick={() => {
+                      setSeedrPat('');
+                      setSeedrConnectError('');
+                      setSeedrOnboardingStep('pat');
+                    }}
                     className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Connect Seedr account
@@ -3464,7 +3373,7 @@ export default function App() {
                 <div className="mt-5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-3.5">
                   <p className="text-sm font-semibold text-emerald-200">Connected successfully</p>
                   <p className="mt-1 text-xs leading-5 text-slate-300">
-                    Your Seedr account is connected to this browser session. No developer Seedr storage is being used.
+                    This browser session now uses your Seedr account. No shared developer Seedr storage is used.
                   </p>
                 </div>
                 <button
@@ -3477,95 +3386,71 @@ export default function App() {
               </>
             ) : (
               <>
-                {seedrConnectStatus === 'starting' && (
-                  <div className="mt-5 rounded-xl border border-slate-700 bg-slate-950/60 p-4 text-sm text-slate-300">
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
-                      Preparing your Seedr connection…
-                    </div>
-                  </div>
-                )}
-
-                {seedrConnectStatus === 'pending' && (
-                  <div className="mt-5 space-y-3">
-                    <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
-                      <p className="text-sm font-semibold text-emerald-200">Connect your Seedr account</p>
-                      <p className="mt-1 text-xs leading-5 text-slate-300">
-                        Open Seedr, sign in, and approve Torrent Studio. You only need to do this once; your Seedr account remains available on your other devices.
-                      </p>
-                      <div className="mt-3 flex items-center gap-2">
-                        <div className="flex-1 rounded-lg bg-slate-950 px-3 py-2.5 font-mono text-center text-lg font-bold tracking-[0.18em] text-slate-100">
-                          {seedrConnectCode || '—'}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!seedrConnectCode) return;
-                            void navigator.clipboard?.writeText(seedrConnectCode);
-                          }}
-                          className="rounded-lg border border-slate-700 bg-slate-800 p-2.5 text-slate-300 hover:text-emerald-300"
-                          title="Copy device code"
-                        >
-                          <Copy className="h-4 w-4" />
-                        </button>
-                      </div>
-                      {seedrConnectExpiresIn > 0 && (
-                        <p className="mt-2 text-[11px] text-slate-400">
-                          Code expires in about {Math.ceil(seedrConnectExpiresIn / 60)} minute{Math.ceil(seedrConnectExpiresIn / 60) === 1 ? '' : 's'}.
+                <div className="mt-5 space-y-3">
+                  <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-emerald-200">Seedr Personal Access Token</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-300">
+                          Copy your PAT from Seedr Settings → API / External Access.
                         </p>
-                      )}
+                      </div>
+                      <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-400" />
                     </div>
+
+                    <input
+                      type="password"
+                      value={seedrPat}
+                      onChange={(e) => setSeedrPat(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !seedrPatSubmitting) {
+                          void connectSeedrWithPat();
+                        }
+                      }}
+                      placeholder="sdp_…"
+                      autoComplete="off"
+                      spellCheck={false}
+                      className="mt-4 w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-3 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/10"
+                    />
 
                     <a
-                      href={seedrVerificationUrl}
+                      href="https://www.seedr.cc/app/settings"
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-700"
+                      className="mt-3 inline-flex items-center gap-2 text-xs font-semibold text-emerald-300 hover:text-emerald-200"
                     >
-                      Connect with Seedr <ExternalLink className="h-4 w-4" />
+                      Open Seedr Settings <ExternalLink className="h-3.5 w-3.5" />
                     </a>
+                  </div>
 
-                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-400">
-                      <div className="flex items-center gap-2 text-slate-300">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
-                        Waiting for Seedr approval…
-                      </div>
-                      <p className="mt-1">Keep this window open. We check every two seconds.</p>
-                       <p className="mt-2 text-[11px] leading-4 text-slate-500">If you created Seedr with Google or Facebook, use Seedr’s password-reset option first. For the simplest setup, create your Seedr account with email and password.</p>
+                  {seedrConnectError && (
+                    <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-3.5">
+                      <p className="text-xs leading-5 text-amber-100">{seedrConnectError}</p>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {(seedrConnectStatus === 'error' || seedrConnectStatus === 'expired') && (
-                  <div className="mt-5 rounded-xl border border-amber-500/25 bg-amber-500/10 p-4">
-                    <p className="text-sm font-semibold text-amber-200">
-                      {seedrConnectStatus === 'expired' ? 'Authorization expired' : 'Connection could not be started'}
-                    </p>
-                    <p className="mt-1 text-xs leading-5 text-slate-300">
-                      {seedrConnectError || 'Please start a new Seedr connection and try again.'}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSeedrConnectCode('');
-                        setSeedrConnectExpiresIn(0);
-                        setSeedrConnectPollInterval(5);
-                        setSeedrConnectError('');
-                        setSeedrConnectStatus('idle');
-                      }}
-                      className="mt-3 w-full rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700"
-                    >
-                      Try again
-                    </button>
-                  </div>
-                )}
+                  <button
+                    type="button"
+                    disabled={seedrPatSubmitting || !seedrPat.trim()}
+                    onClick={() => { void connectSeedrWithPat(); }}
+                    className="w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {seedrPatSubmitting ? (
+                      <span className="inline-flex items-center justify-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Verifying with Seedr…
+                      </span>
+                    ) : (
+                      'Connect with PAT'
+                    )}
+                  </button>
+                </div>
 
                 <button
                   type="button"
                   onClick={() => {
                     setSeedrOnboardingStep('welcome');
-                    setSeedrConnectStatus('idle');
-                    setSeedrConnectPollInterval(5);
+                    setSeedrPat('');
                     setSeedrConnectError('');
                   }}
                   className="mt-5 w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700"
@@ -3576,11 +3461,11 @@ export default function App() {
             )}
 
             <p className="mt-4 text-center text-[11px] leading-4 text-slate-500">
-              Your Seedr password is entered only on Seedr. Torrent Studio stores only the authorization needed to use your Seedr account.
+              Your Seedr password is never sent to Torrent Studio. Your PAT is stored only in the encrypted HttpOnly browser session and is used only for your Seedr account.
             </p>
           </div>
         </div>
-      )}
+      )}}
 
     </div>
   );
