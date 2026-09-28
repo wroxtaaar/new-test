@@ -183,7 +183,7 @@ def current_seedr_token() -> str:
     if token:
         return normalize_seedr_token(token)
     if ALLOW_LEGACY_SEEDR_TOKEN and SEEDR_TOKEN:
-        return normalize_seedr_token(current_seedr_token())
+        return normalize_seedr_token(SEEDR_TOKEN)
     return ""
 
 def _seedr_session_token(session_id: str) -> str:
@@ -3220,29 +3220,36 @@ async def seedr_add_selected(request: Request):
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, "Invalid selected file index.") from exc
 
-    result = await seedr_add(
-        MagnetRequest(
-            magnet=magnet,
-            folder_id=body.get("folder_id"),
-            torrent_name=body.get("torrentName"),
-            size=sum(int(item["size"]) for item in normalized_manifest),
-            selected_indexes=normalized_selected,
-            manifest=normalized_manifest,
-        )
+    requested_folder = str(body.get("folder_id") or "").strip()
+    folder = int(requested_folder) if requested_folder.isdigit() else 0
+
+    task = unwrap_seedr_task(await add_task(magnet, folder))
+    tid = task_id(task)
+    if not tid:
+        raise HTTPException(502, "Seedr did not return a task id")
+
+    task_name = seedr_task_name(task) or str(body.get("torrentName") or "").strip() or f"Torrent {tid}"
+    task_folder_id = seedr_task_folder_id(task)
+    schedule_seedr_cleanup(str(tid), task_name, task_folder_id)
+
+    selection = await apply_seedr_file_selection(
+        str(tid),
+        len(normalized_manifest),
+        normalized_selected,
     )
 
     return {
         "backend": "seedr",
-        "taskId": result.get("task_id") or result.get("id") or (result.get("task") or {}).get("id"),
+        "taskId": int(tid) if tid.isdigit() else tid,
         "created": True,
-        "torrentName": result.get("torrent_name") or body.get("torrentName") or "",
-        "folderId": result.get("folder_id"),
+        "torrentName": task_name,
+        "folderId": task_folder_id,
         "selectedIndexes": normalized_selected,
-        "selectedSize": result.get("selectedSize"),
-        "totalSize": result.get("totalSize"),
-        "writeAccepted": bool(result.get("selectionApplied")),
-        "writeError": result.get("selectionError"),
-        "task": result.get("task"),
+        "selectedSize": sum(int(item["size"]) for item in normalized_manifest if int(item["index"]) in set(normalized_selected)),
+        "totalSize": sum(int(item["size"]) for item in normalized_manifest),
+        "writeAccepted": bool(selection.get("applied")),
+        "writeError": None,
+        "task": task,
     }
 
 @app.post("/api/seedr/add")
