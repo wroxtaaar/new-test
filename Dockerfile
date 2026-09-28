@@ -1,31 +1,31 @@
-FROM node:22-bookworm-slim AS build
+# Build the Vite frontend first.
+FROM node:22-alpine AS frontend-build
 
-WORKDIR /app
+WORKDIR /frontend
 
-COPY package*.json ./
+COPY frontend/package.json ./
 RUN npm install
 
-COPY . .
+COPY frontend/ ./
+
+# API calls default to the browser origin in the full-stack build.
 RUN npm run build
 
-FROM node:22-bookworm-slim AS runtime
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
-  && rm -rf /var/lib/apt/lists/*
+# Run FastAPI and serve the generated frontend from the same container.
+FROM python:3.12-slim
 
 WORKDIR /app
-ENV NODE_ENV=production
-ENV DATA_DIR=/app/data
 
-COPY package*.json ./
-RUN npm install --omit=dev \
-  && npm cache clean --force
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends aria2 \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app/dist ./dist
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN mkdir -p /app/data
+COPY backend/ ./
+COPY --from=frontend-build /frontend/dist ./frontend-dist
 
-EXPOSE 10000
+ENV PYTHONUNBUFFERED=1
 
-CMD ["npm", "start"]
+CMD ["sh", "-c", "uvicorn fullstack_app:app --host 0.0.0.0 --port ${PORT:-10000}"]

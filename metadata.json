@@ -1,8 +1,0 @@
-{
-  "name": "TeraBox Telegram Bot",
-  "description": "Headless backend bot service that downloads and delivers TeraBox files and videos to Telegram",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}

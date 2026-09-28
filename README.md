@@ -1,41 +1,69 @@
-# TeraBox Telegram Bot
+# Torrent Studio — Vercel + Render + Seedr
 
-Dockerized version of the working Google Colab bot.
+Clean split deployment of the full Torrent Studio UI.
 
-## Current migration
+## Architecture
 
-- Colab Google Drive persistence -> Docker named volume
-- Colab `/content/...` paths -> `/app/data/...`
-- Colab Secrets -> environment variables
-- Xvfb/Fluxbox/Chromium retained
-- Downloader engine retained from the working notebook
-- Telegram Bot API local-server support remains optional
+- **frontend/** — React + Vite, deployed to Vercel.
+- **backend/** — FastAPI, deployed to Render.
+- **1337x** — torrent search.
+- **Seedr** — cloud torrent storage/transfers.
+- No qBittorrent, Prowlarr, FlareSolverr, local torrent storage, or local torrent streaming on Render.
 
-## Run
+## Vercel
 
-1. Copy `.env.example` to `.env`
-2. Fill in the Telegram credentials.
-3. Build and start:
+Set the project Root Directory to `frontend`.
 
-```bash
-docker compose up -d --build
+Environment variable:
+
+```
+VITE_API_URL=https://YOUR-RENDER-SERVICE.onrender.com
 ```
 
-4. Logs:
+## Render
 
-```bash
-docker compose logs -f
+Set the service Root Directory to `backend`.
+
+Environment variables:
+
+```
+SEEDR_API_TOKEN=<your Seedr PAT>
+SEEDR_LIBRARY_FOLDER_ID=88718944
+SEEDR_MAX_SIZE_GB=5
 ```
 
-The first version intentionally keeps the local Telegram Bot API binary optional; without it, Telegram uses the normal cloud upload limit. We can add an ARM64-compatible local Bot API server after the base bot is verified.
+The Seedr token is a secret. Do not commit it to Git.
 
-## Render with Docker
+## Local development
 
-This repository includes a Dockerfile with `ffmpeg` installed for video remuxing.
+Backend:
 
-1. Create a Render Web Service from this repository.
-2. Choose `Docker` as the runtime, or use the included `render.yaml` Blueprint.
-3. Set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_BOT_TOKEN`, and `APP_URL` in Render.
-4. Set `APP_URL` to the deployed service URL, such as `https://terabox-bot.onrender.com`.
+```bash
+cd backend
+python -m venv .venv
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
 
-Render supplies `PORT` automatically. The free service uses temporary disk storage and may sleep when idle, which is suitable for personal occasional use but not continuous bot availability.
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Then set `VITE_API_URL=http://127.0.0.1:8000` for the frontend.
+
+## API
+
+- `GET /api/search?q=...`
+- `POST /api/seedr/add`
+- `POST /api/seedr/tasks/prepare`
+- `GET /api/seedr/tasks`
+- `GET /api/seedr/tasks/:id`
+- `GET /api/seedr/quota`
+- `GET /api/seedr/files`
+- `GET /api/seedr/files/:id/download`
+
+The preserved UI contains additional compatibility endpoints for its existing panels. Those endpoints do not start a qBittorrent process or create local torrent storage.
