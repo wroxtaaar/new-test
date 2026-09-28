@@ -2931,12 +2931,12 @@ async def seedr_connect_status(request: Request):
 
     try:
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            # Seedr's device authorization endpoint expects the original
+            # device_code. The current Seedr client implementations pass only
+            # device_code here; do not add client_id to this request.
             response = await client.get(
                 SEEDR_DEVICE_AUTHORIZE_URL,
-                params={
-                    "client_id": SEEDR_DEVICE_CLIENT_ID,
-                    "device_code": device_code,
-                },
+                params={"device_code": device_code},
                 headers={"Accept": "application/json"},
             )
 
@@ -2947,6 +2947,16 @@ async def seedr_connect_status(request: Request):
             data = {}
 
         access_token = _extract_seedr_access_token(data)
+        logger.info(
+            "Seedr device authorization poll: http=%s token_present=%s error=%s message=%s",
+            response.status_code,
+            bool(access_token),
+            str(data.get("error") or data.get("code") or "")[:120] if isinstance(data, dict) else "",
+            str(
+                (data.get("error_description") or data.get("message") or data.get("error") or "")
+                if isinstance(data, dict) else ""
+            )[:200],
+        )
         if access_token:
             refresh_token = ""
             token_type = "Bearer"
