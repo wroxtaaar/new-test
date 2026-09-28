@@ -41,13 +41,14 @@ VITE_API_URL=https://YOUR-RENDER-SERVICE.onrender.com
 
 Set the service Root Directory to `backend`.
 
-For the normal per-user flow, no personal `SEEDR_API_TOKEN` or shared `SEEDR_LIBRARY_FOLDER_ID` is required.
+For the normal per-user flow, no personal `SEEDR_API_TOKEN` or shared `SEEDR_LIBRARY_FOLDER_ID` is required. Set `SEEDR_SESSION_SECRET` to a stable random secret so encrypted personal Seedr sessions survive backend restarts. If it is omitted, personal connections reset when the backend process restarts.
 
 Optional settings:
 
 ```
 SEEDR_DEVICE_CLIENT_ID=seedr_xbmc
 SEEDR_SESSION_TTL_SECONDS=2592000
+SEEDR_SESSION_SECRET=<long-random-secret>
 CORS_ORIGINS=https://YOUR-VERCEL-DOMAIN.vercel.app
 ```
 
