@@ -3428,33 +3428,35 @@ export default function App() {
                       <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
                         <p className="text-xs font-semibold text-slate-200">Create your Seedr Personal Access Token</p>
                         <ol className="mt-2 space-y-1.5 pl-4 text-[11px] leading-4 text-slate-400 list-decimal">
-                          <li>Sign in to your Seedr account.</li>
-                          <li>Open <span className="font-semibold text-slate-300">Settings</span>.</li>
-                          <li>Scroll to <span className="font-semibold text-slate-300">Extensions, API &amp; External Access</span>.</li>
-                          <li>Open <span className="font-semibold text-slate-300">API Console</span>.</li>
-                          <li>Create/copy your <span className="font-semibold text-slate-300">Personal Access Token (PAT)</span>.</li>
+                          <li>Open the <span className="font-semibold text-slate-300">Seedr Personal Access Tokens</span> page.</li>
+                          <li>Give the token a descriptive <span className="font-semibold text-slate-300">name</span>.</li>
+                          <li>Set <span className="font-semibold text-slate-300">Expiration</span> to <span className="font-semibold text-slate-300">Never</span>.</li>
+                          <li>Under Scopes, click <span className="font-semibold text-slate-300">Read &amp; Add Torrents</span>.</li>
+                          <li>Click <span className="font-semibold text-slate-300">Generate Token</span>.</li>
+                          <li>Copy the token and save it somewhere safe.</li>
+                          <li>Paste that same token into Torrent Studio below and click <span className="font-semibold text-slate-300">Connect with PAT</span>.</li>
                         </ol>
                         <p className="mt-2 text-[11px] leading-4 text-slate-500">
-                          Paste the PAT here, not your Seedr password or an app password.
+                          Use the PAT here, not your Seedr password or an app password.
                         </p>
                         <a
-                          href="https://www.seedr.cc/app/settings"
+                          href="https://www.seedr.cc/api/v0.1/console/tokens"
                           target="_blank"
                           rel="noreferrer"
                           className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200"
                         >
-                          Open Seedr Settings <ExternalLink className="h-3 w-3" />
+                          Open Seedr Personal Access Tokens <ExternalLink className="h-3 w-3" />
                         </a>
                       </div>
                     )}
 
                     <a
-                      href="https://www.seedr.cc/app/settings"
+                      href="https://www.seedr.cc/api/v0.1/console/tokens"
                       target="_blank"
                       rel="noreferrer"
                       className="mt-3 inline-flex items-center gap-2 text-xs font-semibold text-emerald-300 hover:text-emerald-200"
                     >
-                      Open Seedr Settings <ExternalLink className="h-3.5 w-3.5" />
+                      Open Seedr Personal Access Tokens <ExternalLink className="h-3.5 w-3.5" />
                     </a>
                   </div>
 
