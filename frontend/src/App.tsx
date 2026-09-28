@@ -74,9 +74,149 @@ import { TorrentSearchPanel } from './components/TorrentSearchPanel.tsx';
 
 export default function App() {
   // Navigation & Theme
-  // This branch deliberately does not treat acknowledgement as Seedr authorization.
-  // Until per-user OAuth is implemented, visitors remain in the onboarding flow.
+  // Seedr is connected per browser session through Seedr's device-code flow.
+  // No Seedr password or developer token is collected by the frontend.
   const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'connect'>('welcome');
+  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(true);
+  const [seedrConnected, setSeedrConnected] = useState(false);
+  const [seedrSessionReady, setSeedrSessionReady] = useState(false);
+  const [seedrConnectStatus, setSeedrConnectStatus] = useState<'idle' | 'starting' | 'pending' | 'connected' | 'expired' | 'error'>('idle');
+  const [seedrConnectCode, setSeedrConnectCode] = useState('');
+  const [seedrVerificationUrl, setSeedrVerificationUrl] = useState('https://www.seedr.cc/devices');
+  const [seedrConnectExpiresIn, setSeedrConnectExpiresIn] = useState(0);
+  const [seedrConnectError, setSeedrConnectError] = useState('');
+
+  const startSeedrConnection = useCallback(async () => {
+    setSeedrConnectStatus('starting');
+    setSeedrConnectError('');
+    try {
+      const result = await api.startSeedrConnection();
+      if (result.connected) {
+        setSeedrConnected(true);
+        setSeedrConfigured(true);
+        setSeedrConnectStatus('connected');
+        return;
+      }
+
+      setSeedrConnectCode(String(result.userCode || ''));
+      setSeedrVerificationUrl(
+        String(result.verificationUrl || 'https://www.seedr.cc/devices')
+      );
+      setSeedrConnectExpiresIn(Number(result.expiresIn || 0));
+      setSeedrConnectStatus('pending');
+    } catch (error: any) {
+      setSeedrConnectStatus('error');
+      setSeedrConnectError(
+        String(error?.message || 'Could not start the Seedr account connection.')
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    void api.getSeedrSession()
+      .then(session => {
+        if (stopped) return;
+        setSeedrSessionReady(true);
+        if (session.connected) {
+          setSeedrConnected(true);
+          setSeedrConfigured(true);
+          setSeedrConnectStatus('connected');
+          setSeedrOnboardingOpen(false);
+        }
+      })
+      .catch(() => {
+        if (!stopped) setSeedrSessionReady(true);
+      });
+
+    return () => {
+      stopped = true;
+    };
+  }, []);
+
+  // Start the device flow as soon as the user chooses "I already have an account".
+  useEffect(() => {
+    if (
+      !seedrSessionReady ||
+      !seedrOnboardingOpen ||
+      seedrOnboardingStep !== 'connect' ||
+      seedrConnected ||
+      seedrConnectStatus !== 'idle'
+    ) {
+      return;
+    }
+    void startSeedrConnection();
+  }, [
+    seedrSessionReady,
+    seedrOnboardingOpen,
+    seedrOnboardingStep,
+    seedrConnected,
+    seedrConnectStatus,
+    startSeedrConnection
+  ]);
+
+  // Poll Seedr until the user approves the device code.
+  useEffect(() => {
+    if (
+      !seedrOnboardingOpen ||
+      seedrOnboardingStep !== 'connect' ||
+      seedrConnectStatus !== 'pending'
+    ) {
+      return;
+    }
+
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const result = await api.pollSeedrConnection();
+        if (stopped) return;
+
+        if (result.status === 'connected' || result.connected) {
+          setSeedrConnected(true);
+          setSeedrConfigured(true);
+          setSeedrConnectStatus('connected');
+          return;
+        }
+
+        if (result.status === 'expired') {
+          setSeedrConnectStatus('expired');
+          setSeedrConnectError(
+            result.message || 'The Seedr authorization code expired.'
+          );
+          return;
+        }
+
+        if (result.status === 'error') {
+          setSeedrConnectStatus('error');
+          setSeedrConnectError(
+            result.message || 'Seedr could not authorize this connection.'
+          );
+          return;
+        }
+
+        if (typeof result.expiresIn === 'number') {
+          setSeedrConnectExpiresIn(result.expiresIn);
+        }
+      } catch (error: any) {
+        if (!stopped) {
+          setSeedrConnectError(
+            String(error?.message || 'Waiting for Seedr authorization...')
+          );
+        }
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    seedrOnboardingOpen,
+    seedrOnboardingStep,
+    seedrConnectStatus
+  ]);
 
   const [activeTab, setActiveTab] = useState<'search' | 'files' | 'shared' | 'activity' | 'storage'>(() => {
     try {
@@ -685,6 +825,7 @@ export default function App() {
   }, [activeTab, loadCurrentFiles]);
 
   const loadSeedrLibrary = useCallback(async (forceRefresh = false) => {
+    if (!seedrConnected) return null;
     setSeedrLoading(true);
     setSeedrError(null);
 
@@ -911,7 +1052,7 @@ export default function App() {
     }
 
     return result;
-  }, [rememberSeedrTorrentName]);
+  }, [seedrConnected, rememberSeedrTorrentName]);
 
   // Keep an opened folder synchronized with the background prefetch cache.
   // Changing the selected folder no longer reruns the entire library request.
@@ -972,7 +1113,7 @@ export default function App() {
     } finally {
       setSeedrFolderContentsLoading(false);
     }
-  }, [seedrFolderGroups, seedrFolderContentsCache]);
+  }, [seedrFolderGroups, seedrFolderContentsCache, seedrConnected]);
 
   useEffect(() => {
     if (activeTab === 'files') loadSeedrLibrary();
@@ -3267,52 +3408,168 @@ export default function App() {
           onClose={() => setDeleteTarget(null)}
         />
       )}
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-4 py-6 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="seedr-onboarding-title">
-        <div className="w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6">
-          <div className="flex items-start gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
-              <Cloud className="h-6 w-6" />
-            </div>
-            <div className="min-w-0">
-              <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
-                {seedrOnboardingStep === 'welcome' ? 'Your own Seedr account' : 'Connect your Seedr account'}
-              </h2>
-              <p className="mt-1 text-sm leading-5 text-slate-400">
-                {seedrOnboardingStep === 'welcome'
-                  ? 'Torrent Studio is designed to use your personal Seedr storage. Create a Seedr account or continue if you already have one.'
-                  : 'Connecting an individual Seedr account is not available in this preview yet. No account is connected, and Torrent Studio will not use the developer’s Seedr storage.'}
-              </p>
-            </div>
-          </div>
-          {seedrOnboardingStep === 'welcome' ? (
-            <>
-              <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                <p className="text-sm font-semibold text-slate-200">New to Seedr?</p>
-                <p className="mt-1 text-xs leading-5 text-slate-400">Create a free account on Seedr’s website, then return to connect it when individual account linking is supported.</p>
+      {seedrOnboardingOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-4 py-6 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="seedr-onboarding-title">
+          <div className="w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6">
+            <div className="flex items-start gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
+                <Cloud className="h-6 w-6" />
               </div>
-              <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                <a href="https://www.seedr.cc/" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400">
-                  Create Seedr Account <ExternalLink className="h-4 w-4" />
-                </a>
-                <button type="button" onClick={() => setSeedrOnboardingStep('connect')} className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700">
-                  I already have an account
+              <div className="min-w-0">
+                <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
+                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Your own Seedr account' : 'Connect your Seedr account'}
+                </h2>
+                <p className="mt-1 text-sm leading-5 text-slate-400">
+                  {seedrConnected
+                    ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
+                    : seedrOnboardingStep === 'welcome'
+                      ? 'Torrent Studio uses your personal Seedr storage. Create a Seedr account or continue if you already have one.'
+                      : 'Use Seedr’s device authorization to connect this browser. Torrent Studio never asks for your Seedr password.'}
+                </p>
+              </div>
+            </div>
+
+            {seedrOnboardingStep === 'welcome' && !seedrConnected ? (
+              <>
+                <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+                  <p className="text-sm font-semibold text-slate-200">New to Seedr?</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    Create a Seedr account first, then return here and choose “I already have an account”.
+                  </p>
+                </div>
+                <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                  <a href="https://www.seedr.cc/" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400">
+                    Create Seedr Account <ExternalLink className="h-4 w-4" />
+                  </a>
+                  <button
+                    type="button"
+                    disabled={!seedrSessionReady}
+                    onClick={() => setSeedrOnboardingStep('connect')}
+                    className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    I already have an account
+                  </button>
+                </div>
+              </>
+            ) : seedrConnected ? (
+              <>
+                <div className="mt-5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-3.5">
+                  <p className="text-sm font-semibold text-emerald-200">Connected successfully</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-300">
+                    Your Seedr account is connected to this browser session. No developer Seedr storage is being used.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSeedrOnboardingOpen(false)}
+                  className="mt-5 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+                >
+                  Continue to Torrent Studio
                 </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="mt-5 rounded-xl border border-amber-500/25 bg-amber-500/10 p-3.5">
-                <p className="text-sm font-semibold text-amber-200">Account linking is coming soon</p>
-                <p className="mt-1 text-xs leading-5 text-slate-300">This test branch does not request your Seedr password or API token. Connecting requires an approved per-user authorization flow; it cannot be completed in this preview.</p>
-              </div>
-              <button type="button" onClick={() => setSeedrOnboardingStep('welcome')} className="mt-5 w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700">
-                Back to account setup
-              </button>
-            </>
-          )}
-          <p className="mt-4 text-center text-[11px] leading-4 text-slate-500">No Seedr credentials are required to view this onboarding preview.</p>
+              </>
+            ) : (
+              <>
+                {seedrConnectStatus === 'starting' && (
+                  <div className="mt-5 rounded-xl border border-slate-700 bg-slate-950/60 p-4 text-sm text-slate-300">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-emerald-400" />
+                      Preparing your Seedr connection…
+                    </div>
+                  </div>
+                )}
+
+                {seedrConnectStatus === 'pending' && (
+                  <div className="mt-5 space-y-3">
+                    <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
+                      <p className="text-sm font-semibold text-emerald-200">Authorize this browser</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-300">
+                        Open Seedr, enter the code below, and approve the device. This page will detect the approval automatically.
+                      </p>
+                      <div className="mt-3 flex items-center gap-2">
+                        <div className="flex-1 rounded-lg bg-slate-950 px-3 py-2.5 font-mono text-center text-lg font-bold tracking-[0.18em] text-slate-100">
+                          {seedrConnectCode || '—'}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!seedrConnectCode) return;
+                            void navigator.clipboard?.writeText(seedrConnectCode);
+                          }}
+                          className="rounded-lg border border-slate-700 bg-slate-800 p-2.5 text-slate-300 hover:text-emerald-300"
+                          title="Copy device code"
+                        >
+                          <Copy className="h-4 w-4" />
+                        </button>
+                      </div>
+                      {seedrConnectExpiresIn > 0 && (
+                        <p className="mt-2 text-[11px] text-slate-400">
+                          Code expires in about {Math.ceil(seedrConnectExpiresIn / 60)} minute{Math.ceil(seedrConnectExpiresIn / 60) === 1 ? '' : 's'}.
+                        </p>
+                      )}
+                    </div>
+
+                    <a
+                      href={seedrVerificationUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-700"
+                    >
+                      Open Seedr authorization <ExternalLink className="h-4 w-4" />
+                    </a>
+
+                    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3 text-xs text-slate-400">
+                      <div className="flex items-center gap-2 text-slate-300">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+                        Waiting for Seedr approval…
+                      </div>
+                      <p className="mt-1">Keep this window open. We check every two seconds.</p>
+                    </div>
+                  </div>
+                )}
+
+                {(seedrConnectStatus === 'error' || seedrConnectStatus === 'expired') && (
+                  <div className="mt-5 rounded-xl border border-amber-500/25 bg-amber-500/10 p-4">
+                    <p className="text-sm font-semibold text-amber-200">
+                      {seedrConnectStatus === 'expired' ? 'Authorization expired' : 'Connection could not be started'}
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-slate-300">
+                      {seedrConnectError || 'Please start a new Seedr connection and try again.'}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSeedrConnectCode('');
+                        setSeedrConnectExpiresIn(0);
+                        setSeedrConnectError('');
+                        setSeedrConnectStatus('idle');
+                      }}
+                      className="mt-3 w-full rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700"
+                    >
+                      Try again
+                    </button>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSeedrOnboardingStep('welcome');
+                    setSeedrConnectStatus('idle');
+                    setSeedrConnectError('');
+                  }}
+                  className="mt-5 w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700"
+                >
+                  Back to account setup
+                </button>
+              </>
+            )}
+
+            <p className="mt-4 text-center text-[11px] leading-4 text-slate-500">
+              Seedr credentials stay server-side; Torrent Studio does not ask you for your Seedr password.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
     </div>
   );
