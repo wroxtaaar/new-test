@@ -21,7 +21,7 @@ The app uses Seedr's device authorization flow:
 5. After approval, Torrent Studio receives the user's Seedr access token on the backend and associates it with that browser session.
 6. Torrents, quota, files, downloads, and streaming use that connected Seedr account.
 
-**Google/Facebook Seedr accounts:** Seedr may still request an account password when approving a device. Seedr documents that social-login users can use the password-reset flow for the email linked to the account; the password is entered only on Seedr, never in Torrent Studio.
+For users who already created a Seedr account with Google/Facebook, Seedr may require setting a password through its password-reset flow before device approval. The password is entered only on Seedr, never in Torrent Studio.
 
 Torrent Studio never asks the user for their Seedr password.
 
