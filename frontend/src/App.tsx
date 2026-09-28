@@ -138,7 +138,7 @@ export default function App() {
     };
   }, []);
 
-  // Start the device flow as soon as the user chooses "I already have an account".
+  // Start the device flow as soon as the user chooses "Connect Seedr account".
   useEffect(() => {
     if (
       !seedrSessionReady ||
@@ -3432,7 +3432,7 @@ export default function App() {
                     ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
                     : seedrOnboardingStep === 'welcome'
                       ? 'Torrent Studio uses your personal Seedr storage. Create a Seedr account or continue if you already have one.'
-                      : 'Use Seedr’s device authorization to connect this browser. Torrent Studio never asks for your Seedr password.'}
+                      : 'Connect the Seedr account you already use. Your Seedr login stays on Seedr — Torrent Studio never receives your password.'}
                 </p>
               </div>
             </div>
@@ -3442,7 +3442,7 @@ export default function App() {
                 <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
                   <p className="text-sm font-semibold text-slate-200">New to Seedr?</p>
                   <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Create a Seedr account first, then return here and choose “I already have an account”.
+                    Create a Seedr account first (you can use Google on Seedr), then return here and choose “Connect Seedr account”.
                   </p>
                 </div>
                 <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -3455,7 +3455,7 @@ export default function App() {
                     onClick={() => setSeedrOnboardingStep('connect')}
                     className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    I already have an account
+                    Connect Seedr account
                   </button>
                 </div>
               </>
@@ -3491,7 +3491,7 @@ export default function App() {
                     <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
                       <p className="text-sm font-semibold text-emerald-200">Authorize this browser</p>
                       <p className="mt-1 text-xs leading-5 text-slate-300">
-                        Open Seedr, enter the code below, and approve the device. This page will detect the approval automatically.
+                        Open Seedr, sign in to the account you want to use, enter the code below, and approve the device. This page will detect the approval automatically.
                       </p>
                       <div className="mt-3 flex items-center gap-2">
                         <div className="flex-1 rounded-lg bg-slate-950 px-3 py-2.5 font-mono text-center text-lg font-bold tracking-[0.18em] text-slate-100">
@@ -3531,6 +3531,7 @@ export default function App() {
                         Waiting for Seedr approval…
                       </div>
                       <p className="mt-1">Keep this window open. We check every two seconds.</p>
+                       <p className="mt-2 text-[11px] leading-4 text-slate-500">If you created Seedr with Google or Facebook and Seedr asks for a password here, use Seedr’s “Forgot password” option to set a password for that Seedr email. Enter that password only on Seedr.</p>
                     </div>
                   </div>
                 )}
@@ -3575,7 +3576,7 @@ export default function App() {
             )}
 
             <p className="mt-4 text-center text-[11px] leading-4 text-slate-500">
-              Seedr credentials stay server-side; Torrent Studio does not ask you for your Seedr password.
+              Your Seedr password is entered only on Seedr. Torrent Studio stores only the authorization needed to use your connected Seedr account.
             </p>
           </div>
         </div>
