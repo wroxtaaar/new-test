@@ -15,11 +15,13 @@ Torrent Studio uses each user's own Seedr account for cloud torrent transfers an
 The app uses Seedr's device authorization flow:
 
 1. Create a Seedr account at [seedr.cc](https://www.seedr.cc/).
-2. Return to Torrent Studio and choose **I already have an account**.
+2. Return to Torrent Studio and choose **Connect Seedr account**.
 3. Torrent Studio requests a Seedr device code.
 4. Open the Seedr authorization page and enter the displayed code.
 5. After approval, Torrent Studio receives the user's Seedr access token on the backend and associates it with that browser session.
 6. Torrents, quota, files, downloads, and streaming use that connected Seedr account.
+
+**Google/Facebook Seedr accounts:** Seedr may still request an account password when approving a device. Seedr documents that social-login users can use the password-reset flow for the email linked to the account; the password is entered only on Seedr, never in Torrent Studio.
 
 Torrent Studio never asks the user for their Seedr password.
 
