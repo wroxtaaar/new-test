@@ -2797,12 +2797,16 @@ async def seedr_connect_start(request: Request):
         }
         session["last_seen"] = time.time()
 
+        poll_interval = int(float(data.get("interval") or 5))
+        poll_interval = max(2, min(30, poll_interval))
+        session["device"]["interval"] = poll_interval
         return {
             "status": "pending",
             "connected": False,
             "userCode": user_code,
             "verificationUrl": verification_url,
             "expiresIn": expires_in,
+            "interval": poll_interval,
         }
     except SeedrError:
         raise
@@ -2950,6 +2954,7 @@ async def seedr_connect_status(request: Request):
                 "status": "pending",
                 "connected": False,
                 "expiresIn": max(0, int(expires_at - time.time())),
+                "interval": max(2, min(30, int(float(device.get("interval") or 5)))),
             }
 
         if response.status_code >= 400:
