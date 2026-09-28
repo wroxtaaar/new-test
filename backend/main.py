@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import contextvars
+import secrets
 from datetime import datetime, timezone
 from collections import deque
 import json
@@ -27,8 +29,22 @@ logger = logging.getLogger("torrent-studio")
 SEEDR_BASE = "https://www.seedr.cc/api/v0.1/p"
 SEEDR_MEDIA_BASE = "https://www.seedr.cc/api"
 SEEDR_V2_BASE = "https://v2.seedr.cc/api/v0.1/p"
+# Legacy developer-level Seedr credentials remain supported only when explicitly enabled.
+# Normal requests use a per-browser Seedr connection established through device auth.
 SEEDR_TOKEN = os.getenv("SEEDR_API_TOKEN", "").strip()
-SEEDR_LIBRARY_FOLDER_ID = os.getenv("SEEDR_LIBRARY_FOLDER_ID", "").strip()
+ALLOW_LEGACY_SEEDR_TOKEN = os.getenv("ALLOW_LEGACY_SEEDR_TOKEN", "false").strip().lower() in {"1", "true", "yes", "on"}
+# A shared folder ID cannot be used safely across different users. Personal
+# connections always start at each Seedr account's own root folder.
+SEEDR_LIBRARY_FOLDER_ID = "0"
+SEEDR_DEVICE_CLIENT_ID = os.getenv("SEEDR_DEVICE_CLIENT_ID", "seedr_xbmc").strip() or "seedr_xbmc"
+SEEDR_DEVICE_CODE_URL = "https://www.seedr.cc/api/device/code"
+SEEDR_DEVICE_AUTHORIZE_URL = "https://www.seedr.cc/api/device/authorize"
+SEEDR_SESSION_COOKIE = os.getenv("SEEDR_SESSION_COOKIE", "torrent_studio_seedr_session").strip() or "torrent_studio_seedr_session"
+SEEDR_SESSION_TTL_SECONDS = int(float(os.getenv("SEEDR_SESSION_TTL_SECONDS", str(30 * 24 * 60 * 60))))
+
+_seedr_sessions: dict[str, dict[str, Any]] = {}
+_seedr_request_token: contextvars.ContextVar[str] = contextvars.ContextVar("seedr_request_token", default="")
+_seedr_request_session_id: contextvars.ContextVar[str] = contextvars.ContextVar("seedr_request_session_id", default="")
 SEARCH_STOPWORDS = {"the", "a", "an", "movie", "film", "series", "season", "episode", "web", "show", "tv"}
 TORRENT_SEARCH_API_URL = os.getenv("TORRENT_SEARCH_API_URL", "https://torrent-search-api-ujfa.onrender.com").rstrip("/")
 KNABEN_API_URL = os.getenv("KNABEN_API_URL", "https://api.knaben.org/v1").rstrip("/")
@@ -114,13 +130,143 @@ async def handle_seedr_error(request: Request, exc: SeedrError):
         },
     )
 
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+CORS_ORIGIN_REGEX = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"https://([a-zA-Z0-9-]+\.)*vercel\.app|https://([a-zA-Z0-9-]+\.)*onrender\.com|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?",
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def _seedr_new_session() -> tuple[str, dict[str, Any]]:
+    session_id = secrets.token_urlsafe(32)
+    session = {
+        "csrf_token": secrets.token_urlsafe(32),
+        "access_token": "",
+        "refresh_token": "",
+        "token_type": "Bearer",
+        "device": None,
+        "created_at": time.time(),
+        "last_seen": time.time(),
+    }
+    _seedr_sessions[session_id] = session
+    return session_id, session
+
+def _seedr_get_session(session_id: str) -> dict[str, Any]:
+    return _seedr_sessions.setdefault(
+        session_id,
+        {
+            "csrf_token": secrets.token_urlsafe(32),
+            "access_token": "",
+            "refresh_token": "",
+            "token_type": "Bearer",
+            "device": None,
+            "created_at": time.time(),
+            "last_seen": time.time(),
+        },
+    )
+
+def current_seedr_token() -> str:
+    """Return the Seedr token for the current request's connected account."""
+    token = _seedr_request_token.get().strip()
+    if token:
+        return normalize_seedr_token(token)
+    if ALLOW_LEGACY_SEEDR_TOKEN and SEEDR_TOKEN:
+        return normalize_seedr_token(current_seedr_token())
+    return ""
+
+def _seedr_session_token(session_id: str) -> str:
+    session = _seedr_sessions.get(session_id)
+    return normalize_seedr_token(str(session.get("access_token") or "")) if session else ""
+
+def _clear_seedr_session_token(session_id: str | None = None) -> None:
+    sid = session_id or _seedr_request_session_id.get().strip()
+    if not sid:
+        return
+    session = _seedr_sessions.get(sid)
+    if not session:
+        return
+    session["access_token"] = ""
+    session["refresh_token"] = ""
+    session["token_type"] = "Bearer"
+    session["device"] = None
+    session["last_seen"] = time.time()
+
+@app.middleware("http")
+async def attach_seedr_session(request: Request, call_next):
+    session_id = str(request.cookies.get(SEEDR_SESSION_COOKIE) or "").strip()
+    if session_id not in _seedr_sessions:
+        session_id, _ = _seedr_new_session()
+        is_new = True
+    else:
+        is_new = False
+
+    session = _seedr_get_session(session_id)
+    session["last_seen"] = time.time()
+
+    token_ctx = _seedr_request_token.set(_seedr_session_token(session_id))
+    session_ctx = _seedr_request_session_id.set(session_id)
+    try:
+        response = await call_next(request)
+    finally:
+        _seedr_request_token.reset(token_ctx)
+        _seedr_request_session_id.reset(session_ctx)
+
+    if is_new:
+        is_https = request.url.scheme.lower() == "https"
+        response.set_cookie(
+            SEEDR_SESSION_COOKIE,
+            session_id,
+            max_age=SEEDR_SESSION_TTL_SECONDS,
+            httponly=True,
+            secure=is_https,
+            samesite="none" if is_https else "lax",
+            path="/",
+        )
+
+    now = time.time()
+    if len(_seedr_sessions) > 2000:
+        stale = [
+            sid
+            for sid, item in _seedr_sessions.items()
+            if now - float(item.get("last_seen") or now) > SEEDR_SESSION_TTL_SECONDS
+        ]
+        for sid in stale:
+            _seedr_sessions.pop(sid, None)
+
+    return response
+
+def _seedr_session_csrf_ok(request: Request) -> bool:
+    session_id = _seedr_request_session_id.get().strip()
+    session = _seedr_sessions.get(session_id)
+    if not session:
+        return False
+    expected = str(session.get("csrf_token") or "")
+    supplied = str(request.headers.get("X-Torrent-Studio-CSRF") or "")
+    return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
+@app.middleware("http")
+async def enforce_seedr_mutation_csrf(request: Request, call_next):
+    path = request.url.path or ""
+    method = request.method.upper()
+    if path.startswith("/api/seedr/") and method not in {"GET", "HEAD", "OPTIONS"}:
+        if not _seedr_session_csrf_ok(request):
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Seedr session security check failed.", "code": "SEEDR_CSRF_INVALID"},
+            )
+    return await call_next(request)
 
 @app.middleware("http")
 async def add_timing_allow_origin(request: Request, call_next):
@@ -821,7 +967,7 @@ async def legacy_seedr_request(
     body: dict[str, Any] | None = None,
 ) -> Any:
     """Call Seedr's documented legacy resource API using form data."""
-    if not SEEDR_TOKEN:
+    if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     access_token = seedr_access_token()
@@ -1074,7 +1220,7 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
 
     request_path = str(path).lstrip("/")
     url = f"{str(base_url).rstrip("/")}/{request_path}"
-    token = normalize_seedr_token(SEEDR_TOKEN)
+    token = normalize_seedr_token(current_seedr_token())
 
     kwargs: dict[str, Any] = {}
     if body is not None:
@@ -1501,7 +1647,7 @@ async def _cleanup_seedr_job(tid: str, job: dict[str, Any]) -> bool:
         except Exception:
             return False
 
-    if not folder_id or not folder_id.isdigit() or folder_id == SEEDR_LIBRARY_FOLDER_ID:
+    if not folder_id or not folder_id.isdigit() or folder_id == "0":
         return False
 
     # Stop the Seedr task first so an active transfer cannot keep rebuilding
@@ -2562,7 +2708,7 @@ async def start_seedr_cleanup_worker():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "seedrConfigured": bool(SEEDR_TOKEN), "torrentSearchApi": TORRENT_SEARCH_API_URL}
+    return {"status": "ok", "seedrConfigured": bool(current_seedr_token()), "torrentSearchApi": TORRENT_SEARCH_API_URL}
 
 @app.get("/api/search")
 async def api_search(q: str = Query(..., min_length=1), limit: int = Query(50, ge=1, le=50)):
@@ -2571,6 +2717,274 @@ async def api_search(q: str = Query(..., min_length=1), limit: int = Query(50, g
 @app.get("/api/health")
 async def api_health():
     return {"name": APP_NAME, "status": "ok"}
+
+@app.get("/api/seedr/session")
+async def seedr_session(request: Request):
+    """Initialize/restore the browser session and expose only the CSRF token."""
+    session_id = _seedr_request_session_id.get().strip()
+    session = _seedr_get_session(session_id)
+    token = current_seedr_token()
+    connected = False
+
+    if token:
+        try:
+            token_ctx = _seedr_request_token.set(token)
+            try:
+                await seedr_request("/user")
+            finally:
+                _seedr_request_token.reset(token_ctx)
+            connected = True
+        except Exception:
+            _clear_seedr_session_token(session_id)
+
+    return {
+        "connected": connected,
+        "csrfToken": str(session.get("csrf_token") or ""),
+    }
+
+
+@app.post("/api/seedr/connect/start")
+async def seedr_connect_start(request: Request):
+    session_id = _seedr_request_session_id.get().strip()
+    session = _seedr_get_session(session_id)
+
+    token = current_seedr_token()
+    if token:
+        return {"status": "connected", "connected": True}
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(
+                SEEDR_DEVICE_CODE_URL,
+                params={"client_id": SEEDR_DEVICE_CLIENT_ID},
+                headers={"Accept": "application/json"},
+            )
+        raw = response.text
+        try:
+            data = response.json() if raw else {}
+        except Exception:
+            data = {}
+
+        if response.status_code >= 400 or not isinstance(data, dict):
+            detail = seedr_error_message(response.status_code, data, raw)
+            raise SeedrError("SEEDR_DEVICE_CODE_FAILED", 502, detail)
+
+        device_code = str(data.get("device_code") or data.get("deviceCode") or "").strip()
+        user_code = str(data.get("user_code") or data.get("userCode") or "").strip()
+        verification_url = str(
+            data.get("verification_url")
+            or data.get("verificationUrl")
+            or "https://www.seedr.cc/devices"
+        ).strip()
+        expires_in = int(float(data.get("expires_in") or data.get("expiresIn") or 900))
+
+        if not device_code or not user_code:
+            raise SeedrError(
+                "SEEDR_DEVICE_CODE_INVALID",
+                502,
+                "Seedr returned an incomplete device authorization response.",
+            )
+
+        session["device"] = {
+            "device_code": device_code,
+            "user_code": user_code,
+            "verification_url": verification_url,
+            "expires_at": time.time() + max(60, expires_in),
+            "created_at": time.time(),
+        }
+        session["last_seen"] = time.time()
+
+        return {
+            "status": "pending",
+            "connected": False,
+            "userCode": user_code,
+            "verificationUrl": verification_url,
+            "expiresIn": expires_in,
+        }
+    except SeedrError:
+        raise
+    except Exception as exc:
+        logger.warning("Seedr device-code request failed: %s", exc)
+        raise SeedrError(
+            "SEEDR_DEVICE_CODE_FAILED",
+            502,
+            "Could not start Seedr account authorization right now.",
+        ) from exc
+
+
+def _extract_seedr_access_token(payload: Any) -> str:
+    if isinstance(payload, dict):
+        for key in ("access_token", "accessToken", "token"):
+            candidate = payload.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                normalized = normalize_seedr_token(candidate)
+                if normalized:
+                    return normalized
+
+        for key in ("data", "result", "response"):
+            nested = payload.get(key)
+            token = _extract_seedr_access_token(nested)
+            if token:
+                return token
+    return ""
+
+
+@app.get("/api/seedr/connect/status")
+async def seedr_connect_status(request: Request):
+    session_id = _seedr_request_session_id.get().strip()
+    session = _seedr_get_session(session_id)
+    token = _seedr_session_token(session_id)
+
+    if token:
+        try:
+            token_ctx = _seedr_request_token.set(token)
+            try:
+                await seedr_request("/user")
+            finally:
+                _seedr_request_token.reset(token_ctx)
+            session["device"] = None
+            return {"status": "connected", "connected": True}
+        except SeedrError as exc:
+            if exc.status_code == 401:
+                _clear_seedr_session_token(session_id)
+            else:
+                return {"status": "pending", "connected": False}
+
+    device = session.get("device")
+    if not isinstance(device, dict):
+        return {"status": "idle", "connected": False}
+
+    expires_at = float(device.get("expires_at") or 0)
+    if expires_at and time.time() >= expires_at:
+        session["device"] = None
+        return {
+            "status": "expired",
+            "connected": False,
+            "message": "The Seedr authorization code expired. Start a new connection.",
+        }
+
+    device_code = str(device.get("device_code") or "").strip()
+    if not device_code:
+        session["device"] = None
+        return {
+            "status": "error",
+            "connected": False,
+            "message": "Seedr did not provide a usable device code.",
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            response = await client.get(
+                SEEDR_DEVICE_AUTHORIZE_URL,
+                params={
+                    "client_id": SEEDR_DEVICE_CLIENT_ID,
+                    "device_code": device_code,
+                },
+                headers={"Accept": "application/json"},
+            )
+
+        raw = response.text
+        try:
+            data = response.json() if raw else {}
+        except Exception:
+            data = {}
+
+        access_token = _extract_seedr_access_token(data)
+        if access_token:
+            refresh_token = ""
+            token_type = "Bearer"
+            if isinstance(data, dict):
+                refresh_token = str(data.get("refresh_token") or data.get("refreshToken") or "").strip()
+                token_type = str(data.get("token_type") or "Bearer").strip() or "Bearer"
+                for key in ("data", "result", "response"):
+                    nested = data.get(key)
+                    if isinstance(nested, dict):
+                        refresh_token = refresh_token or str(
+                            nested.get("refresh_token") or nested.get("refreshToken") or ""
+                        ).strip()
+                        token_type = str(nested.get("token_type") or token_type).strip() or token_type
+
+            session["access_token"] = access_token
+            session["refresh_token"] = refresh_token
+            session["token_type"] = token_type
+            session["device"] = None
+            session["last_seen"] = time.time()
+
+            token_ctx = _seedr_request_token.set(access_token)
+            try:
+                await seedr_request("/user")
+            except SeedrError:
+                _clear_seedr_session_token(session_id)
+                raise
+            finally:
+                _seedr_request_token.reset(token_ctx)
+
+            return {"status": "connected", "connected": True}
+
+        error_code = ""
+        error_message = ""
+        if isinstance(data, dict):
+            error_code = str(data.get("error") or data.get("code") or "").strip().lower()
+            error_message = str(
+                data.get("error_description")
+                or data.get("message")
+                or data.get("error")
+                or ""
+            ).strip()
+
+        pending = (
+            response.status_code in {400, 409, 428}
+            and (
+                not error_code
+                or "pending" in error_code
+                or "authorize" in error_code
+                or "not_authorized" in error_code
+                or "not approved" in error_message.lower()
+            )
+        )
+        if pending:
+            return {
+                "status": "pending",
+                "connected": False,
+                "expiresIn": max(0, int(expires_at - time.time())),
+            }
+
+        if response.status_code >= 400:
+            if response.status_code == 401:
+                session["device"] = None
+                return {
+                    "status": "error",
+                    "connected": False,
+                    "message": "Seedr rejected this authorization request.",
+                }
+            return {
+                "status": "error",
+                "connected": False,
+                "message": error_message or seedr_error_message(response.status_code, data, raw),
+            }
+
+        return {
+            "status": "pending",
+            "connected": False,
+            "expiresIn": max(0, int(expires_at - time.time())),
+        }
+    except SeedrError:
+        raise
+    except Exception as exc:
+        logger.info("Seedr device authorization poll failed: %s", exc)
+        return {
+            "status": "pending",
+            "connected": False,
+            "expiresIn": max(0, int(expires_at - time.time())),
+        }
+
+
+@app.post("/api/seedr/connect/disconnect")
+async def seedr_connect_disconnect(request: Request):
+    session_id = _seedr_request_session_id.get().strip()
+    _clear_seedr_session_token(session_id)
+    return {"status": "disconnected", "connected": False}
+
 
 @app.get("/api/seedr/token-diagnostic")
 async def seedr_token_diagnostic():
@@ -2845,8 +3259,8 @@ async def seedr_add(request: Request):
     if not info_hash(raw_magnet):
         raise HTTPException(400, "A valid BTIH magnet link is required")
 
-    configured_folder = str(SEEDR_LIBRARY_FOLDER_ID).strip()
-    folder = int(configured_folder) if configured_folder.isdigit() else 0
+    requested_folder = str(payload.get("folder_id") or "").strip()
+    folder = int(requested_folder) if requested_folder.isdigit() else 0
 
     task = unwrap_seedr_task(await add_task(raw_magnet, folder))
     tid = task_id(task)
@@ -2885,7 +3299,7 @@ def _seedr_effective_task_folder_id(
     if file_folder_id and (
         not task_folder_id
         or file_folder_id != task_folder_id
-        or task_folder_id == SEEDR_LIBRARY_FOLDER_ID
+        or task_folder_id == "0"
     ):
         return file_folder_id
     return task_folder_id
@@ -3248,9 +3662,7 @@ async def get_seedr_metadata_tree(force_refresh: bool = False) -> dict[str, Any]
         # Seedr's account root is exposed through a dedicated endpoint.
         # Keep SEEDR_LIBRARY_FOLDER_ID as an optional override for deployments
         # that want to start from a specific existing folder.
-        root = SEEDR_LIBRARY_FOLDER_ID
-        if not root.isdigit():
-            root = "0"
+        root = "0"
 
         # Resolve human-readable torrent names from Seedr task metadata in one
         # call. The folder contents/counts and task list are independent, so
@@ -3394,9 +3806,7 @@ async def seedr_files():
     if not SEEDR_TOKEN:
         return {"configured": False, "files": []}
 
-    root = SEEDR_LIBRARY_FOLDER_ID
-    if not root.isdigit():
-        return {"configured": True, "files": []}
+    root = "0"
 
     result = await collect_folder(root, "/Torrent Studio")
     unique: list[dict[str, Any]] = []
@@ -3534,11 +3944,11 @@ def _seedr_media_url(file_id: str, media_type: str) -> str:
         endpoint = f"/media/mp3/{quote(file_id)}"
     else:
         raise HTTPException(400, "Unsupported Seedr media type")
-    return SEEDR_MEDIA_BASE.rstrip("/") + endpoint + "?access_token=" + quote(SEEDR_TOKEN, safe="")
+    return SEEDR_MEDIA_BASE.rstrip("/") + endpoint + "?access_token=" + quote(current_seedr_token(), safe="")
 
 def seedr_v2_bearer_token() -> str:
     """Accept a raw Seedr PAT or MediaFusion-style base64 JSON token."""
-    raw = SEEDR_TOKEN.strip()
+    raw = current_seedr_token().strip()
     if not raw:
         return ""
     try:
@@ -4471,7 +4881,7 @@ async def files_compat(
     # is returned separately by /api/folders.
     target_id = folder_id.strip()
     if not target_id:
-        target_id = SEEDR_LIBRARY_FOLDER_ID if folder in {"/", "/Torrent Studio"} else ""
+        target_id = "0" if folder in {"/", "/Torrent Studio"} else ""
 
     if not target_id.isdigit():
         metadata = await get_seedr_metadata_tree()
