@@ -2952,13 +2952,14 @@ export default function App() {
                           ? (f) => handleCopySeedrFileUrl(f.id)
                           : undefined}
                         onSeedrDelete={file.ownerId === 'seedr'
-                          ? (f) => handleDeleteSeedrFile({
-                              id: f.id,
-                              name: f.name,
-                              size: f.size,
-                              folderId: f.folder || '',
-                              folderPath: f.folder || '/'
-                            })
+                          ? (f) => {
+                              const seedrFile = seedrAllPrefetchedFiles.find(item => item.id === f.id);
+                              if (!seedrFile) {
+                                setSeedrError('Seedr file is no longer available. Refresh the library and try again.');
+                                return;
+                              }
+                              return handleDeleteSeedrFile(seedrFile);
+                            }
                           : undefined}
                         canEdit={activeUser?.role !== 'viewer'}
                         canDelete={file.ownerId === 'seedr' ? true : activeUser?.role === 'admin'}
