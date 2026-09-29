@@ -82,7 +82,6 @@ export default function App() {
       return true;
     }
   });
-  const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'pat'>('welcome');
   // Seedr connection is optional. Never open the connection dialog automatically
   // on page load/refresh; the user opens it explicitly or reaches a Seedr action.
   const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(false);
@@ -92,7 +91,6 @@ export default function App() {
   const [seedrPat, setSeedrPat] = useState('');
   const [seedrPatSubmitting, setSeedrPatSubmitting] = useState(false);
   const [seedrConnectError, setSeedrConnectError] = useState('');
-  const [showSeedrPatHelp, setShowSeedrPatHelp] = useState(true);
 
   const markSeedrOnboardingSeen = useCallback(() => {
     try {
@@ -2577,7 +2575,6 @@ export default function App() {
               onClick={() => {
                 setSeedrPat('');
                 setSeedrConnectError('');
-                setSeedrOnboardingStep(seedrConnected ? 'welcome' : 'welcome');
                 setSeedrOnboardingOpen(true);
               }}
               className={seedrConnected
@@ -3400,168 +3397,91 @@ export default function App() {
 
       {seedrOnboardingOpen && (
         <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[2px]"
+          className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-950/50 px-4 py-6 backdrop-blur-[3px]"
           role="dialog"
           aria-modal="true"
           aria-labelledby="seedr-onboarding-title"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
-              markSeedrOnboardingSeen();
-              setActiveTab('search');
-            }
-          }}
-          onTouchStart={(event) => {
-            if (event.target === event.currentTarget) {
               setSeedrOnboardingOpen(false);
-              setActiveTab('search');
             }
           }}
         >
           <div
-            className="relative w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
+            className="relative my-auto w-full max-w-lg rounded-2xl border border-emerald-500/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
             onMouseDown={(event) => event.stopPropagation()}
-            onTouchStart={(event) => event.stopPropagation()}
           >
             <button
               type="button"
               aria-label="Close Seedr connection dialog"
-              onClick={() => {
-                markSeedrOnboardingSeen();
-                setActiveTab('search');
-              }}
+              onClick={() => setSeedrOnboardingOpen(false)}
               className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-white"
             >
               <span className="text-2xl leading-none">×</span>
             </button>
-            <div className="flex items-start gap-3">
+
+            <div className="flex items-start gap-3 pr-8">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
                 <Cloud className="h-6 w-6" />
               </div>
               <div className="min-w-0">
                 <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
-                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Welcome to Torrent Studio' : 'Welcome! Let’s connect your Seedr account'}
+                  {seedrConnected ? 'Seedr account connected' : 'Connect to Seedr'}
                 </h2>
                 <p className="mt-1 text-sm leading-5 text-slate-400">
                   {seedrConnected
-                    ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
-                    : seedrOnboardingStep === 'welcome'
-                      ? 'Welcome! Connect your own Seedr account and keep your torrents and storage separate from everyone else.'
-                      : 'You’re almost ready. Connect your own Seedr account so Torrent Studio can send torrents directly to your Seedr storage.'}
+                    ? 'Torrent Studio is connected to your Seedr account.'
+                    : 'Connect your own Seedr account to send torrents directly to your Seedr storage.'}
                 </p>
               </div>
             </div>
 
-            {seedrOnboardingStep === 'welcome' && !seedrConnected ? (
+            {seedrConnected ? (
               <>
-                <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                  <p className="text-sm font-semibold text-slate-200">Get started with Torrent Studio</p>
-                  <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Torrent Studio uses your own Seedr account for torrent downloads and media storage. Create a free Seedr account, or connect an existing one with a Personal Access Token.
-                  </p>
-                </div>
-                <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                  <a href="https://www.seedr.cc/api/v0.1/console/login?redirect_to=%2Fapi%2Fv0.1%2Fconsole%2Ftokens" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400">
-                    Create Seedr Account <ExternalLink className="h-4 w-4" />
-                  </a>
-                  <button
-                    type="button"
-                    disabled={!seedrSessionReady}
-                    onClick={() => {
-                      setSeedrPat('');
-                      setSeedrConnectError('');
-                      setSeedrOnboardingStep('pat');
-                    }}
-                    className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Connect Seedr account
-                  </button>
-                </div>
-              </>
-            ) : seedrConnected ? (
-              <>
-                <div className="mt-5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-3.5">
+                <div className="mt-5 rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
                   <p className="text-sm font-semibold text-emerald-200">Connected successfully</p>
                   <p className="mt-1 text-xs leading-5 text-slate-300">
-                    This browser session now uses your Seedr account. No shared developer Seedr storage is used.
+                    This browser session is using your Seedr account. No shared Seedr storage is used.
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={markSeedrOnboardingSeen}
+                  onClick={() => setSeedrOnboardingOpen(false)}
                   className="mt-5 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
                 >
-                  Continue to Torrent Studio
+                  Done
                 </button>
               </>
             ) : (
-              <>
-                <div className="mt-5 space-y-3">
-                  <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-emerald-200">Seedr Personal Access Token</p>
-                        <p className="mt-1 text-xs leading-5 text-slate-300">
-                          Copy your token from Seedr Settings → API / External Access.
-                        </p>
-                      </div>
-                      <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-400" />
+              <div className="mt-5 space-y-4">
+                <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
+                  <div className="flex items-start gap-3">
+                    <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-emerald-200">Have a Seedr account?</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-300">
+                        Paste your Seedr token below. Your Seedr password is never requested.
+                      </p>
                     </div>
-
-                    <input
-                      type="password"
-                      value={seedrPat}
-                      onChange={(e) => setSeedrPat(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !seedrPatSubmitting) {
-                          void connectSeedrWithPat();
-                        }
-                      }}
-                      placeholder="sdp_…"
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="mt-4 w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-3 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/10"
-                    />
-
-                    <button
-                      type="button"
-                      onClick={() => setShowSeedrPatHelp(prev => !prev)}
-                      className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-emerald-200"
-                      aria-expanded={showSeedrPatHelp}
-                    >
-                      <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showSeedrPatHelp ? 'rotate-90' : ''}`} />
-                      How to create a token
-                    </button>
-
-                    {showSeedrPatHelp && (
-                      <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs font-semibold text-slate-200">Create your Seedr token</p>
-                        <ol className="mt-2 space-y-1.5 pl-4 text-[11px] leading-4 text-slate-400 list-decimal">
-                          <li>Open the <span className="font-semibold text-slate-300">Seedr tokens</span> page.</li>
-                          <li>Give the token a descriptive <span className="font-semibold text-slate-300">name</span>.</li>
-                          <li>Set <span className="font-semibold text-slate-300">Expiration</span> to <span className="font-semibold text-slate-300">Never</span>.</li>
-                          <li>Under Scopes, click <span className="font-semibold text-slate-300">Read &amp; Add Torrents</span>.</li>
-                          <li>Click <span className="font-semibold text-slate-300">Generate Token</span>.</li>
-                          <li>Copy the token and save it somewhere safe.</li>
-                          <li>Paste that same token into Torrent Studio below and click <span className="font-semibold text-slate-300">Connect</span>.</li>
-                        </ol>
-                        <p className="mt-2 text-[11px] leading-4 text-slate-500">
-                          Use the token here, not your Seedr password or an app password.
-                        </p>
-                      </div>
-                    )}
-
-                    <a
-                      href="https://www.seedr.cc/api/v0.1/console/tokens"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-3 inline-flex items-center gap-2 text-xs font-semibold text-emerald-300 hover:text-emerald-200"
-                    >
-                      Open Seedr Personal Access Tokens <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
                   </div>
 
+                  <input
+                    type="password"
+                    value={seedrPat}
+                    onChange={(e) => setSeedrPat(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !seedrPatSubmitting) {
+                        void connectSeedrWithPat();
+                      }
+                    }}
+                    placeholder="Paste your Seedr token"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="mt-4 w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-3 font-mono text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/10"
+                  />
+
                   {seedrConnectError && (
-                    <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-3.5">
+                    <div className="mt-3 rounded-xl border border-amber-500/25 bg-amber-500/10 p-3">
                       <p className="text-xs leading-5 text-amber-100">{seedrConnectError}</p>
                     </div>
                   )}
@@ -3570,12 +3490,12 @@ export default function App() {
                     type="button"
                     disabled={seedrPatSubmitting || !seedrPat.trim()}
                     onClick={() => { void connectSeedrWithPat(); }}
-                    className="w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="mt-3 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {seedrPatSubmitting ? (
                       <span className="inline-flex items-center justify-center gap-2">
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        Verifying with Seedr…
+                        Connecting…
                       </span>
                     ) : (
                       'Connect'
@@ -3583,27 +3503,67 @@ export default function App() {
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSeedrOnboardingStep('welcome');
-                    setSeedrPat('');
-                    setSeedrConnectError('');
-                  }}
-                  className="mt-5 w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-700"
-                >
-                  Back to account setup
-                </button>
-              </>
-            )}
+                <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+                  <p className="text-sm font-bold text-slate-100">Don’t have a Seedr account?</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    Create a free Seedr account first, then generate a token and paste it above.
+                  </p>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <a
+                      href="https://www.seedr.cc/"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-xs font-bold text-slate-100 transition hover:bg-slate-700"
+                    >
+                      Create Seedr Account <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                    <a
+                      href="https://www.seedr.cc/api/v0.1/console/tokens"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400"
+                    >
+                      Generate Token <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                  </div>
+                </div>
 
-            <p className="mt-4 text-center text-[11px] leading-4 text-slate-500">
-              Your Seedr password is never sent to Torrent Studio. Your PAT is stored only in the encrypted HttpOnly browser session and is used only for your Seedr account.
-            </p>
+                <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-500/10 text-xs font-black text-cyan-300">?</div>
+                    <p className="text-sm font-bold text-slate-100">Create your Seedr token</p>
+                  </div>
+
+                  <ol className="mt-3 space-y-2.5 pl-5 text-xs leading-5 text-slate-300 list-decimal">
+                    <li>
+                      Open the{' '}
+                      <a
+                        href="https://www.seedr.cc/api/v0.1/console/tokens"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-semibold text-emerald-300 underline decoration-emerald-500/40 underline-offset-2 hover:text-emerald-200"
+                      >
+                        Seedr tokens
+                      </a>{' '}
+                      page.
+                    </li>
+                    <li>Token Name = <span className="font-semibold text-slate-100">Any name</span>.</li>
+                    <li><span className="font-semibold text-slate-100">Expiration</span> = <span className="font-semibold text-slate-100">Never</span>.</li>
+                    <li>Scopes = click <span className="font-semibold text-slate-100">Full Account Access</span>.</li>
+                    <li>Go below and click <span className="font-semibold text-slate-100">Generate Token</span>.</li>
+                    <li>Copy the token and save it somewhere safe.</li>
+                    <li>Paste that same token into Torrent Studio above and click <span className="font-semibold text-slate-100">Connect</span>.</li>
+                  </ol>
+                </div>
+
+                <p className="text-center text-[11px] leading-4 text-slate-500">
+                  Your token is sent only to Torrent Studio over HTTPS and is kept in your secure browser session.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
-
     </div>
   );
 }
