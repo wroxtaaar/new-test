@@ -3318,7 +3318,7 @@ export default function App() {
                   </p>
                 </div>
                 <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                  <a href="https://www.seedr.cc/" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400">
+                  <a href="https://www.seedr.cc/api/v0.1/console/login?redirect_to=%2Fapi%2Fv0.1%2Fconsole%2Ftokens" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400">
                     Create Seedr Account <ExternalLink className="h-4 w-4" />
                   </a>
                   <button
