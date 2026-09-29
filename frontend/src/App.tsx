@@ -38,7 +38,8 @@ import {
   Film,
   Music,
   CheckCircle2,
-  Loader2
+  Loader2,
+  MessageSquare
 } from 'lucide-react';
 
 import {
@@ -617,6 +618,14 @@ export default function App() {
   const [isCleanupOpen, setIsCleanupOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isMobileMoreOpen, setIsMobileMoreOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackType, setFeedbackType] = useState<'review' | 'suggestion' | 'bug'>('review');
+  const [feedbackRating, setFeedbackRating] = useState(5);
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackName, setFeedbackName] = useState('');
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackSuccess, setFeedbackSuccess] = useState('');
+  const [feedbackError, setFeedbackError] = useState('');
   const [shareFolder, setShareFolder] = useState<StorageFolder | null>(null);
   const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
   const [moveFile, setMoveFile] = useState<StorageFile | null>(null);
@@ -2450,6 +2459,34 @@ export default function App() {
     setActiveUser(newUser);
   };
 
+  const submitFeedback = async () => {
+    const message = feedbackMessage.trim();
+    if (message.length < 5) {
+      setFeedbackError('Please write at least a few words.');
+      return;
+    }
+
+    setFeedbackSubmitting(true);
+    setFeedbackError('');
+    setFeedbackSuccess('');
+    try {
+      await api.submitFeedback({
+        type: feedbackType,
+        rating: feedbackType === 'review' ? feedbackRating : undefined,
+        message,
+        name: feedbackName.trim() || undefined,
+      });
+      setFeedbackMessage('');
+      setFeedbackName('');
+      setFeedbackRating(5);
+      setFeedbackSuccess('Thanks! Your feedback was sent successfully.');
+    } catch (error: any) {
+      setFeedbackError(String(error?.message || 'Could not send feedback. Please try again.'));
+    } finally {
+      setFeedbackSubmitting(false);
+    }
+  };
+
   const handleRunCleanup = async () => {
     const res = await api.runCleanup();
     const stats = await api.getStorageStats();
@@ -3113,6 +3150,19 @@ export default function App() {
           />
           <div className="md:hidden fixed left-3 right-3 bottom-20 z-50 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-3">
             <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackOpen(true);
+                  setFeedbackSuccess('');
+                  setFeedbackError('');
+                  setIsMobileMoreOpen(false);
+                }}
+                className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2"
+              >
+                <MessageSquare className="w-4 h-4 text-cyan-400" />
+                Feedback
+              </button>
 
               <button
                 type="button"
@@ -3256,6 +3306,123 @@ export default function App() {
           onClose={() => setDeleteTarget(null)}
         />
       )}
+      {feedbackOpen && (
+        <div
+          className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/70 px-4 py-6 backdrop-blur-md"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="feedback-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setFeedbackOpen(false);
+          }}
+        >
+          <div
+            className="relative w-full max-w-md rounded-2xl border border-cyan-500/20 bg-slate-900 p-5 shadow-2xl sm:p-6"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              aria-label="Close feedback"
+              onClick={() => setFeedbackOpen(false)}
+              className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-white"
+            >
+              <span className="text-2xl leading-none">×</span>
+            </button>
+
+            <div className="flex items-start gap-3 pr-8">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-cyan-500/10 text-cyan-400">
+                <MessageSquare className="h-6 w-6" />
+              </div>
+              <div>
+                <h2 id="feedback-title" className="text-lg font-bold text-slate-100">Feedback</h2>
+                <p className="mt-1 text-sm leading-5 text-slate-400">
+                  Tell us what you think, suggest an improvement, or report a problem.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5 grid grid-cols-3 gap-2">
+              {([
+                ['review', 'Review'],
+                ['suggestion', 'Suggestion'],
+                ['bug', 'Problem'],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setFeedbackType(value)}
+                  className={feedbackType === value
+                    ? 'rounded-xl bg-cyan-500 px-3 py-2.5 text-xs font-bold text-slate-950'
+                    : 'rounded-xl border border-slate-700 bg-slate-800 px-3 py-2.5 text-xs font-semibold text-slate-300 hover:bg-slate-700'}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {feedbackType === 'review' && (
+              <div className="mt-4">
+                <p className="text-xs font-semibold text-slate-300">Rating</p>
+                <div className="mt-2 flex gap-1.5">
+                  {[1, 2, 3, 4, 5].map(value => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setFeedbackRating(value)}
+                      aria-label={`${value} star${value === 1 ? '' : 's'}`}
+                      className={value <= feedbackRating ? 'text-amber-400 text-2xl leading-none' : 'text-slate-700 text-2xl leading-none'}
+                    >
+                      ★
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <textarea
+              value={feedbackMessage}
+              onChange={event => setFeedbackMessage(event.target.value)}
+              placeholder={feedbackType === 'review' ? 'How is Torrent Studio for you?' : feedbackType === 'suggestion' ? 'What would you like us to add or improve?' : 'What went wrong?'}
+              maxLength={3000}
+              rows={5}
+              className="mt-4 w-full resize-none rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/10"
+            />
+
+            <input
+              value={feedbackName}
+              onChange={event => setFeedbackName(event.target.value)}
+              maxLength={80}
+              placeholder="Name (optional)"
+              className="mt-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/10"
+            />
+
+            {feedbackError && (
+              <div className="mt-3 rounded-xl border border-rose-500/25 bg-rose-500/10 p-3 text-xs leading-5 text-rose-200">
+                {feedbackError}
+              </div>
+            )}
+            {feedbackSuccess && (
+              <div className="mt-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-3 text-xs leading-5 text-emerald-200">
+                {feedbackSuccess}
+              </div>
+            )}
+
+            <button
+              type="button"
+              disabled={feedbackSubmitting || feedbackMessage.trim().length < 5}
+              onClick={() => void submitFeedback()}
+              className="mt-4 w-full rounded-xl bg-cyan-500 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {feedbackSubmitting ? 'Sending…' : 'Send Feedback'}
+            </button>
+
+            <p className="mt-3 text-center text-[11px] leading-4 text-slate-600">
+              Your feedback is reviewed by the Torrent Studio team.
+            </p>
+          </div>
+        </div>
+      )}
+
       {seedrOnboardingOpen && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[2px]"
