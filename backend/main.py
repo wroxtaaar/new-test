@@ -2851,6 +2851,46 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
         oldest = min(_search_cache.items(), key=lambda pair: pair[1][0])[0]
         _search_cache.pop(oldest, None)
 
+    # TV-series fallback: a plain show-name search can return very few rows
+    # because torrent indexes often require season/episode tokens in the title.
+    # When the normal search has fewer than 15 results, silently broaden it with
+    # S01 first, then S02/S03 if necessary, and merge/deduplicate the results.
+    # Queries that already specify a season/episode are left untouched.
+    _, requested_season, requested_episode = _media_search_parts(query)
+    if len(results) < 15 and requested_season is None and requested_episode is None:
+        merged_series: dict[str, dict[str, Any]] = {}
+        for item in results:
+            key = str(item.get("infoHash") or item.get("magnetUrl") or item.get("title") or "").strip().lower()
+            if key:
+                merged_series[key] = item
+
+        for suffix in ("s01", "s02", "s03"):
+            if len(merged_series) >= 15:
+                break
+            variant = f"{query} {suffix}"
+            try:
+                variant_results = await search_1337x(variant, limit=50)
+            except Exception as exc:
+                logger.info("Series fallback search failed for '%s': %s", variant, exc)
+                continue
+            for item in variant_results:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("infoHash") or item.get("magnetUrl") or item.get("title") or "").strip().lower()
+                if key:
+                    merged_series.setdefault(key, item)
+
+        results = list(merged_series.values())
+        results.sort(
+            key=lambda item: (
+                int(item.get("seeders") or 0),
+                int(item.get("leechers") or 0),
+                int(item.get("size") or 0),
+            ),
+            reverse=True,
+        )
+        results = results[:limit]
+
     logger.info(
         "Fast search '%s': %d results (providers=%s)",
         query,
