@@ -3436,7 +3436,7 @@ export default function App() {
                         Verifying with Seedr…
                       </span>
                     ) : (
-                      'Connect with PAT'
+                      'Connect Now'
                     )}
                   </button>
                 </div>
