@@ -63,7 +63,7 @@ KNABEN_API_URL = os.getenv("KNABEN_API_URL", "https://api.knaben.org/v1").rstrip
 TORRENT_METADATA_API_URL = os.getenv("TORRENT_METADATA_API_URL", "https://torrentmeta.fly.dev").rstrip("/")
 FAST_SEARCH_TEST_URL = os.getenv("FAST_SEARCH_TEST_URL", "https://torrent-search-test.onrender.com").rstrip("/")
 SEARCH_SOURCE_TIMEOUT_SECONDS = float(os.getenv("SEARCH_SOURCE_TIMEOUT_SECONDS", "2.25"))
-SEARCH_TOTAL_TIMEOUT_SECONDS = float(os.getenv("SEARCH_TOTAL_TIMEOUT_SECONDS", "2.75"))
+SEARCH_TOTAL_TIMEOUT_SECONDS = float(os.getenv("SEARCH_TOTAL_TIMEOUT_SECONDS", "3.5"))
 SEARCH_GRACE_SECONDS = float(os.getenv("SEARCH_GRACE_SECONDS", "0.2"))
 SEARCH_CACHE_SECONDS = float(os.getenv("SEARCH_CACHE_SECONDS", "60"))
 FAST_SEARCH_TRACKERS = (
@@ -2719,7 +2719,7 @@ async def search_apibay(query: str, limit: int) -> dict[str, Any]:
         return {"source": "apibay", "elapsedMs": round((time.monotonic() - started) * 1000), "results": [], "error": str(exc)}
 
 
-async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
+async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool = True) -> list[dict[str, Any]]:
     """Use the proven fast-search-test provider strategy for production search.
 
     Search providers run in parallel and the endpoint has a hard total deadline.
@@ -2863,41 +2863,38 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
         reverse=True,
     )
     results = results[:limit]
-    # Only cache searches that produced a useful result set. Searches with
-    # fewer than 8 matching torrents deliberately stay uncached so every
-    # subsequent click gets a fresh provider search and has a chance to find
-    # newly indexed/available results.
-    if len(results) >= 8:
-        _search_cache[cache_key] = (now, results)
-        if len(_search_cache) > 100:
-            oldest = min(_search_cache.items(), key=lambda pair: pair[1][0])[0]
-            _search_cache.pop(oldest, None)
-    else:
-        _search_cache.pop(cache_key, None)
-
-    # TV-series fallback: a plain show-name search can return very few rows
-    # because torrent indexes often require season/episode tokens in the title.
-    # When the normal search has fewer than 15 results, silently broaden it with
-    # S01 first, then S02/S03 if necessary, and merge/deduplicate the results.
-    # Queries that already specify a season/episode are left untouched.
+    # Low-result TV fallback is intentionally server-side. If the primary
+    # search leaves fewer than 8 usable torrents, run S01/S02/S03 searches
+    # concurrently. These internal searches skip fallback themselves so one
+    # obscure query cannot recursively multiply into many more requests.
     _, requested_season, requested_episode = _media_search_parts(query)
-    if len(results) < 15 and requested_season is None and requested_episode is None:
+    if (
+        allow_series_fallback
+        and len(results) < 8
+        and requested_season is None
+        and requested_episode is None
+    ):
+        variants = [f"{query} s01", f"{query} s02", f"{query} s03"]
+        try:
+            variant_results = await asyncio.gather(
+                *(search_1337x(variant, limit=50, allow_series_fallback=False) for variant in variants),
+                return_exceptions=True,
+            )
+        except Exception as exc:
+            logger.info("Series fallback search failed for '%s': %s", query, exc)
+            variant_results = []
+
         merged_series: dict[str, dict[str, Any]] = {}
         for item in results:
             key = str(item.get("infoHash") or item.get("magnetUrl") or item.get("title") or "").strip().lower()
             if key:
                 merged_series[key] = item
 
-        for suffix in ("s01", "s02", "s03"):
-            if len(merged_series) >= 15:
-                break
-            variant = f"{query} {suffix}"
-            try:
-                variant_results = await search_1337x(variant, limit=50)
-            except Exception as exc:
-                logger.info("Series fallback search failed for '%s': %s", variant, exc)
+        for batch in variant_results:
+            if isinstance(batch, Exception):
+                logger.info("Series fallback variant failed for '%s': %s", query, batch)
                 continue
-            for item in variant_results:
+            for item in batch:
                 if not isinstance(item, dict):
                     continue
                 key = str(item.get("infoHash") or item.get("magnetUrl") or item.get("title") or "").strip().lower()
@@ -2914,6 +2911,16 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
             reverse=True,
         )
         results = results[:limit]
+
+    # Cache only useful result sets. Fewer than 8 results are deliberately
+    # uncached, so every subsequent click performs a fresh search.
+    if len(results) >= 8:
+        _search_cache[cache_key] = (now, results)
+        if len(_search_cache) > 100:
+            oldest = min(_search_cache.items(), key=lambda pair: pair[1][0])[0]
+            _search_cache.pop(oldest, None)
+    else:
+        _search_cache.pop(cache_key, None)
 
     logger.info(
         "Fast search '%s': %d results (providers=%s)",
