@@ -4621,34 +4621,14 @@ async def seedr_file_stream(
     resolved_id = await resolve_seedr_stream_id(file_id, name)
 
     if type == "video":
-        # Prefer the HLS manifest first. This is important for dual-audio and
-        # subtitle-bearing files because Hls.js can only expose alternate
-        # renditions when the browser receives an HLS master/media playlist.
-        # A direct video presentation is retained as the final fallback.
-        hls_error: HTTPException | None = None
-        presentation_url = ""
-
-        try:
-            await _fetch_seedr_hls_manifest(resolved_id)
-            try:
-                presentation_url = await seedr_v2_video_url(resolved_id)
-            except HTTPException:
-                presentation_url = ""
-            return {
-                "url": "/api/seedr/hls/" + quote(resolved_id, safe=""),
-                "externalUrl": presentation_url or _seedr_media_url(resolved_id, "video"),
-                "name": name or resolved_id,
-                "resolvedFileId": resolved_id,
-                "protocol": "hls",
-            }
-        except HTTPException as exc:
-            hls_error = exc
-
-        # HLS preparation failed, so use the Seedr presentation/direct proxy.
-        # This keeps ordinary single-track files playable even when HLS is
-        # temporarily unavailable.
+        # Restore the tested direct-browser-stream strategy from
+        # fix-seedr-direct-browser-stream:
+        #   1) ask Seedr V2 for its presentation URL;
+        #   2) if it is a browser-playable direct presentation, proxy it with
+        #      Range support;
+        #   3) otherwise use the existing HLS proxy.
         presentation_url = await seedr_v2_video_url(resolved_id)
-        if presentation_url:
+        if presentation_url and not await _presentation_is_hls(presentation_url):
             return {
                 "url": "/api/seedr/media/video/" + quote(resolved_id, safe=""),
                 "externalUrl": presentation_url,
@@ -4657,7 +4637,25 @@ async def seedr_file_stream(
                 "protocol": "direct",
             }
 
-        raise hls_error or HTTPException(502, "Seedr could not prepare a playable video stream")
+        try:
+            await _fetch_seedr_hls_manifest(resolved_id)
+            return {
+                "url": "/api/seedr/hls/" + quote(resolved_id, safe=""),
+                "externalUrl": presentation_url or _seedr_media_url(resolved_id, "video"),
+                "name": name or resolved_id,
+                "resolvedFileId": resolved_id,
+                "protocol": "hls",
+            }
+        except HTTPException:
+            if presentation_url:
+                return {
+                    "url": "/api/seedr/media/video/" + quote(resolved_id, safe=""),
+                    "externalUrl": presentation_url,
+                    "name": name or resolved_id,
+                    "resolvedFileId": resolved_id,
+                    "protocol": "direct",
+                }
+            raise
 
     return {
         "url": "/api/seedr/media/audio/" + quote(resolved_id, safe=""),
