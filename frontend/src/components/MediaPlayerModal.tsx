@@ -19,8 +19,7 @@ import {
   X,
   Minimize2,
   Maximize2,
-  Loader2,
-  Gauge
+  Loader2
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { StorageFile } from '../types/index.ts';
@@ -66,16 +65,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const [selectedHlsSubtitleIndex, setSelectedHlsSubtitleIndex] = useState<number | undefined>(undefined);
   const [trackNotice, setTrackNotice] = useState('');
   const [subtitleSearchError, setSubtitleSearchError] = useState('');
-  const [showDownloadSpeed, setShowDownloadSpeed] = useState(() => {
-    try {
-      const saved = localStorage.getItem('torrentStudio.showDownloadSpeed');
-      return saved !== 'false';
-    } catch {
-      return true;
-    }
-  });
-  const [downloadSpeedBytes, setDownloadSpeedBytes] = useState(0);
-
 
   const resumeTimeRef = useRef(0);
   const resumePlayingRef = useRef(false);
@@ -83,10 +72,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const [usingDirectFallback, setUsingDirectFallback] = useState(false);
   const hlsActiveRef = useRef(false);
   const hlsRef = useRef<Hls | null>(null);
-  const observedDownloadBytesRef = useRef(0);
-  const observedResourceNamesRef = useRef(new Set<string>());
-  const downloadSpeedTimerRef = useRef<number | null>(null);
-
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -111,57 +96,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setAudioTracks([]);
   }, [file?.id]);
 
-  useEffect(() => {
-    if (!file) return;
-
-    // Resource Timing is not reliable for long-lived media responses:
-    // browsers can keep transferSize at 0 until a response completes. The
-    // backend therefore reports bytes it is actively proxying and we poll
-    // that tiny stats endpoint once per second.
-    const source = file.streamUrl || file.externalStreamUrl || '';
-    const match = source.match(/\/api\/seedr\/(?:media\/video|hls)\/([^/?#]+)/i);
-    if (!match) {
-      setDownloadSpeedBytes(0);
-      return;
-    }
-
-    const fileId = match[1];
-    let statsUrl = `/api/seedr/media/video/${encodeURIComponent(fileId)}/stats`;
-    try {
-      const parsed = new URL(source, window.location.origin);
-      parsed.pathname = `/api/seedr/media/video/${encodeURIComponent(fileId)}/stats`;
-      parsed.search = '';
-      statsUrl = parsed.toString();
-    } catch {}
-
-    let cancelled = false;
-    const updateSpeed = async () => {
-      try {
-        const response = await fetch(statsUrl, { cache: 'no-store' });
-        if (!response.ok) return;
-        const data = await response.json();
-        if (!cancelled) {
-          const speed = Number(data?.bytesPerSecond);
-          setDownloadSpeedBytes(Number.isFinite(speed) ? Math.max(0, speed) : 0);
-        }
-      } catch {
-        // Keep the last displayed value during a transient stats request.
-      }
-    };
-
-    setDownloadSpeedBytes(0);
-    updateSpeed();
-    downloadSpeedTimerRef.current = window.setInterval(updateSpeed, 1000);
-
-    return () => {
-      cancelled = true;
-      if (downloadSpeedTimerRef.current !== null) {
-        window.clearInterval(downloadSpeedTimerRef.current);
-        downloadSpeedTimerRef.current = null;
-      }
-      setDownloadSpeedBytes(0);
-    };
-  }, [file?.id, file?.streamUrl, file?.externalStreamUrl]);
+, [file?.id, file?.streamUrl, file?.externalStreamUrl]);
 
   useEffect(() => {
     const media = mediaRef.current;
@@ -359,19 +294,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     }
   }, [selectedHlsSubtitleIndex, hlsSubtitleTracks]);
 
-  const formatTransferRate = (bytesPerSecond: number) => {
-    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond < 1024) return '0 KB/s';
-    const units = ['KB/s', 'MB/s', 'GB/s'];
-    let value = bytesPerSecond / 1024;
-    let unit = 0;
-    while (value >= 1024 && unit < units.length - 1) {
-      value /= 1024;
-      unit += 1;
-    }
-    return value >= 100 ? value.toFixed(0) + ' ' + units[unit] :
-      value >= 10 ? value.toFixed(1) + ' ' + units[unit] :
-      value.toFixed(2) + ' ' + units[unit];
-  };
+
 
   // Keep React state synchronized with the browser's actual fullscreen state.
   useEffect(() => {
@@ -1039,32 +962,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                 </label>
               )}
 
-              {showDownloadSpeed && (
-                <div
-                  className="flex items-center gap-1.5 rounded-lg bg-slate-800/80 px-2 py-1.5 text-[11px] text-slate-300"
-                  title="Approximate browser download rate for this stream"
-                >
-                  <Gauge className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>↓ {formatTransferRate(downloadSpeedBytes)}</span>
-                </div>
-              )}
 
-              <button
-                onClick={() => {
-                  setShowDownloadSpeed(current => {
-                    const next = !current;
-                    try {
-                      localStorage.setItem('torrentStudio.showDownloadSpeed', String(next));
-                    } catch {}
-                    return next;
-                  });
-                }}
-                className={`p-2 rounded-lg bg-slate-800/80 hover:bg-slate-700 transition ${showDownloadSpeed ? 'text-cyan-400' : 'text-slate-500'}`}
-                title={showDownloadSpeed ? 'Hide download speed' : 'Show download speed'}
-                aria-label={showDownloadSpeed ? 'Hide download speed' : 'Show download speed'}
-              >
-                <Gauge className="w-4 h-4" />
-              </button>
 
               {/* Playback Speed selector */}
               <div className="flex items-center bg-slate-800/80 rounded-lg p-0.5 text-xs font-medium text-slate-300">
