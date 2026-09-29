@@ -2231,10 +2231,20 @@ async def search_1337x_direct(query: str, limit: int = 50, pages: int = 3) -> li
         for host in X1337_HOSTS:
             try:
                 response = await client.get(f"https://{host}/search/{encoded}/1/")
-                if response.status_code < 400 and "table-list" in response.text:
-                    base = f"https://{host}"
-                    first_html = response.text
-                    break
+                if response.status_code < 400:
+                    # Mirrors use different HTML wrappers; validate by parsing
+                    # actual torrent rows rather than requiring one CSS class.
+                    parsed_rows = _x1337_rows(response.text)
+                    if parsed_rows:
+                        base = f"https://{host}"
+                        first_html = response.text
+                        logger.info(
+                            "1337x fallback selected host %s for '%s' (%d rows)",
+                            host,
+                            query,
+                            len(parsed_rows),
+                        )
+                        break
             except httpx.HTTPError:
                 continue
 
@@ -2312,14 +2322,21 @@ async def search_1337x_direct(query: str, limit: int = 50, pages: int = 3) -> li
                 return None
 
             match = re.search(
-                r"magnet:\?xt=urn:btih:[^\"'<>\s]+",
+                r"""(?:href|data-href)=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']""",
                 response.text,
                 re.IGNORECASE,
             )
-            if not match:
-                return None
-
-            magnet = html.unescape(match.group(0))
+            if match:
+                magnet = html.unescape(match.group(1))
+            else:
+                match = re.search(
+                    r"magnet:\?xt=urn:btih:[^\"'<>\s]+",
+                    response.text,
+                    re.IGNORECASE,
+                )
+                if not match:
+                    return None
+                magnet = html.unescape(match.group(0))
             return {
                 "guid": f"1337x-{info_hash(magnet) or row['path']}",
                 "title": row["title"],
