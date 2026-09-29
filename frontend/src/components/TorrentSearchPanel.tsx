@@ -44,10 +44,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState('');
   // Seed count is the default ranking so the strongest swarms appear first.
-  const [sortBy, setSortBy] = useState<'time' | 'size' | 'seeds'>('seeds');
-  const [sortDirection, setSortDirection] = useState<'desc' | 'asc'>('desc');
-  const [minSeeders, setMinSeeders] = useState(0);
-  const [resolutionFilter, setResolutionFilter] = useState<'all' | '720p' | '1080p'>('all');
+  // 720p/1080p are mutually exclusive. Size and Time are independent sort toggles.
+  const [resolutionFilter, setResolutionFilter] = useState<'720p' | '1080p' | null>(null);
+  const [sizeSort, setSizeSort] = useState<'asc' | 'desc' | null>(null);
+  const [timeSort, setTimeSort] = useState<'desc' | 'asc' | null>(null);
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [addingTorrentKey, setAddingTorrentKey] = useState<string | null>(null);
 
@@ -232,40 +232,30 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
     const sorted = results.filter(result => {
       const size = Number(result.size) || 0;
       if (size > maxSeedrFriendlySize) return false;
-      if ((Number(result.seeders) || 0) < minSeeders) return false;
-
-      if (resolutionFilter !== 'all') {
-        const title = String(result.title || '').toLowerCase();
-        const pattern = resolutionFilter === '720p'
-          ? /(?:^|[^0-9])720p(?:[^0-9]|$)/i
-          : /(?:^|[^0-9])1080p(?:[^0-9]|$)/i;
+      if (resolutionFilter) {
+        const title = String(result.title || '');
+        const pattern = resolutionFilter === '720p' ? /(?:^|[^0-9])720p(?:[^0-9]|$)/i : /(?:^|[^0-9])1080p(?:[^0-9]|$)/i;
         if (!pattern.test(title)) return false;
       }
-
       return true;
     });
-
     sorted.sort((a, b) => {
-      let aValue = 0;
-      let bValue = 0;
-
-      if (sortBy === 'time') {
-        aValue = a.publishDate ? new Date(a.publishDate).getTime() : 0;
-        bValue = b.publishDate ? new Date(b.publishDate).getTime() : 0;
-      } else if (sortBy === 'size') {
-        aValue = Number(a.size) || 0;
-        bValue = Number(b.size) || 0;
-      } else {
-        aValue = Number(a.seeders) || 0;
-        bValue = Number(b.seeders) || 0;
+      const aSize = Number(a.size) || 0;
+      const bSize = Number(b.size) || 0;
+      const aTime = a.publishDate ? new Date(a.publishDate).getTime() : 0;
+      const bTime = b.publishDate ? new Date(b.publishDate).getTime() : 0;
+      if (sizeSort) {
+        const comparison = sizeSort === 'asc' ? aSize - bSize : bSize - aSize;
+        if (comparison !== 0) return comparison;
       }
-
-      const comparison = aValue - bValue;
-      return sortDirection === 'asc' ? comparison : -comparison;
+      if (timeSort) {
+        const comparison = timeSort === 'asc' ? aTime - bTime : bTime - aTime;
+        if (comparison !== 0) return comparison;
+      }
+      return (Number(b.seeders) || 0) - (Number(a.seeders) || 0);
     });
-
     return sorted;
-  }, [results, minSeeders, resolutionFilter, sortBy, sortDirection]);
+  }, [results, resolutionFilter, sizeSort, timeSort]);
 
   return (
     <div className="space-y-2.5 sm:space-y-4">
@@ -416,24 +406,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
             <aside className="rounded-xl border border-slate-800 bg-slate-900 p-2.5 md:sticky md:top-24 md:self-start">
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 px-1 mb-2">Filters</div>
               <div className="space-y-1.5">
-                {([
-                  ['all', 'All'],
-                  ['720p', '720p'],
-                  ['1080p', '1080p'],
-                ] as const).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => setResolutionFilter(value)}
-                    className={`w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition ${
-                      resolutionFilter === value
-                        ? 'bg-cyan-500 text-slate-950'
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+                <button type="button" onClick={() => setResolutionFilter(current => current === '720p' ? null : '720p')} className={resolutionFilter === '720p' ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '720p'}>720p</button>
+                <button type="button" onClick={() => setResolutionFilter(current => current === '1080p' ? null : '1080p')} className={resolutionFilter === '1080p' ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '1080p'}>1080p</button>
+                <button type="button" onClick={() => setSizeSort(current => current === null ? 'asc' : current === 'asc' ? 'desc' : 'asc')} className={sizeSort ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={Boolean(sizeSort)}>Size {sizeSort === 'asc' ? '↑' : sizeSort === 'desc' ? '↓' : ''}</button>
+                <button type="button" onClick={() => setTimeSort(current => current === null ? 'desc' : current === 'desc' ? 'asc' : 'desc')} className={timeSort ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={Boolean(timeSort)}>Time {timeSort === 'desc' ? '↓' : timeSort === 'asc' ? '↑' : ''}</button>
               </div>
               <div className="mt-2 px-1 text-[10px] leading-4 text-slate-600">
                 Torrents over 2 GiB are hidden automatically.
@@ -446,56 +422,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
               {sortedResults.length} of {results.length} result{results.length === 1 ? '' : 's'}
             </div>
 
-            <div className="flex items-center gap-1.5 sm:gap-2 text-xs">
-              <select
-                value={minSeeders}
-                onChange={(e) => setMinSeeders(Number(e.target.value))}
-                className="px-2 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 focus:outline-none focus:border-cyan-500"
-                title="Minimum seeders"
-                aria-label="Minimum seeders"
-              >
-                <option value={0}>All seeders</option>
-                <option value={1}>1+ seeders</option>
-                <option value={5}>5+ seeders</option>
-                <option value={10}>10+ seeders</option>
-                <option value={20}>20+ seeders</option>
-                <option value={50}>50+ seeders</option>
-              </select>
-              <div className="flex items-center gap-1.5">
-                <SlidersHorizontal className="w-3.5 h-3.5 text-slate-500" />
-                <select
-                  value={sortBy}
-                  onChange={(e) => {
-                    const nextSortBy = e.target.value as 'time' | 'size' | 'seeds';
-                    setSortBy(nextSortBy);
-                    // Time and seed counts default to descending; file size
-                    // defaults to ascending so the smallest result appears first.
-                    setSortDirection(nextSortBy === 'size' ? 'asc' : 'desc');
-                  }}
-                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 focus:outline-none focus:border-cyan-500"
-                  title="Sort search results"
-                >
-                  <option value="time">Time</option>
-                  <option value="size">Size</option>
-                  <option value="seeds">Seeds</option>
-                </select>
-              </div>
-
-              <select
-                value={sortDirection}
-                onChange={(e) => setSortDirection(e.target.value as 'desc' | 'asc')}
-                className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 focus:outline-none focus:border-cyan-500"
-                title="Sort order"
-                aria-label="Sort order"
-              >
-                <option value="desc">
-                  {sortBy === 'time' ? 'Newest first' : sortBy === 'size' ? 'Largest first' : 'Most seeds first'}
-                </option>
-                <option value="asc">
-                  {sortBy === 'time' ? 'Oldest first' : sortBy === 'size' ? 'Smallest first' : 'Fewest seeds first'}
-                </option>
-              </select>
-            </div>
           </div>
 
           <div className="rounded-2xl border border-slate-800 overflow-hidden bg-slate-900 divide-y divide-slate-800/80">
@@ -607,8 +533,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
           </h3>
           <p className="text-xs text-slate-500 mt-1">
             {results.length > 0
-              ? 'Lower the minimum seeders filter to see more results.'
-              : 'Try a broader search term or enable more torrent indexers.'}
+              ? 'Try a different resolution or sorting filter.'
+              : 'Try a broader search term or change your filters.'}
           </p>
         </div>
       )}

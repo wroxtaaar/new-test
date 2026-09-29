@@ -76,15 +76,8 @@ export default function App() {
   // Navigation & Theme
   // Seedr is connected per browser session using the user's Personal Access Token.
   // The PAT is sent only to our backend over HTTPS and is never stored in localStorage.
-  const [productWelcomeOpen, setProductWelcomeOpen] = useState(() => {
-    try {
-      return window.localStorage.getItem('torrent_studio_welcome_seen') !== 'true';
-    } catch {
-      return true;
-    }
-  });
   const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'pat'>('welcome');
-  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(false);
+  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(true);
   const [seedrConnected, setSeedrConnected] = useState(false);
   const [seedrSessionReady, setSeedrSessionReady] = useState(false);
   const [seedrPat, setSeedrPat] = useState('');
@@ -102,10 +95,6 @@ export default function App() {
           setSeedrConnected(true);
           setSeedrConfigured(true);
           setSeedrOnboardingOpen(false);
-          setProductWelcomeOpen(false);
-          try {
-            window.localStorage.setItem('torrent_studio_welcome_seen', 'true');
-          } catch {}
         }
       })
       .catch(() => {
@@ -680,14 +669,6 @@ export default function App() {
   }, []);
 
   const openAddMagnet = useCallback((source = '', sourceUrl = '', descriptorUrl = '') => {
-    if (!seedrConnected) {
-      setSeedrPat('');
-      setSeedrConnectError('');
-      setSeedrOnboardingStep('welcome');
-      setSeedrOnboardingOpen(true);
-      return;
-    }
-
     if (seedrDownloadActive) {
       setSeedrAddBlockedNotice(
         'A Seedr download is already in progress. Free Seedr accounts allow one parallel download. Wait for it to finish before adding another magnet link.'
@@ -701,7 +682,7 @@ export default function App() {
     setInitialSourceUrl(sourceUrl);
     setInitialDescriptorUrl(descriptorUrl);
     setIsAddMagnetOpen(true);
-  }, [seedrDownloadActive, seedrConnected]);
+  }, [seedrDownloadActive]);
 
   // Load lightweight application metadata first. The actual files for the
   // currently open folder are fetched separately, after folder metadata exists.
@@ -1155,15 +1136,6 @@ export default function App() {
       totalSize: number;
     }
   ) => {
-    if (!seedrConnected) {
-      setSeedrPat('');
-      setSeedrConnectError('');
-      setSeedrOnboardingStep('welcome');
-      setSeedrOnboardingOpen(true);
-      setActiveTab('search');
-      return;
-    }
-
     const trimmedSource = source.trim();
     const seedrSource =
       source.toLowerCase().startsWith('magnet:?')
@@ -2274,45 +2246,6 @@ export default function App() {
       return remainder.length > 0 && !remainder.includes('/');
     });
 
-  if (productWelcomeOpen) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6 py-10">
-        <div className="w-full max-w-2xl text-center">
-          <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-tr from-cyan-500 via-blue-600 to-indigo-600 shadow-2xl shadow-cyan-500/20">
-            <Cloud className="h-10 w-10 text-slate-950 fill-current" />
-          </div>
-
-          <p className="mt-8 text-xs font-bold uppercase tracking-[0.3em] text-cyan-400">
-            Torrent Studio
-          </p>
-          <h1 className="mt-4 text-4xl font-black tracking-tight text-white sm:text-6xl">
-            Welcome to Torrent Studio
-          </h1>
-          <p className="mx-auto mt-5 max-w-xl text-base leading-7 text-slate-400 sm:text-lg">
-            Search torrents, explore releases, and discover everything you need before deciding where to download.
-          </p>
-
-          <button
-            type="button"
-            onClick={() => {
-              try {
-                window.localStorage.setItem('torrent_studio_welcome_seen', 'true');
-              } catch {}
-              setProductWelcomeOpen(false);
-            }}
-            className="mt-10 inline-flex min-w-44 items-center justify-center rounded-2xl bg-cyan-500 px-7 py-3.5 text-base font-bold text-slate-950 shadow-xl shadow-cyan-500/20 transition hover:bg-cyan-400"
-          >
-            Start Now
-          </button>
-
-          <p className="mt-5 text-xs text-slate-600">
-            You can explore search without connecting a Seedr account.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : theme === 'dim' ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'} transition-colors duration-200`}>
       {/* Top Main Navigation Header */}
@@ -2356,19 +2289,14 @@ export default function App() {
 
           {/* Right: Quick actions & User Switcher */}
           <div className="flex items-center gap-2">
+            {/* "+ Add Magnet" Primary CTA */}
             <button
-              type="button"
-              onClick={() => {
-                setSeedrPat('');
-                setSeedrConnectError('');
-                setSeedrOnboardingStep(seedrConnected ? 'pat' : 'welcome');
-                setSeedrOnboardingOpen(true);
-              }}
-              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition tap-target"
-              title="Connect your Seedr account"
+              onClick={() => openAddMagnet()}
+              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 transition tap-target"
             >
-              <Cloud className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-              <span>Connect to Seedr</span>
+              <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4 stroke-[3]" />
+              <span className="hidden sm:inline">Add Magnet</span>
+              <span className="sm:hidden">Add</span>
             </button>
 
             {/* Notification Bell */}
@@ -2467,6 +2395,51 @@ export default function App() {
         <div className={activeTab === 'search' ? 'block' : 'hidden'}>
           <TorrentSearchPanel onAdd={handleSearchAdd} />
 
+          {seedrInsufficientSpacePrompt && (
+            <div className="fixed inset-x-3 top-20 z-[100] flex justify-center pointer-events-none">
+              <div className="w-full max-w-md rounded-2xl border border-rose-400/40 bg-slate-950/95 backdrop-blur-xl shadow-[0_0_30px_rgba(244,63,94,0.22)] p-4 pointer-events-auto">
+                <div className="flex items-start gap-3">
+                  <div className="shrink-0 rounded-xl bg-rose-500/10 border border-rose-500/20 p-2">
+                    <AlertTriangle className="w-5 h-5 text-rose-400" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-rose-300 text-sm">Seedr storage is full</div>
+                    <div className="mt-1 text-xs leading-5 text-slate-300">
+                      This torrent needs <span className="font-semibold text-slate-100">{formatBytes(seedrInsufficientSpacePrompt.requiredBytes)}</span>,
+                      but only <span className="font-semibold text-rose-300">{formatBytes(seedrInsufficientSpacePrompt.remainingBytes)}</span> is available.
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const prompt = seedrInsufficientSpacePrompt;
+                          setSeedrInsufficientSpacePrompt(null);
+                          void handleAddMagnet(
+                            prompt.magnet,
+                            prompt.category,
+                            prompt.selectedFiles,
+                            prompt.manifest,
+                            prompt.existingHash,
+                            'qbittorrent'
+                          );
+                        }}
+                        className="flex-1 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 px-3 py-2 text-xs font-bold transition"
+                      >
+                        Use qBittorrent
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSeedrInsufficientSpacePrompt(null)}
+                        className="rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 text-xs font-semibold transition"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* TAB 2: MY CLOUD FILES */}
@@ -3350,53 +3323,21 @@ export default function App() {
         />
       )}
       {seedrOnboardingOpen && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[2px]"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="seedr-onboarding-title"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setSeedrOnboardingOpen(false);
-              setActiveTab('search');
-            }
-          }}
-          onTouchStart={(event) => {
-            if (event.target === event.currentTarget) {
-              setSeedrOnboardingOpen(false);
-              setActiveTab('search');
-            }
-          }}
-        >
-          <div
-            className="relative w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
-            onMouseDown={(event) => event.stopPropagation()}
-            onTouchStart={(event) => event.stopPropagation()}
-          >
-            <button
-              type="button"
-              aria-label="Close Seedr connection dialog"
-              onClick={() => {
-                setSeedrOnboardingOpen(false);
-                setActiveTab('search');
-              }}
-              className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-white"
-            >
-              <span className="text-2xl leading-none">×</span>
-            </button>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-4 py-6 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="seedr-onboarding-title">
+          <div className="w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6">
             <div className="flex items-start gap-3">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
                 <Cloud className="h-6 w-6" />
               </div>
               <div className="min-w-0">
                 <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
-                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Connect your Seedr account' : 'Connect your Seedr account'}
+                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Your own Seedr account' : 'Connect your Seedr account'}
                 </h2>
                 <p className="mt-1 text-sm leading-5 text-slate-400">
                   {seedrConnected
                     ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
                     : seedrOnboardingStep === 'welcome'
-                      ? 'You can explore Torrent Studio first. Connect your own Seedr account when you are ready to add a torrent.'
+                      ? 'Use your own Seedr account so your torrents and storage stay separate from other users.'
                       : 'Paste your Seedr Personal Access Token. Your Seedr password is never entered into Torrent Studio.'}
                 </p>
               </div>
@@ -3405,9 +3346,9 @@ export default function App() {
             {seedrOnboardingStep === 'welcome' && !seedrConnected ? (
               <>
                 <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                  <p className="text-sm font-semibold text-slate-200">Ready to download?</p>
+                  <p className="text-sm font-semibold text-slate-200">Use your own Seedr account</p>
                   <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Create a free Seedr account, then connect it with a Personal Access Token. Existing Seedr users can use an existing PAT.
+                    Create a free Seedr account, then generate a Personal Access Token from Seedr Settings. Existing Seedr users can use an existing PAT.
                   </p>
                 </div>
                 <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
