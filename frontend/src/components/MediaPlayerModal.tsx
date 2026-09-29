@@ -91,9 +91,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     const initialSubtitles = file?.subtitleTracks || [];
     setSubtitleTracks(initialSubtitles);
     setHlsSubtitleTracks([]);
-    setSelectedSubtitleIndex(initialSubtitles[0]?.index);
+    setSelectedSubtitleIndex(undefined);
     setSelectedHlsSubtitleIndex(undefined);
-    setAudioTracks([]);
+    setAudioTracks(file?.audioTracks || []);
   }, [file?.id]);
 
 
@@ -420,16 +420,52 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     if (!Number.isInteger(next)) return;
 
     const media = mediaRef.current;
-    resumeTimeRef.current = media?.currentTime || currentTime || 0;
-    resumePlayingRef.current = Boolean(media && !media.paused);
     const hls = hlsRef.current;
+
     if (hls?.audioTracks?.[next]) {
       hls.audioTrack = next;
       setSelectedAudioIndex(next);
       setTrackNotice('');
-    } else {
-      setTrackNotice('Selected audio track is not available in this stream.');
+      return;
     }
+
+    if (media && file?.streamUrl) {
+      const baseUrl = file.streamUrl;
+      const separator = baseUrl.includes('?') ? '&' : '?';
+      const nextUrl = baseUrl + separator + 'audio=' + encodeURIComponent(String(next));
+      const wasPlaying = !media.paused;
+      const position = media.currentTime || currentTime || 0;
+
+      setTrackNotice('Switching audio…');
+      setSelectedAudioIndex(next);
+      setMediaError('');
+      media.src = nextUrl;
+      media.load();
+
+      const restore = () => {
+        if (Number.isFinite(position) && position > 0 && Number.isFinite(media.duration)) {
+          try {
+            media.currentTime = Math.min(position, Math.max(0, media.duration - 0.25));
+          } catch {}
+        }
+        if (wasPlaying) {
+          media.play().then(() => {
+            setIsPlaying(true);
+            setTrackNotice('');
+          }).catch(() => {
+            setIsPlaying(false);
+            setTrackNotice('');
+          });
+        } else {
+          setTrackNotice('');
+        }
+        media.removeEventListener('loadedmetadata', restore);
+      };
+      media.addEventListener('loadedmetadata', restore);
+      return;
+    }
+
+    setTrackNotice('Selected audio track is not available in this stream.');
   };
 
   const handleSubtitleTrackChange = (value: string) => {
