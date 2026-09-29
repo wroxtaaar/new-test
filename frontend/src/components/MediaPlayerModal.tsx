@@ -181,8 +181,12 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     // Seedr presentation is HLS or a direct video stream and provides the proper
     // same-origin endpoint. Keep externalStreamUrl only for VLC/MX Player.
     const preferredSeedrUrl = file.streamUrl || file.externalStreamUrl || directBaseUrl;
+    // Use the resolved preferred URL for every playback operation below.
+    // Previously the code referenced an undefined streamUrl variable, which
+    // crashed the entire app as soon as the player effect ran.
+    const streamUrl = preferredSeedrUrl;
     // HLS audio tracks are switched through HLS.js. Do not append an audio query parameter.
-    const fallbackStreamUrl = file.externalStreamUrl && file.streamUrl !== file.externalStreamUrl
+    const fallbackStreamUrl = file.externalStreamUrl && file.streamUrl && file.streamUrl !== file.externalStreamUrl
       ? file.streamUrl
       : '';
 
