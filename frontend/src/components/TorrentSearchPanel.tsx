@@ -224,23 +224,24 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       setError('');
       saveRecentSearch(trimmed);
 
-      // TV/series searches often return large season packs first. Those are
-      // intentionally hidden from the normal Seedr-friendly result list when
-      // they exceed 2 GiB, which can make a plain show-name search look empty.
-      // If the initial result set has fewer than 10 Seedr-friendly results,
-      // silently run a second search for "<show> s01" and concatenate both
-      // result sets. Explicit Sxx/Exx/Season N searches are left untouched.
+      // Series searches can return very few plain-title rows because many
+      // torrent indexes require season/episode tokens. If fewer than 15
+      // Seedr-friendly results remain, silently search S01, then S02/S03,
+      // and concatenate/deduplicate them with the original results.
       let data = await api.searchTorrents(trimmed, 50);
       const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
       const hasExplicitEpisodeOrSeason = /\b(?:s\d{1,2}(?:e\d{1,3})?|season\s*\d{1,2}|series\s*\d{1,2})\b/i.test(trimmed);
       const seedrFriendlyCount = data.filter(result => (Number(result.size) || 0) <= maxSeedrFriendlySize).length;
 
-      if (seedrFriendlyCount < 10 && !hasExplicitEpisodeOrSeason) {
+      if (seedrFriendlyCount < 15 && !hasExplicitEpisodeOrSeason) {
         try {
-          const seasonOneResults = await api.searchTorrents(trimmed + ' s01', 50);
+          const seasonQueries = ['s01', 's02', 's03'];
+          const seasonResults = await Promise.all(
+            seasonQueries.map(suffix => api.searchTorrents(trimmed + ' ' + suffix, 50).catch(() => []))
+          );
           const merged = new Map<string, TorrentSearchResult>();
 
-          for (const result of [...data, ...seasonOneResults]) {
+          for (const result of [...data, ...seasonResults.flat()]) {
             const key = String(
               result.infoHash ||
               result.magnetUrl ||
@@ -248,14 +249,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               result.sourceUrl ||
               result.title
             ).trim().toLowerCase();
-            if (key && !merged.has(key)) {
-              merged.set(key, result);
-            }
+            if (key && !merged.has(key)) merged.set(key, result);
           }
 
           data = Array.from(merged.values());
         } catch {
-          // Keep the original results if the internal S01 search fails.
+          // Keep the original results if the internal season searches fail.
         }
       }
 
