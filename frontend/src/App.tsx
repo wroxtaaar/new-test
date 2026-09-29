@@ -2938,7 +2938,6 @@ export default function App() {
 
               </div>
             </div>
-          </div>
         )}
 
         {/* TAB 3: SHARED STORAGE & MULTI-USER */}
