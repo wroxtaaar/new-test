@@ -77,7 +77,9 @@ export default function App() {
   // Seedr is connected per browser session using the user's Personal Access Token.
   // The PAT is sent only to our backend over HTTPS and is never stored in localStorage.
   const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'pat'>('welcome');
-  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(true);
+  // Seedr connection is optional. Never open the connection dialog automatically
+  // on page load/refresh; the user opens it explicitly or reaches a Seedr action.
+  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(false);
   const [seedrConnected, setSeedrConnected] = useState(false);
   const [seedrSessionReady, setSeedrSessionReady] = useState(false);
   const [seedrPat, setSeedrPat] = useState('');
@@ -2289,14 +2291,19 @@ export default function App() {
 
           {/* Right: Quick actions & User Switcher */}
           <div className="flex items-center gap-2">
-            {/* "+ Add Magnet" Primary CTA */}
             <button
-              onClick={() => openAddMagnet()}
-              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 transition tap-target"
+              type="button"
+              onClick={() => {
+                setSeedrPat('');
+                setSeedrConnectError('');
+                setSeedrOnboardingStep(seedrConnected ? 'welcome' : 'welcome');
+                setSeedrOnboardingOpen(true);
+              }}
+              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition tap-target"
+              title="Connect to Seedr"
             >
-              <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4 stroke-[3]" />
-              <span className="hidden sm:inline">Add Magnet</span>
-              <span className="sm:hidden">Add</span>
+              <Cloud className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              <span>Connect to Seedr</span>
             </button>
 
             {/* Notification Bell */}
@@ -3323,8 +3330,40 @@ export default function App() {
         />
       )}
       {seedrOnboardingOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-4 py-6 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="seedr-onboarding-title">
-          <div className="w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6">
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[2px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="seedr-onboarding-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSeedrOnboardingOpen(false);
+              setActiveTab('search');
+            }
+          }}
+          onTouchStart={(event) => {
+            if (event.target === event.currentTarget) {
+              setSeedrOnboardingOpen(false);
+              setActiveTab('search');
+            }
+          }}
+        >
+          <div
+            className="relative w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
+            onMouseDown={(event) => event.stopPropagation()}
+            onTouchStart={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              aria-label="Close Seedr connection dialog"
+              onClick={() => {
+                setSeedrOnboardingOpen(false);
+                setActiveTab('search');
+              }}
+              className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-white"
+            >
+              <span className="text-2xl leading-none">×</span>
+            </button>
             <div className="flex items-start gap-3">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
                 <Cloud className="h-6 w-6" />

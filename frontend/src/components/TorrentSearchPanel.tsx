@@ -402,26 +402,20 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
 
       {sortedResults.length > 0 && (
         <div className="space-y-2">
-          <div className="grid grid-cols-1 md:grid-cols-[150px_minmax(0,1fr)] gap-2.5 sm:gap-3">
-            <aside className="rounded-xl border border-slate-800 bg-slate-900 p-2.5 md:sticky md:top-24 md:self-start">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 px-1 mb-2">Filters</div>
-              <div className="space-y-1.5">
-                <button type="button" onClick={() => setResolutionFilter(current => current === '720p' ? null : '720p')} className={resolutionFilter === '720p' ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '720p'}>720p</button>
-                <button type="button" onClick={() => setResolutionFilter(current => current === '1080p' ? null : '1080p')} className={resolutionFilter === '1080p' ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '1080p'}>1080p</button>
-                <button type="button" onClick={() => setSizeSort(current => current === null ? 'asc' : current === 'asc' ? 'desc' : 'asc')} className={sizeSort ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={Boolean(sizeSort)}>Size {sizeSort === 'asc' ? '↑' : sizeSort === 'desc' ? '↓' : ''}</button>
-                <button type="button" onClick={() => setTimeSort(current => current === null ? 'desc' : current === 'desc' ? 'asc' : 'desc')} className={timeSort ? 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition text-slate-400 hover:bg-slate-800 hover:text-slate-200'} aria-pressed={Boolean(timeSort)}>Time {timeSort === 'desc' ? '↓' : timeSort === 'asc' ? '↑' : ''}</button>
-              </div>
-              <div className="mt-2 px-1 text-[10px] leading-4 text-slate-600">
-                Torrents over 2 GiB are hidden automatically.
-              </div>
-            </aside>
+          <div className="rounded-xl border border-slate-800 bg-slate-900 px-2.5 py-2.5">
+            <div className="flex items-center gap-2 overflow-x-auto">
+              <span className="shrink-0 px-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Filters</span>
+              <button type="button" onClick={() => setResolutionFilter(current => current === '720p' ? null : '720p')} className={resolutionFilter === '720p' ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '720p'}>720p</button>
+              <button type="button" onClick={() => setResolutionFilter(current => current === '1080p' ? null : '1080p')} className={resolutionFilter === '1080p' ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '1080p'}>1080p</button>
+              <button type="button" onClick={() => setSizeSort(current => current === null ? 'asc' : current === 'asc' ? 'desc' : 'asc')} className={sizeSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(sizeSort)}>Size {sizeSort === 'asc' ? '↑' : sizeSort === 'desc' ? '↓' : ''}</button>
+              <button type="button" onClick={() => setTimeSort(current => current === null ? 'desc' : current === 'desc' ? 'asc' : 'desc')} className={timeSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(timeSort)}>Time {timeSort === 'desc' ? '↓' : timeSort === 'asc' ? '↑' : ''}</button>
+            </div>
+          </div>
 
-            <div className="min-w-0">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
+          <div className="flex items-center justify-between gap-2 px-1">
             <div className="text-xs text-slate-400">
               {sortedResults.length} of {results.length} result{results.length === 1 ? '' : 's'}
             </div>
-
           </div>
 
           <div className="rounded-2xl border border-slate-800 overflow-hidden bg-slate-900 divide-y divide-slate-800/80">
@@ -520,7 +514,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
               </div>
             ))}
           </div>
-            </div>
           </div>
         </div>
       )}
