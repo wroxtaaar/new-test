@@ -65,6 +65,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const [selectedHlsSubtitleIndex, setSelectedHlsSubtitleIndex] = useState<number | undefined>(undefined);
   const [trackNotice, setTrackNotice] = useState('');
   const [subtitleSearchError, setSubtitleSearchError] = useState('');
+  const [tracksLoading, setTracksLoading] = useState(false);
 
   const resumeTimeRef = useRef(0);
   const resumePlayingRef = useRef(false);
@@ -276,31 +277,57 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     const fileId = file.streamId || file.id.replace(/^seedr-/, '');
     if (!fileId) return;
 
+    const controller = new AbortController();
     let cancelled = false;
-    fetch('/api/seedr/media-info/' + encodeURIComponent(fileId))
+    setTracksLoading(true);
+
+    fetch('/api/seedr/media-info/' + encodeURIComponent(fileId), {
+      signal: controller.signal,
+    })
       .then(response => response.ok ? response.json() : null)
       .then(data => {
         if (cancelled || !data) return;
 
         const realAudio = Array.isArray(data.audioTracks) ? data.audioTracks : [];
-        const realSubtitles = Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [];
+        const embeddedSubtitles = Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [];
+        const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
 
         setAudioTracks(realAudio);
-        setSelectedAudioIndex(realAudio[0]?.index);
+        setSelectedAudioIndex(prev =>
+          prev !== undefined && realAudio.some((track: any) => track.index === prev)
+            ? prev
+            : realAudio[0]?.index
+        );
 
-        // Embedded subtitles are authoritative. Fall back to sidecar subtitles
-        // discovered by the library when the container has no text subtitle tracks.
-        if (realSubtitles.length > 0) {
-          setSubtitleTracks(realSubtitles);
-          setSelectedSubtitleIndex(undefined);
-        } else {
+        // Keep both sources available. Embedded text subtitles take priority,
+        // while matching SRT/VTT sidecars remain available as separate choices.
+        const seen = new Set<string>();
+        const mergedSubtitles = [...embeddedSubtitles, ...sidecarSubtitles].filter((track: any) => {
+          const key = String(track.url || '') + '|' + String(track.title || '');
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }).map((track: any, index: number) => ({ ...track, index }));
+
+        setSubtitleTracks(mergedSubtitles);
+        setSelectedSubtitleIndex(undefined);
+        setSelectedHlsSubtitleIndex(undefined);
+      })
+      .catch(error => {
+        if (!controller.signal.aborted) {
+          console.warn('[MEDIA] Seedr track metadata unavailable:', error);
+          setAudioTracks(file.audioTracks || []);
           setSubtitleTracks(file.subtitleTracks || []);
-          setSelectedSubtitleIndex(undefined);
         }
       })
-      .catch(error => console.warn('[MEDIA] Seedr track metadata unavailable:', error));
+      .finally(() => {
+        if (!cancelled) setTracksLoading(false);
+      });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [file?.id, file?.streamId, isVideo]);
 
   useEffect(() => {
@@ -991,6 +1018,13 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
             {/* Right: Speed, PiP, Fullscreen */}
             <div className="flex items-center gap-2 flex-nowrap justify-end min-w-0 overflow-x-auto scrollbar-hide">
+              {tracksLoading && (
+                <div className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5 text-[11px] text-slate-400">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                  Tracks
+                </div>
+              )}
+
               {audioTracks.length > 1 && (
                 <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
                   <Languages className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -1009,7 +1043,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                 </label>
               )}
 
-              {(hlsSubtitleTracks.length > 0 || subtitleTracks.length > 0) && (
+              {!tracksLoading && (hlsSubtitleTracks.length > 0 || subtitleTracks.length > 0) && (
                 <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
                   <Captions className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                   <select
