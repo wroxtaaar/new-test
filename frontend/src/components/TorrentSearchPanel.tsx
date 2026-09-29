@@ -464,10 +464,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             className="w-10 sm:w-auto px-2 sm:px-4 py-2 rounded-lg sm:rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition"
           >
             {isSearching ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Searching...
-              </>
+              <Search className="w-4 h-4 opacity-70" />
             ) : (
               <>
                 <Search className="w-4 h-4" />
