@@ -2200,20 +2200,6 @@ def _x1337_rows(html_text: str) -> list[dict[str, str]]:
     return rows
 
 
-async def _x1337_size_bytes(size_text: str) -> int:
-    """Convert a 1337x listing size such as '1.4 GB' to bytes."""
-    match = re.match(r"([\\d.]+)\\s*([KMGT]i?B)", size_text or "", re.IGNORECASE)
-    if not match:
-        return 0
-    units = {
-        "KB": 1024, "KIB": 1024,
-        "MB": 1024**2, "MIB": 1024**2,
-        "GB": 1024**3, "GIB": 1024**3,
-        "TB": 1024**4, "TIB": 1024**4,
-    }
-    return int(float(match.group(1)) * units.get(match.group(2).upper(), 1))
-
-
 async def search_1337x_direct(query: str, limit: int = 50, pages: int = 3) -> list[dict[str, Any]]:
     """Fast 1337x fallback: fetch a few listing pages, filter locally, then resolve only eligible magnets."""
     q, season, episode = _media_search_parts(query)
@@ -2793,7 +2779,6 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
     if cached and len(cached[1]) >= 8 and now - cached[0] < SEARCH_CACHE_SECONDS:
         return cached[1]
 
-    x1337_task = asyncio.create_task(search_1337x_direct(query, limit))
     csv_task = asyncio.create_task(search_torrents_csv(query, limit))
     api_task = asyncio.create_task(search_apibay(query, limit))
 
@@ -2815,7 +2800,7 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
         else None
     )
 
-    tasks = {x1337_task, csv_task, api_task}
+    tasks = {csv_task, api_task}
     if tv_task is not None:
         tasks.add(tv_task)
     providers: list[dict[str, Any]] = []
@@ -2913,7 +2898,7 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
                                 logger.info("TV episode enrichment failed for '%s': %s", query, exc)
                 break
     finally:
-        all_tasks = [x1337_task, csv_task, api_task] + ([tv_task] if tv_task is not None else [])
+        all_tasks = [csv_task, api_task] + ([tv_task] if tv_task is not None else [])
         for task in all_tasks:
             if not task.done():
                 task.cancel()
