@@ -2836,7 +2836,13 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
             if key and key not in merged:
                 merged[key] = item
 
-    results = list(merged.values())
+    # Hide tiny torrents from the search UI. They are usually samples,
+    # subtitles, extras, or otherwise not useful for the main media workflow.
+    minimum_search_size = 100 * 1024 * 1024
+    results = [
+        item for item in merged.values()
+        if int(item.get("size") or 0) >= minimum_search_size
+    ]
     results.sort(
         key=lambda item: (
             int(item.get("seeders") or 0),
