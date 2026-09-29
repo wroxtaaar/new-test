@@ -3478,14 +3478,6 @@ export default function App() {
                         <p className="mt-2 text-[11px] leading-4 text-slate-500">
                           Use the PAT here, not your Seedr password or an app password.
                         </p>
-                        <a
-                          href="https://www.seedr.cc/api/v0.1/console/tokens"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200"
-                        >
-                          Open Seedr Personal Access Tokens <ExternalLink className="h-3 w-3" />
-                        </a>
                       </div>
                     )}
 
