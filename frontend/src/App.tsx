@@ -92,7 +92,7 @@ export default function App() {
   const [seedrPat, setSeedrPat] = useState('');
   const [seedrPatSubmitting, setSeedrPatSubmitting] = useState(false);
   const [seedrConnectError, setSeedrConnectError] = useState('');
-  const [showSeedrPatHelp, setShowSeedrPatHelp] = useState(false);
+  const [showSeedrPatHelp, setShowSeedrPatHelp] = useState(true);
 
   const markSeedrOnboardingSeen = useCallback(() => {
     try {
@@ -126,7 +126,7 @@ export default function App() {
   const connectSeedrWithPat = useCallback(async () => {
     const pat = seedrPat.trim();
     if (!pat) {
-      setSeedrConnectError('Paste your Seedr Personal Access Token.');
+      setSeedrConnectError('Paste your Seedr token.');
       return;
     }
 
@@ -3501,7 +3501,7 @@ export default function App() {
                       <div>
                         <p className="text-sm font-semibold text-emerald-200">Seedr Personal Access Token</p>
                         <p className="mt-1 text-xs leading-5 text-slate-300">
-                          Copy your PAT from Seedr Settings → API / External Access.
+                          Copy your token from Seedr Settings → API / External Access.
                         </p>
                       </div>
                       <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-400" />
@@ -3529,23 +3529,23 @@ export default function App() {
                       aria-expanded={showSeedrPatHelp}
                     >
                       <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showSeedrPatHelp ? 'rotate-90' : ''}`} />
-                      How to create a PAT
+                      How to create a token
                     </button>
 
                     {showSeedrPatHelp && (
                       <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                        <p className="text-xs font-semibold text-slate-200">Create your Seedr Personal Access Token</p>
+                        <p className="text-xs font-semibold text-slate-200">Create your Seedr token</p>
                         <ol className="mt-2 space-y-1.5 pl-4 text-[11px] leading-4 text-slate-400 list-decimal">
-                          <li>Open the <span className="font-semibold text-slate-300">Seedr Personal Access Tokens</span> page.</li>
+                          <li>Open the <span className="font-semibold text-slate-300">Seedr tokens</span> page.</li>
                           <li>Give the token a descriptive <span className="font-semibold text-slate-300">name</span>.</li>
                           <li>Set <span className="font-semibold text-slate-300">Expiration</span> to <span className="font-semibold text-slate-300">Never</span>.</li>
                           <li>Under Scopes, click <span className="font-semibold text-slate-300">Read &amp; Add Torrents</span>.</li>
                           <li>Click <span className="font-semibold text-slate-300">Generate Token</span>.</li>
                           <li>Copy the token and save it somewhere safe.</li>
-                          <li>Paste that same token into Torrent Studio below and click <span className="font-semibold text-slate-300">Connect with PAT</span>.</li>
+                          <li>Paste that same token into Torrent Studio below and click <span className="font-semibold text-slate-300">Connect</span>.</li>
                         </ol>
                         <p className="mt-2 text-[11px] leading-4 text-slate-500">
-                          Use the PAT here, not your Seedr password or an app password.
+                          Use the token here, not your Seedr password or an app password.
                         </p>
                       </div>
                     )}
