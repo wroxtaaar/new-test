@@ -22,6 +22,7 @@ import {
   Loader2
 } from 'lucide-react';
 import Hls from 'hls.js';
+import { api, API_BASE } from '../api/client.ts';
 import { StorageFile } from '../types/index.ts';
 import { formatBytes, formatDuration } from '../utils/formatters.ts';
 
@@ -76,6 +77,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const alternateAudioRef = useRef<HTMLAudioElement>(null);
+  const alternateAudioIndexRef = useRef<number | undefined>(undefined);
+  const primaryAudioIndexRef = useRef<number | undefined>(undefined);
+  const alternateAudioRequestRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const isVideo = file?.type === 'video';
@@ -94,9 +99,20 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setHlsSubtitleTracks([]);
     setSelectedSubtitleIndex(undefined);
     setSelectedHlsSubtitleIndex(undefined);
+    alternateAudioIndexRef.current = undefined;
+    primaryAudioIndexRef.current = undefined;
+    alternateAudioRequestRef.current += 1;
+    const alternateAudio = alternateAudioRef.current;
+    if (alternateAudio) {
+      alternateAudio.pause();
+      alternateAudio.removeAttribute('src');
+      alternateAudio.load();
+    }
     const initialAudioTracks = file?.audioTracks || [];
+    const initialAudio = initialAudioTracks.find((track: any) => track.default) || initialAudioTracks[0];
+    primaryAudioIndexRef.current = initialAudio?.index;
     setAudioTracks(initialAudioTracks);
-    setSelectedAudioIndex(initialAudioTracks[0]?.index);
+    setSelectedAudioIndex(initialAudio?.index);
   }, [file?.id]);
 
 
@@ -281,10 +297,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     let cancelled = false;
     setTracksLoading(true);
 
-    fetch('/api/seedr/media-info/' + encodeURIComponent(fileId), {
-      signal: controller.signal,
-    })
-      .then(response => response.ok ? response.json() : null)
+    api.getSeedrMediaInfo(fileId)
       .then(data => {
         if (cancelled || !data) return;
 
@@ -293,14 +306,17 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
 
         setAudioTracks(realAudio);
+        const defaultAudio = realAudio.find((track: any) => track.default) || realAudio[0];
+        primaryAudioIndexRef.current = defaultAudio?.index;
         setSelectedAudioIndex(prev =>
           prev !== undefined && realAudio.some((track: any) => track.index === prev)
             ? prev
-            : realAudio[0]?.index
+            : defaultAudio?.index
         );
 
-        // Keep both sources available. Embedded text subtitles take priority,
-        // while matching SRT/VTT sidecars remain available as separate choices.
+        // Keep both embedded WebVTT tracks and Seedr sidecar tracks. The API
+        // client converts embedded relative URLs to the Render API origin so
+        // a Vercel-hosted frontend can actually load the subtitle file.
         const seen = new Set<string>();
         const mergedSubtitles = [...embeddedSubtitles, ...sidecarSubtitles].filter((track: any) => {
           const key = String(track.url || '') + '|' + String(track.title || '');
@@ -312,13 +328,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         setSubtitleTracks(mergedSubtitles);
         setSelectedSubtitleIndex(undefined);
         setSelectedHlsSubtitleIndex(undefined);
-      })
-      .catch(error => {
-        if (!controller.signal.aborted) {
-          console.warn('[MEDIA] Seedr track metadata unavailable:', error);
-          setAudioTracks(file.audioTracks || []);
-          setSubtitleTracks(file.subtitleTracks || []);
-        }
       })
       .finally(() => {
         if (!cancelled) setTracksLoading(false);
@@ -414,46 +423,63 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
   // Toggle play/pause
   const togglePlay = () => {
-    if (!mediaRef.current) return;
+    const media = mediaRef.current;
+    const alternateAudio = alternateAudioRef.current;
+    if (!media) return;
+
     if (isPlaying) {
-      mediaRef.current.pause();
-    } else {
-      mediaRef.current.play();
+      media.pause();
+      alternateAudio?.pause();
+      setIsPlaying(false);
+      return;
     }
-    setIsPlaying(!isPlaying);
+
+    const playRequests: Promise<any>[] = [media.play()];
+    if (alternateAudioIndexRef.current !== undefined && alternateAudio?.src) {
+      playRequests.push(alternateAudio.play());
+    }
+    Promise.allSettled(playRequests).then(() => {
+      setIsPlaying(!media.paused);
+    });
   };
 
   // Seek
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
     const media = mediaRef.current;
+    if (!media || !Number.isFinite(time)) return;
 
+    const wasPlaying = !media.paused;
     setCurrentTime(time);
     setIsSeeking(true);
     setTrackNotice('Seeking…');
 
-    if (media) {
-      media.currentTime = time;
+    media.currentTime = Math.max(0, Math.min(duration || file.duration || time, time));
 
-      // If the video is paused, there will be no "playing" event to dismiss
-      // the loader. The seeked event below handles that case.
-      if (media.paused) {
-        const clearPausedSeek = () => {
-          setIsSeeking(false);
-          setTrackNotice('');
-          media.removeEventListener('seeked', clearPausedSeek);
-        };
-        media.addEventListener('seeked', clearPausedSeek, { once: true });
-      }
+    // When an alternate Seedr audio track is active, reload that audio from
+    // the requested absolute video position. The video itself remains on its
+    // original full-duration timeline.
+    if (alternateAudioIndexRef.current !== undefined) {
+      loadAlternateAudio(alternateAudioIndexRef.current, time, wasPlaying);
+      return;
+    }
+
+    if (media.paused) {
+      const clearPausedSeek = () => {
+        setIsSeeking(false);
+        setTrackNotice('');
+        media.removeEventListener('seeked', clearPausedSeek);
+      };
+      media.addEventListener('seeked', clearPausedSeek, { once: true });
     }
   };
 
   // Skip
   const skip = (seconds: number) => {
-    if (!mediaRef.current) return;
-    setIsSeeking(true);
-    setTrackNotice('Seeking…');
-    mediaRef.current.currentTime = Math.max(0, Math.min(duration, mediaRef.current.currentTime + seconds));
+    const media = mediaRef.current;
+    if (!media) return;
+    const nextTime = Math.max(0, Math.min(duration || file.duration || media.duration || 0, currentTime + seconds));
+    handleSeek({ target: { value: String(nextTime) } } as React.ChangeEvent<HTMLInputElement>);
   };
 
   // Volume
@@ -464,16 +490,137 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     if (mediaRef.current) {
       mediaRef.current.volume = val;
     }
+    if (alternateAudioRef.current) {
+      alternateAudioRef.current.volume = val;
+      alternateAudioRef.current.muted = val === 0;
+    }
   };
 
   const toggleMute = () => {
-    if (!mediaRef.current) return;
+    const media = mediaRef.current;
+    const alternateAudio = alternateAudioRef.current;
+    if (!media) return;
+
     if (isMuted) {
-      mediaRef.current.volume = volume || 0.8;
+      const nextVolume = volume || 0.8;
+      media.volume = nextVolume;
+      media.muted = false;
+      if (alternateAudio) {
+        alternateAudio.volume = nextVolume;
+        alternateAudio.muted = false;
+      }
       setIsMuted(false);
     } else {
-      mediaRef.current.volume = 0;
+      media.volume = 0;
+      media.muted = true;
+      if (alternateAudio) {
+        alternateAudio.volume = 0;
+        alternateAudio.muted = true;
+      }
       setIsMuted(true);
+    }
+  };
+
+  const loadAlternateAudio = (trackIndex: number, position: number, resumePlaying: boolean) => {
+    const media = mediaRef.current;
+    const audio = alternateAudioRef.current;
+    const fileId = file?.streamId || file?.id?.replace(/^seedr-/, '');
+
+    if (!media || !audio || !fileId) {
+      setTrackNotice('Selected audio track is not available in this stream.');
+      return;
+    }
+
+    const requestId = ++alternateAudioRequestRef.current;
+    const safePosition = Math.max(0, Number.isFinite(position) ? position : 0);
+
+    // Keep the original video resource and timeline intact. Only its audio
+    // output is muted while the selected track is prepared in a second audio
+    // element. This avoids resetting the video's duration/seekable range.
+    media.pause();
+    media.muted = true;
+    audio.pause();
+    audio.volume = media.volume;
+    audio.muted = isMuted;
+    audio.playbackRate = playbackSpeed;
+
+    const url =
+      API_BASE +
+      '/api/seedr/media/audio/' + encodeURIComponent(fileId) +
+      '?track=' + encodeURIComponent(String(trackIndex)) +
+      '&start=' + encodeURIComponent(String(safePosition));
+
+    setTrackNotice('Switching audio…');
+    setMediaError('');
+    setIsSeeking(true);
+    alternateAudioIndexRef.current = trackIndex;
+    audio.src = url;
+    audio.load();
+
+    const handleAudioError = () => {
+      if (requestId !== alternateAudioRequestRef.current) return;
+      alternateAudioIndexRef.current = undefined;
+      media.muted = isMuted;
+      setIsSeeking(false);
+      setIsPlaying(false);
+      setTrackNotice('Unable to load the selected audio track.');
+      audio.removeEventListener('canplay', startTogether);
+    };
+
+    const startTogether = () => {
+      if (requestId !== alternateAudioRequestRef.current) return;
+      audio.removeEventListener('canplay', startTogether);
+      audio.removeEventListener('error', handleAudioError);
+      audio.currentTime = 0;
+
+      if (!resumePlaying) {
+        setIsSeeking(false);
+        setIsPlaying(false);
+        setTrackNotice('');
+        return;
+      }
+
+      // Start both elements from the same user-visible position only after
+      // the alternate audio is playable. This prevents the audio track from
+      // getting ahead of the first video frame during a track switch.
+      const startVideo = media.play();
+      const startAudio = audio.play();
+      Promise.allSettled([startVideo, startAudio]).then((results) => {
+        if (requestId !== alternateAudioRequestRef.current) return;
+        const videoStarted = results[0]?.status === 'fulfilled';
+        const audioStarted = results[1]?.status === 'fulfilled';
+        if (!videoStarted || !audioStarted) {
+          media.pause();
+          audio.pause();
+          setIsSeeking(false);
+          setIsPlaying(false);
+          setTrackNotice('Playback could not resume with the selected audio track.');
+          return;
+        }
+        setIsSeeking(false);
+        setIsPlaying(true);
+        setTrackNotice('');
+      });
+    };
+
+    audio.addEventListener('canplay', startTogether, { once: true });
+    audio.addEventListener('error', handleAudioError, { once: true });
+  };
+
+  const clearAlternateAudio = (restoreVideoAudio = true) => {
+    const media = mediaRef.current;
+    const audio = alternateAudioRef.current;
+    alternateAudioRequestRef.current += 1;
+
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+    alternateAudioIndexRef.current = undefined;
+
+    if (restoreVideoAudio && media) {
+      media.muted = isMuted;
     }
   };
 
@@ -491,38 +638,31 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       return;
     }
 
-    if (media && file?.streamId && file.streamUrl.includes('/api/seedr/media/video/')) {
+    if (media && file?.streamUrl.includes('/api/seedr/media/video/')) {
       const position = Number.isFinite(media.currentTime) ? media.currentTime : currentTime;
       const wasPlaying = !media.paused;
-      const baseUrl = file.streamUrl.split('?')[0];
-      const nextUrl =
-        baseUrl +
-        '?audio=' + encodeURIComponent(String(next)) +
-        '&start=' + encodeURIComponent(String(Math.max(0, position)));
+      const primaryIndex = primaryAudioIndexRef.current;
 
-      setTrackNotice('Switching audio…');
       setSelectedAudioIndex(next);
-      setMediaError('');
-      media.src = nextUrl;
-      media.load();
 
-      const restore = () => {
-        // The server seeks before creating the new fragmented MP4, so the
-        // media timeline begins near the previous position.
+      if (primaryIndex !== undefined && next === primaryIndex) {
+        clearAlternateAudio(true);
+        media.currentTime = position;
         if (wasPlaying) {
-          media.play().then(() => {
-            setIsPlaying(true);
-            setTrackNotice('');
-          }).catch(() => {
-            setIsPlaying(false);
-            setTrackNotice('');
-          });
+          media.play()
+            .then(() => {
+              setIsPlaying(true);
+              setTrackNotice('');
+            })
+            .catch(() => setIsPlaying(false));
         } else {
+          setIsPlaying(false);
           setTrackNotice('');
         }
-        media.removeEventListener('loadedmetadata', restore);
-      };
-      media.addEventListener('loadedmetadata', restore);
+        return;
+      }
+
+      loadAlternateAudio(next, position, wasPlaying);
       return;
     }
 
@@ -557,6 +697,39 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     if (mediaRef.current) {
       mediaRef.current.playbackRate = speed;
     }
+    if (alternateAudioRef.current) {
+      alternateAudioRef.current.playbackRate = speed;
+    }
+  };
+
+  const languageNames: Record<string, string> = {
+    en: 'English', eng: 'English',
+    hi: 'Hindi', hin: 'Hindi',
+    fr: 'French', fra: 'French',
+    de: 'German', deu: 'German',
+    es: 'Spanish', spa: 'Spanish',
+    it: 'Italian', ita: 'Italian',
+    pt: 'Portuguese', por: 'Portuguese',
+    ru: 'Russian', rus: 'Russian',
+    ja: 'Japanese', jpn: 'Japanese',
+    ko: 'Korean', kor: 'Korean',
+    zh: 'Chinese', zho: 'Chinese',
+    ar: 'Arabic', ara: 'Arabic',
+    bn: 'Bengali', ben: 'Bengali',
+  };
+
+  const formatTrackLabel = (
+    track: { language?: string; title?: string },
+    index: number,
+    fallbackPrefix: string
+  ) => {
+    const languageCode = String(track.language || '').trim().toLowerCase();
+    const language = languageNames[languageCode] || languageCode.toUpperCase();
+    const title = String(track.title || '').trim();
+    if (language && title && title.toLowerCase() !== language.toLowerCase()) {
+      return language + ' (' + title + ')';
+    }
+    return language || title || fallbackPrefix + ' ' + (index + 1);
   };
 
   // Fullscreen
@@ -699,6 +872,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         {isVideo ? (
           <video
             ref={videoRef}
+            crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
             src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
             className="w-full h-32 object-contain bg-black rounded-lg"
             onTimeUpdate={onTimeUpdate}
@@ -722,6 +896,8 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
             onEnded={() => setIsPlaying(false)}
           />
         )}
+
+        <audio ref={alternateAudioRef} preload="auto" className="hidden" aria-hidden="true" />
 
         {/* Mini Controls */}
         <div className="flex items-center justify-between pt-1">
@@ -872,6 +1048,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           {isVideo ? (
             <video
               ref={videoRef}
+              crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
               autoPlay
               className={`w-full h-full object-contain cursor-pointer ${
                 isFullscreen ? 'max-h-none' : 'max-h-[60vh]'
@@ -936,6 +1113,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               />
             </div>
           )}
+          <audio ref={alternateAudioRef} preload="auto" className="hidden" aria-hidden="true" />
         </div>
 
         {/* Player Controls Bar */}
@@ -1026,48 +1204,49 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               )}
 
               {audioTracks.length > 1 && (
-                <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
-                  <Languages className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <label className="flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
+                  <Languages className="h-4 w-4 shrink-0 text-cyan-400" />
+                  <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:inline">Audio</span>
                   <select
                     value={selectedAudioIndex !== undefined ? selectedAudioIndex : (audioTracks[0]?.index ?? '')}
                     onChange={(e) => handleAudioTrackChange(e.target.value)}
-                    className="bg-transparent text-[11px] text-slate-200 outline-none max-w-[130px]"
+                    className="min-w-[115px] max-w-[185px] bg-transparent text-xs font-semibold text-slate-100 outline-none"
                     title="Audio track"
                   >
                     {audioTracks.map((track, index) => (
                       <option key={track.index} value={track.index}>
-                        {track.title || track.language?.toUpperCase() || `Audio ${index + 1}`}{track.default ? ' · Default' : ''}
+                        {formatTrackLabel(track, index, 'Audio')}{track.default ? ' · Default' : ''}
                       </option>
                     ))}
                   </select>
                 </label>
               )}
 
-              {!tracksLoading && (hlsSubtitleTracks.length > 0 || subtitleTracks.length > 0) && (
-                <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
-                  <Captions className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              {isVideo && (
+                <label className="flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
+                  <Captions className="h-4 w-4 shrink-0 text-cyan-400" />
+                  <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:inline">Subs</span>
                   <select
-                    value={selectedHlsSubtitleIndex !== undefined ? `hls:${selectedHlsSubtitleIndex}` : selectedSubtitleIndex !== undefined ? `external:${selectedSubtitleIndex}` : 'off'}
+                    disabled={tracksLoading || (hlsSubtitleTracks.length === 0 && subtitleTracks.length === 0)}
+                    value={selectedHlsSubtitleIndex !== undefined ? 'hls:' + selectedHlsSubtitleIndex : selectedSubtitleIndex !== undefined ? 'external:' + selectedSubtitleIndex : 'off'}
                     onChange={(e) => handleSubtitleTrackChange(e.target.value)}
-                    className="bg-transparent text-[11px] text-slate-200 outline-none max-w-[150px]"
-                    title="Subtitles"
+                    className="min-w-[110px] max-w-[185px] bg-transparent text-xs font-semibold text-slate-100 outline-none disabled:cursor-not-allowed disabled:text-slate-500"
+                    title={tracksLoading ? 'Loading subtitles' : 'Subtitles'}
                   >
-                    <option value="off">Subtitles Off</option>
+                    <option value="off">{tracksLoading ? 'Loading…' : 'Subtitles Off'}</option>
                     {hlsSubtitleTracks.map((track, index) => (
-                      <option key={`hls-sub-${track.index}`} value={`hls:${track.index}`}>
-                        {track.title || track.language?.toUpperCase() || `Embedded ${index + 1}`}
+                      <option key={'hls-sub-' + track.index} value={'hls:' + track.index}>
+                        {formatTrackLabel(track, index, 'Subtitle')}
                       </option>
                     ))}
                     {subtitleTracks.map((track, index) => (
-                      <option key={`external-sub-${track.index}`} value={`external:${track.index}`}>
-                        {track.title || track.language?.toUpperCase() || `Subtitle ${index + 1}`}
+                      <option key={'external-sub-' + track.index} value={'external:' + track.index}>
+                        {formatTrackLabel(track, index, 'Subtitle')}
                       </option>
                     ))}
                   </select>
                 </label>
               )}
-
-
 
               {/* Playback Speed selector */}
               <div className="flex items-center bg-slate-800/80 rounded-lg p-0.5 text-xs font-medium text-slate-300">
