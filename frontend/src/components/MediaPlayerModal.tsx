@@ -271,6 +271,39 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
 
   useEffect(() => {
+    if (!file || !isVideo) return;
+
+    const fileId = file.streamId || file.id.replace(/^seedr-/, '');
+    if (!fileId) return;
+
+    let cancelled = false;
+    fetch('/api/seedr/media-info/' + encodeURIComponent(fileId))
+      .then(response => response.ok ? response.json() : null)
+      .then(data => {
+        if (cancelled || !data) return;
+
+        const realAudio = Array.isArray(data.audioTracks) ? data.audioTracks : [];
+        const realSubtitles = Array.isArray(data.subtitleTracks) ? data.subtitleTracks : [];
+
+        setAudioTracks(realAudio);
+        setSelectedAudioIndex(realAudio[0]?.index);
+
+        // Embedded subtitles are authoritative. Fall back to sidecar subtitles
+        // discovered by the library when the container has no text subtitle tracks.
+        if (realSubtitles.length > 0) {
+          setSubtitleTracks(realSubtitles);
+          setSelectedSubtitleIndex(undefined);
+        } else {
+          setSubtitleTracks(file.subtitleTracks || []);
+          setSelectedSubtitleIndex(undefined);
+        }
+      })
+      .catch(error => console.warn('[MEDIA] Seedr track metadata unavailable:', error));
+
+    return () => { cancelled = true; };
+  }, [file?.id, file?.streamId, isVideo]);
+
+  useEffect(() => {
     const track = subtitleTrackRef.current?.track;
     if (track) track.mode = selectedSubtitleIndex === undefined ? 'disabled' : 'showing';
   }, [selectedSubtitleIndex, subtitleTracks]);
@@ -431,12 +464,14 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       return;
     }
 
-    if (media && file?.streamUrl) {
-      const baseUrl = file.streamUrl;
-      const separator = baseUrl.includes('?') ? '&' : '?';
-      const nextUrl = baseUrl + separator + 'audio=' + encodeURIComponent(String(next));
+    if (media && file?.streamId && file.streamUrl.includes('/api/seedr/media/video/')) {
+      const position = Number.isFinite(media.currentTime) ? media.currentTime : currentTime;
       const wasPlaying = !media.paused;
-      const position = media.currentTime || currentTime || 0;
+      const baseUrl = file.streamUrl.split('?')[0];
+      const nextUrl =
+        baseUrl +
+        '?audio=' + encodeURIComponent(String(next)) +
+        '&start=' + encodeURIComponent(String(Math.max(0, position)));
 
       setTrackNotice('Switching audio…');
       setSelectedAudioIndex(next);
@@ -445,11 +480,8 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       media.load();
 
       const restore = () => {
-        if (Number.isFinite(position) && position > 0 && Number.isFinite(media.duration)) {
-          try {
-            media.currentTime = Math.min(position, Math.max(0, media.duration - 0.25));
-          } catch {}
-        }
+        // The server seeks before creating the new fragmented MP4, so the
+        // media timeline begins near the previous position.
         if (wasPlaying) {
           media.play().then(() => {
             setIsPlaying(true);
@@ -469,7 +501,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
     setTrackNotice('Selected audio track is not available in this stream.');
   };
-
   const handleSubtitleTrackChange = (value: string) => {
     if (value === 'off') {
       setSelectedSubtitleIndex(undefined);
@@ -779,7 +810,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           }`}
           onClick={() => {
             if (isFullscreen) {
-              setFullscreenControlsVisible(current => !current);
+              setFullscreenControlsVisible(true);
             }
           }}
         >
@@ -818,7 +849,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               className={`w-full h-full object-contain cursor-pointer ${
                 isFullscreen ? 'max-h-none' : 'max-h-[60vh]'
               }`}
-              onClick={togglePlay}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (isFullscreen) setFullscreenControlsVisible(true);
+              }}
               onTimeUpdate={onTimeUpdate}
               onSeeking={onSeeking}
               onSeeked={onSeeked}
