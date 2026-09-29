@@ -1326,12 +1326,66 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
                 "Accept": "application/json",
                 **headers_base,
             }
-            response = await client.request(method, url, headers=headers, **kwargs)
+            request_started = time.monotonic()
+            logger.info(
+                "Seedr API request start: session=%s mode=%s method=%s url=%s "
+                "token_present=%s token_length=%s token_fingerprint=%s body_keys=%s",
+                _seedr_session_fingerprint(_seedr_request_session_id.get().strip()),
+                _seedr_session_auth_mode(_seedr_request_session_id.get().strip()),
+                method,
+                url,
+                bool(token),
+                len(token),
+                hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else "none",
+                sorted(body.keys()) if isinstance(body, dict) else [],
+            )
+            try:
+                response = await client.request(method, url, headers=headers, **kwargs)
+            except Exception as exc:
+                elapsed_ms = int((time.monotonic() - request_started) * 1000)
+                logger.exception(
+                    "Seedr API transport failure: session=%s mode=%s method=%s url=%s "
+                    "elapsed_ms=%s exception_type=%s exception=%s",
+                    _seedr_session_fingerprint(_seedr_request_session_id.get().strip()),
+                    _seedr_session_auth_mode(_seedr_request_session_id.get().strip()),
+                    method,
+                    url,
+                    elapsed_ms,
+                    type(exc).__name__,
+                    str(exc)[:1000],
+                )
+                raise SeedrError(
+                    "SEEDR_NETWORK_ERROR",
+                    502,
+                    f"Seedr request could not be completed: {type(exc).__name__}: {str(exc)[:500]}",
+                ) from exc
+
+            elapsed_ms = int((time.monotonic() - request_started) * 1000)
             raw = response.text
             try:
                 data = response.json() if raw else None
             except Exception:
                 data = raw
+
+            response_request_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("x-correlation-id")
+                or response.headers.get("cf-ray")
+                or ""
+            )
+            logger.info(
+                "Seedr API response: session=%s mode=%s method=%s path=%s status=%s "
+                "elapsed_ms=%s response_bytes=%s content_type=%s provider_request_id=%s",
+                _seedr_session_fingerprint(_seedr_request_session_id.get().strip()),
+                _seedr_session_auth_mode(_seedr_request_session_id.get().strip()),
+                method,
+                request_path,
+                response.status_code,
+                elapsed_ms,
+                len(raw.encode("utf-8", errors="ignore")),
+                response.headers.get("content-type", ""),
+                response_request_id[:200],
+            )
 
             if response.status_code < 400:
                 if isinstance(data, dict):
@@ -1346,11 +1400,21 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
 
             last_status, last_data, last_raw = response.status_code, data, raw
             logger.warning(
-                "Seedr API request failed: method=%s path=%s status=%s response=%s",
+                "Seedr API request failed: session=%s mode=%s method=%s path=%s url=%s "
+                "status=%s elapsed_ms=%s token_length=%s token_fingerprint=%s "
+                "provider_request_id=%s response_json=%s response_body=%s",
+                _seedr_session_fingerprint(_seedr_request_session_id.get().strip()),
+                _seedr_session_auth_mode(_seedr_request_session_id.get().strip()),
                 method,
                 request_path,
+                url,
                 response.status_code,
-                (raw[:500] if raw else "<empty>"),
+                elapsed_ms,
+                len(token),
+                hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else "none",
+                response_request_id[:200],
+                json.dumps(data, ensure_ascii=False, default=str)[:4000] if isinstance(data, (dict, list)) else "<not-json>",
+                raw[:4000] if raw else "<empty>",
             )
 
             break
@@ -3359,7 +3423,39 @@ async def seedr_add(request: Request):
     requested_folder = str(payload.get("folder_id") or "").strip()
     folder = int(requested_folder) if requested_folder.isdigit() else 0
 
-    task = unwrap_seedr_task(await add_task(raw_magnet, folder))
+    session_id = _seedr_request_session_id.get().strip()
+    logger.info(
+        "Seedr add start: session=%s mode=%s magnet_length=%s magnet_info_hash=%s "
+        "requested_folder=%s resolved_folder=%s",
+        _seedr_session_fingerprint(session_id),
+        _seedr_session_auth_mode(session_id),
+        len(raw_magnet),
+        info_hash(raw_magnet),
+        requested_folder or "<none>",
+        folder,
+    )
+
+    try:
+        task = unwrap_seedr_task(await add_task(raw_magnet, folder))
+    except SeedrError as exc:
+        logger.exception(
+            "Seedr add failed: session=%s mode=%s code=%s status=%s detail=%s",
+            _seedr_session_fingerprint(session_id),
+            _seedr_session_auth_mode(session_id),
+            exc.code,
+            exc.status_code,
+            exc.detail,
+        )
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Seedr add unexpected failure: session=%s mode=%s exception_type=%s exception=%s",
+            _seedr_session_fingerprint(session_id),
+            _seedr_session_auth_mode(session_id),
+            type(exc).__name__,
+            str(exc)[:2000],
+        )
+        raise
     tid = task_id(task)
     if not tid:
         raise HTTPException(502, "Seedr did not return a task id")
@@ -3367,6 +3463,15 @@ async def seedr_add(request: Request):
     task_folder_id = seedr_task_folder_id(task)
     task_name = seedr_task_name(task) or f"Torrent {tid}"
     schedule_seedr_cleanup(str(tid), task_name, task_folder_id)
+
+    logger.info(
+        "Seedr add success: session=%s mode=%s task_id=%s folder_id=%s task_name=%s",
+        _seedr_session_fingerprint(session_id),
+        _seedr_session_auth_mode(session_id),
+        tid,
+        task_folder_id or "<none>",
+        task_name[:300],
+    )
 
     return {
         "backend": "seedr",

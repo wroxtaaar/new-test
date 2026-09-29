@@ -388,7 +388,7 @@ export const api = {
     }
 
     if (forceBackend === 'seedr') {
-      const res = await apiFetch(API_BASE + '/api/seedr/add', {
+      const res = await apiFetch('/api/seedr/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ magnet })
