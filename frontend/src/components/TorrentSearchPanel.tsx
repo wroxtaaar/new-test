@@ -245,11 +245,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // Do not wait for metadata before displaying results. Start resolving
       // the first two results immediately, then the next two after that batch
       // finishes. The cache is used by Add when available.
-      const generation = ++prefetchGenerationRef.current;
+      const prefetchGeneration = ++prefetchGenerationRef.current;
       void (async () => {
         const candidates = data.slice(0, 4);
         for (let start = 0; start < candidates.length; start += 2) {
-          if (prefetchGenerationRef.current !== generation) return;
+          if (prefetchGenerationRef.current !== prefetchGeneration) return;
 
           const batch = candidates.slice(start, start + 2);
           await Promise.allSettled(batch.map(async (result) => {
