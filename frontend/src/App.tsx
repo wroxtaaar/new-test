@@ -303,6 +303,17 @@ export default function App() {
   };
 
   const seedrNoticeStorageKey = 'seedflow_seedr_notice';
+  const seedrPrepareWaiters = useRef<Record<string, {
+    resolve: (value: { files: Array<{
+      id: string;
+      streamId?: string;
+      name: string;
+      size: number;
+      folderId: string;
+      folderPath: string;
+    }> }) => void;
+    reject: (reason?: unknown) => void;
+  }>>({});
   const [seedrNotice, setSeedrNotice] = useState<SeedrNotice | null>(() => {
     try {
       const raw = window.localStorage.getItem(seedrNoticeStorageKey);
@@ -1124,6 +1135,104 @@ export default function App() {
     });
   }, []);
 
+  const handleSearchPrepare = useCallback(async (
+    result: {
+      title: string;
+      size: number;
+      infoHash?: string;
+      magnetUrl?: string;
+      downloadUrl?: string;
+      sourceUrl?: string;
+    },
+    metadata?: {
+      name: string;
+      hash: string;
+      files: { index: number; name: string; size: number; path: string; type: string; priority?: number }[];
+      totalSize: number;
+    }
+  ): Promise<{ files: Array<{
+    id: string;
+    streamId?: string;
+    name: string;
+    size: number;
+    folderId: string;
+    folderPath: string;
+  }> }> => {
+    if (!seedrConnected) {
+      setSeedrOnboardingStep('welcome');
+      setSeedrOnboardingOpen(true);
+      throw new Error('Connect your Seedr account first.');
+    }
+
+    if (seedrDownloadActive) {
+      const message = 'One Seedr file is already loading. Cancel that loading or wait for it to finish before preparing another.';
+      setSeedrAddBlockedNotice(message);
+      setActiveTab('files');
+      window.setTimeout(() => setSeedrAddBlockedNotice(null), 5000);
+      throw new Error(message);
+    }
+
+    const source = String(result.magnetUrl || result.downloadUrl || result.sourceUrl || '').trim();
+    const magnet = source.toLowerCase().startsWith('magnet:?')
+      ? source
+      : result.infoHash
+        ? 'magnet:?xt=urn:btih:' + result.infoHash.trim()
+        : source;
+
+    if (!magnet) {
+      throw new Error('This search result does not contain a usable magnet link.');
+    }
+
+    let resolvedMetadata = metadata;
+    if (!resolvedMetadata) {
+      resolvedMetadata = await api.inspectMagnet(
+        magnet,
+        'Downloads',
+        result.sourceUrl || '',
+        ''
+      );
+    }
+
+    const torrentName =
+      String(resolvedMetadata?.name || '').trim() ||
+      String(result.title || '').trim() ||
+      'Torrent';
+    const requiredBytes = Number(resolvedMetadata?.totalSize || result.size || 0);
+
+    const prepared = await api.prepareSeedrMagnet(magnet, requiredBytes, torrentName);
+    const taskId = prepared?.seedrTaskId;
+    if (taskId == null || taskId === '') {
+      throw new Error('Seedr accepted the request but did not return a task id.');
+    }
+
+    const taskKey = String(taskId);
+    const waitForCompletion = new Promise<{ files: Array<{
+      id: string;
+      streamId?: string;
+      name: string;
+      size: number;
+      folderId: string;
+      folderPath: string;
+    }> }>((resolve, reject) => {
+      seedrPrepareWaiters.current[taskKey] = { resolve, reject };
+    });
+
+    const initialName = torrentName || String(prepared.seedrFolderName || '').trim() || 'Seedr download';
+    setSeedrNotice({
+      taskId,
+      name: initialName,
+      folderName: '',
+      folderId: String(prepared.seedrFolderId || '').trim(),
+      status: 'waiting',
+      progress: 0,
+      downloadUrl: null,
+      files: [],
+      seedrReply: 'Seedr accepted the torrent. Preparing download…',
+    });
+
+    return await waitForCompletion;
+  }, [seedrConnected, seedrDownloadActive, rememberSeedrTorrentName]);
+
   const handleSearchAdd = async (
     source: string,
     size: number,
@@ -1484,6 +1593,12 @@ export default function App() {
         if (!active) return;
 
         if (progressResult.status === 'not_found') {
+          const waiterKey = String(seedrNotice.taskId);
+          const waiter = seedrPrepareWaiters.current[waiterKey];
+          if (waiter) {
+            delete seedrPrepareWaiters.current[waiterKey];
+            waiter.reject(new Error('Seedr could not find the loading task.'));
+          }
           setSeedrNotice(null);
           setSeedrAddBlockedNotice(null);
           try {
@@ -1561,6 +1676,21 @@ export default function App() {
           ''
         ).trim();
 
+        const resolvePrepareWaiter = (files: Array<{
+          id: string;
+          streamId?: string;
+          name: string;
+          size: number;
+          folderId: string;
+          folderPath: string;
+        }>) => {
+          const waiterKey = String(seedrNotice.taskId);
+          const waiter = seedrPrepareWaiters.current[waiterKey];
+          if (!waiter) return;
+          delete seedrPrepareWaiters.current[waiterKey];
+          waiter.resolve({ files });
+        };
+
         const refreshCompletedLibrary = async () => {
           // Seedr can report a task as complete before the new folder appears
           // in the library tree. Add the completed folder to the UI immediately
@@ -1633,6 +1763,10 @@ export default function App() {
             setSeedrNotice(prev => (
               prev ? { ...prev, status: 'completed', progress: 100 } : null
             ));
+
+            if (eagerFiles.length > 0) {
+              resolvePrepareWaiter(eagerFiles);
+            }
           }
 
           for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -1720,6 +1854,30 @@ export default function App() {
 
         void refreshCompletedLibrary();
         setActiveSeedrFolderOpen(false);
+
+        const immediateFiles = Array.isArray((result as any).files)
+          ? (result as any).files
+              .filter((file: any) => String(file?.id || file?.streamId || '').trim())
+              .map((file: any) => ({
+                id: String(file.id || file.streamId),
+                streamId: file.streamId ? String(file.streamId) : undefined,
+                name: String(file.name || 'Seedr file'),
+                size: Number(file.size || 0),
+                folderId: String(file.folderId || completedFolderId || ''),
+                folderPath: String(file.folderPath || '/Torrent Studio/' + (completedTorrentName || 'Downloads')),
+              }))
+          : [];
+
+        if (immediateFiles.length > 0) {
+          resolvePrepareWaiter(immediateFiles);
+        }
+
+        playNotificationSound();
+        dispatchBrowserNotification(
+          `Ready: ${completedTorrentName || 'Seedr download'}`,
+          'Your Seedr file is ready to play, download, or copy its link.'
+        );
+
       } catch {
         scheduleNextPoll(2500);
       }
@@ -1741,6 +1899,12 @@ export default function App() {
     try {
       setIsCancellingSeedr(true);
       await api.deleteSeedrTask(taskId);
+      const waiterKey = String(taskId);
+      const waiter = seedrPrepareWaiters.current[waiterKey];
+      if (waiter) {
+        delete seedrPrepareWaiters.current[waiterKey];
+        waiter.reject(new Error('Seedr preparation was cancelled.'));
+      }
       setSeedrNotice(null);
     } catch (error: any) {
       console.error('Failed to cancel Seedr download:', error);
@@ -2400,7 +2564,18 @@ export default function App() {
             search continues in the background and its results remain available
             when the user returns to Search. */}
         <div className={activeTab === 'search' ? 'block' : 'hidden'}>
-          <TorrentSearchPanel onAdd={handleSearchAdd} />
+          <TorrentSearchPanel
+            onPrepare={handleSearchPrepare}
+            onCancelPrepare={handleCancelSeedrDownload}
+            onOpenProgress={() => {
+              setActiveTab('files');
+              setPrepareWaitOpen?.(false);
+            }}
+            seedrFiles={seedrAllPrefetchedFiles}
+            onPlaySeedrFile={handleStreamSeedrFile}
+            onDownloadSeedrFile={(file) => handleDownloadSeedrFile(file.id, file.name)}
+            onCopySeedrFileUrl={(file) => handleCopySeedrFileUrl(file.id)}
+          />
 
           {seedrInsufficientSpacePrompt && (
             <div className="fixed inset-x-3 top-20 z-[100] flex justify-center pointer-events-none">
