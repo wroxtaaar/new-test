@@ -92,7 +92,7 @@ export const api = {
     // can be hosted independently as a Render Static Site.
     const searchBase = API_BASE;
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 4000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 12000);
     let res: Response;
     try {
       res = await fetch(searchBase + '/api/search?' + params.toString(), {
