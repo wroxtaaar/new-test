@@ -334,6 +334,7 @@ export default function App() {
     }
   });
   const [seedrFiles, setSeedrFiles] = useState<Array<{ id: string; streamId?: string; name: string; size: number; folderId: string; folderPath: string }>>([]);
+  const [seedrDeletedFolderIds, setSeedrDeletedFolderIds] = useState<string[]>([]);
   const [seedrLibraryRoot, setSeedrLibraryRoot] = useState<{
     id: string;
     folderId: string;
@@ -875,6 +876,11 @@ export default function App() {
       setSeedrConfigured(result.configured);
       setSeedrLibraryRoot(result.root);
       setSeedrLibraryFolders(result.folders);
+      setSeedrDeletedFolderIds(prev =>
+        prev.filter(folderId =>
+          result.folders.some(folder => String(folder.folderId || folder.id || '') === folderId)
+        )
+      );
       setSeedrLoading(false);
 
       // Stage 2 — immediately load the file rows for every library folder.
@@ -1220,6 +1226,7 @@ export default function App() {
 
     if (deletedFolderIds.length > 0) {
       const deletedSet = new Set(deletedFolderIds);
+      setSeedrDeletedFolderIds(prev => Array.from(new Set([...prev, ...deletedFolderIds])));
 
       setSeedrFolderContentsCache(prev =>
         Object.fromEntries(
@@ -2622,6 +2629,7 @@ export default function App() {
               setActiveTab('files');
             }}
             seedrFiles={seedrAllPrefetchedFiles}
+            seedrDeletedFolderIds={seedrDeletedFolderIds}
             onPlaySeedrFile={handleStreamSeedrFile}
             onDownloadSeedrFile={(file) => handleDownloadSeedrFile(file.id, file.name)}
             onCopySeedrFileUrl={(file) => handleCopySeedrFileUrl(file.id)}
