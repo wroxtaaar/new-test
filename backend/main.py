@@ -2862,26 +2862,6 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
                 # season pack first, while EZTV can return individual
                 # S01E01/S01E02/... torrents that fit the Seedr size limit.
                 if (
-                    x1337_task is not None
-                    and not x1337_task.done()
-                    and time.monotonic() < deadline
-                ):
-                    x1337_wait = min(0.9, max(0.0, deadline - time.monotonic()))
-                    if x1337_wait > 0:
-                        x1337_done, _ = await asyncio.wait({x1337_task}, timeout=x1337_wait)
-                        if x1337_done:
-                            try:
-                                provider = await x1337_task
-                                if isinstance(provider, list):
-                                    providers.append({
-                                        "source": "1337x",
-                                        "elapsedMs": 0,
-                                        "results": provider,
-                                    })
-                            except Exception as exc:
-                                logger.info("1337x direct enrichment failed for '%s': %s", query, exc)
-
-                if (
                     tv_task is not None
                     and not tv_task.done()
                     and time.monotonic() < deadline
