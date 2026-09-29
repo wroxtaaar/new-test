@@ -33,7 +33,7 @@ interface TorrentSearchPanelProps {
       files: { index: number; name: string; size: number; path: string; type: string; priority?: number }[];
       totalSize: number;
     }
-  ) => Promise<{ files: SeedrSearchFile[] }>;
+  ) => Promise<{ files: SeedrSearchFile[]; deletedFolderIds?: string[] }>;
   onCancelPrepare?: () => void | Promise<void>;
   onOpenProgress?: () => void;
   seedrFiles?: SeedrSearchFile[];
@@ -633,6 +633,22 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                               try {
                                 const metadata = metadataCacheRef.current.get(torrentKey);
                                 const prepared = await onPrepare(result, metadata);
+                                const deletedFolderIds = new Set(
+                                  (prepared?.deletedFolderIds || []).map(id => String(id).trim()).filter(Boolean)
+                                );
+
+                                // A new Prepare may have triggered automatic Seedr cleanup.
+                                // Remove the deleted folders from the local "prepared" map first,
+                                // otherwise stale Play/Download/Copy buttons would remain visible
+                                // even after the Seedr files themselves disappear.
+                                if (deletedFolderIds.size > 0) {
+                                  for (const [key, entry] of preparedByKeyRef.current.entries()) {
+                                    if (entry.files.some(file => deletedFolderIds.has(String(file.folderId)))) {
+                                      preparedByKeyRef.current.delete(key);
+                                    }
+                                  }
+                                }
+
                                 if (prepared?.files?.length) {
                                   preparedByKeyRef.current.set(torrentKey, { files: prepared.files });
                                 }
