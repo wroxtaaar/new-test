@@ -59,8 +59,12 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const [subtitleTracks, setSubtitleTracks] = useState<Array<{
     index: number; language: string; title: string; codec: string; url: string;
   }>>([]);
+  const [hlsSubtitleTracks, setHlsSubtitleTracks] = useState<Array<{
+    index: number; language: string; title: string; codec: string;
+  }>>([]);
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number | undefined>(undefined);
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | undefined>(undefined);
+  const [selectedHlsSubtitleIndex, setSelectedHlsSubtitleIndex] = useState<number | undefined>(undefined);
   const [trackNotice, setTrackNotice] = useState('');
   const [subtitleSearchOpen, setSubtitleSearchOpen] = useState(false);
   const [subtitleSearchLanguage, setSubtitleSearchLanguage] = useState('en');
@@ -87,6 +91,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const subtitleTrackRef = useRef<HTMLTrackElement>(null);
   const [usingDirectFallback, setUsingDirectFallback] = useState(false);
   const hlsActiveRef = useRef(false);
+  const hlsRef = useRef<Hls | null>(null);
   const observedDownloadBytesRef = useRef(0);
   const observedResourceNamesRef = useRef(new Set<string>());
   const downloadSpeedTimerRef = useRef<number | null>(null);
@@ -109,7 +114,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     hlsActiveRef.current = false;
     const initialSubtitles = file?.subtitleTracks || [];
     setSubtitleTracks(initialSubtitles);
+    setHlsSubtitleTracks([]);
     setSelectedSubtitleIndex(initialSubtitles[0]?.index);
+    setSelectedHlsSubtitleIndex(undefined);
+    setAudioTracks([]);
   }, [file?.id]);
 
   useEffect(() => {
@@ -182,9 +190,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     // Seedr presentation is HLS or a direct video stream and provides the proper
     // same-origin endpoint. Keep externalStreamUrl only for VLC/MX Player.
     const preferredSeedrUrl = file.streamUrl || file.externalStreamUrl || directBaseUrl;
-    const streamUrl = selectedAudioIndex !== undefined
-      ? `${preferredSeedrUrl}${preferredSeedrUrl.includes('?') ? '&' : '?'}audio=${encodeURIComponent(String(selectedAudioIndex))}`
-      : preferredSeedrUrl;
+    // HLS audio tracks are switched through HLS.js. Do not append an audio query parameter.
     const fallbackStreamUrl = file.externalStreamUrl && file.streamUrl !== file.externalStreamUrl
       ? file.streamUrl
       : '';
@@ -251,14 +257,39 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           lowLatencyMode: false,
           backBufferLength: 90,
         });
+        hlsRef.current = hls;
         setMediaError('');
         hls.loadSource(sourceUrl);
         hls.attachMedia(media as HTMLMediaElement);
+        const syncHlsTracks = () => {
+          const audio = (hls?.audioTracks || []).map((track: any, index: number) => ({
+            index,
+            language: String(track?.lang || track?.language || '').trim(),
+            title: String(track?.name || track?.title || track?.lang || '').trim(),
+            codec: String(track?.audioCodec || track?.codec || '').trim(),
+            channels: Number(track?.channels || 0),
+            default: Boolean(track?.default),
+          }));
+          const subtitles = (hls?.subtitleTracks || []).map((track: any, index: number) => ({
+            index,
+            language: String(track?.lang || track?.language || '').trim(),
+            title: String(track?.name || track?.title || track?.lang || '').trim(),
+            codec: String(track?.textCodec || track?.codec || '').trim(),
+          }));
+          setAudioTracks(audio);
+          setHlsSubtitleTracks(subtitles);
+          const defaultAudio = audio.find(track => track.default);
+          if (selectedAudioIndex === undefined && defaultAudio) setSelectedAudioIndex(defaultAudio.index);
+          if (selectedHlsSubtitleIndex !== undefined && !subtitles.some(track => track.index === selectedHlsSubtitleIndex)) {
+            setSelectedHlsSubtitleIndex(undefined);
+          }
+        };
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          // Manifest parsing is only stage 2 progress. Keep the loader visible
-          // until the browser emits "playing".
+          syncHlsTracks();
           setMediaError('');
         });
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, syncHlsTracks);
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, syncHlsTracks);
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data?.fatal) return;
 
@@ -280,6 +311,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           setTrackNotice('');
           hls?.destroy();
           hls = null;
+          hlsRef.current = null;
         });
       };
 
@@ -299,43 +331,41 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     return () => {
       media.removeEventListener('loadedmetadata', handleLoaded);
       media.removeEventListener('playing', handlePlaying);
+      if (hlsRef.current === hls) hlsRef.current = null;
       hls?.destroy();
       media.pause();
       media.removeAttribute('src');
       media.load();
       hlsActiveRef.current = false;
     };
-  }, [file?.id, file?.streamUrl, file?.externalStreamUrl, isVideo, selectedAudioIndex]);
+  }, [file?.id, file?.streamUrl, file?.externalStreamUrl, isVideo]);
 
-  useEffect(() => {
-    if (!file || !isVideo) return;
 
-    const mediaInfoUrl = file.streamUrl.includes('/api/torrents/')
-      ? (() => {
-          const match = file.streamUrl.match(/\/api\/torrents\/(?:stream|direct-stream)\/([^/]+)\/(\d+)/);
-          return match ? `/api/torrents/media-info/${match[1]}/${match[2]}` : '';
-        })()
-      : `/api/files/media-info/${encodeURIComponent(file.id)}`;
-
-    if (!mediaInfoUrl) return;
-
-    let cancelled = false;
-    fetch(mediaInfoUrl)
-      .then(response => response.ok ? response.json() : null)
-      .then(data => {
-        if (cancelled || !data) return;
-        setAudioTracks(Array.isArray(data.audioTracks) ? data.audioTracks : []);
-        setSubtitleTracks(Array.isArray(data.subtitleTracks) ? data.subtitleTracks : []);
-      })
-      .catch(error => console.warn('[MEDIA] track metadata unavailable:', error));
-
-    return () => { cancelled = true; };
-  }, [file?.id, file?.streamUrl, isVideo]);
 
   useEffect(() => {
     const track = subtitleTrackRef.current?.track;
     if (track) track.mode = selectedSubtitleIndex === undefined ? 'disabled' : 'showing';
   }, [selectedSubtitleIndex, subtitleTracks]);
+
+  useEffect(() => {
+    const hls = hlsRef.current;
+    if (!hls) return;
+    if (selectedAudioIndex !== undefined && hls.audioTracks?.[selectedAudioIndex]) {
+      hls.audioTrack = selectedAudioIndex;
+    }
+  }, [selectedAudioIndex, audioTracks]);
+
+  useEffect(() => {
+    const hls = hlsRef.current;
+    if (!hls) return;
+    if (selectedHlsSubtitleIndex === undefined) {
+      hls.subtitleDisplay = false;
+      hls.subtitleTrack = -1;
+    } else if (hls.subtitleTracks?.[selectedHlsSubtitleIndex]) {
+      hls.subtitleDisplay = true;
+      hls.subtitleTrack = selectedHlsSubtitleIndex;
+    }
+  }, [selectedHlsSubtitleIndex, hlsSubtitleTracks]);
 
   const formatTransferRate = (bytesPerSecond: number) => {
     if (!Number.isFinite(bytesPerSecond) || bytesPerSecond < 1024) return '0 KB/s';
@@ -531,17 +561,37 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     const media = mediaRef.current;
     resumeTimeRef.current = media?.currentTime || currentTime || 0;
     resumePlayingRef.current = Boolean(media && !media.paused);
-    setTrackNotice('Preparing selected audio…');
-    setSelectedAudioIndex(next);
+    const hls = hlsRef.current;
+    if (hls?.audioTracks?.[next]) {
+      hls.audioTrack = next;
+      setSelectedAudioIndex(next);
+      setTrackNotice('');
+    } else {
+      setTrackNotice('Selected audio track is not available in this stream.');
+    }
   };
 
   const handleSubtitleTrackChange = (value: string) => {
     if (value === 'off') {
       setSelectedSubtitleIndex(undefined);
+      setSelectedHlsSubtitleIndex(undefined);
       return;
     }
-    const next = Number(value);
-    if (Number.isInteger(next)) setSelectedSubtitleIndex(next);
+    if (value.startsWith('hls:')) {
+      const next = Number(value.slice(4));
+      if (Number.isInteger(next)) {
+        setSelectedSubtitleIndex(undefined);
+        setSelectedHlsSubtitleIndex(next);
+      }
+      return;
+    }
+    if (value.startsWith('external:')) {
+      const next = Number(value.slice(9));
+      if (Number.isInteger(next)) {
+        setSelectedHlsSubtitleIndex(undefined);
+        setSelectedSubtitleIndex(next);
+      }
+    }
   };
 
   // Speed
@@ -1026,23 +1076,39 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                 </label>
               )}
 
-              {subtitleTracks.length > 0 && (
+              {(hlsSubtitleTracks.length > 0 || subtitleTracks.length > 0) && (
                 <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
                   <Captions className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                   <select
-                    value={selectedSubtitleIndex !== undefined ? selectedSubtitleIndex : 'off'}
+                    value={selectedHlsSubtitleIndex !== undefined ? `hls:${selectedHlsSubtitleIndex}` : selectedSubtitleIndex !== undefined ? `external:${selectedSubtitleIndex}` : 'off'}
                     onChange={(e) => handleSubtitleTrackChange(e.target.value)}
-                    className="bg-transparent text-[11px] text-slate-200 outline-none max-w-[130px]"
+                    className="bg-transparent text-[11px] text-slate-200 outline-none max-w-[150px]"
                     title="Subtitles"
                   >
                     <option value="off">Subtitles Off</option>
+                    {hlsSubtitleTracks.map((track, index) => (
+                      <option key={`hls-sub-${track.index}`} value={`hls:${track.index}`}>
+                        {track.title || track.language?.toUpperCase() || `Embedded ${index + 1}`}
+                      </option>
+                    ))}
                     {subtitleTracks.map((track, index) => (
-                      <option key={track.index} value={track.index}>
+                      <option key={`external-sub-${track.index}`} value={`external:${track.index}`}>
                         {track.title || track.language?.toUpperCase() || `Subtitle ${index + 1}`}
                       </option>
                     ))}
                   </select>
                 </label>
+              )}
+
+              {isVideo && (
+                <button
+                  onClick={openSubtitleSearch}
+                  className="flex items-center gap-1.5 rounded-lg bg-slate-800/80 px-2 py-1.5 text-[11px] text-slate-300 hover:bg-slate-700 hover:text-white"
+                  title="Find subtitles online"
+                >
+                  <Search className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="hidden sm:inline">Subtitles</span>
+                </button>
               )}
 
               {showDownloadSpeed && (
