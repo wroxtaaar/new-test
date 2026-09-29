@@ -2729,7 +2729,28 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
 
     csv_task = asyncio.create_task(search_torrents_csv(query, limit))
     api_task = asyncio.create_task(search_apibay(query, limit))
+
+    # A plain TV-show title often returns season packs from generic torrent
+    # indexes. Those packs are frequently larger than the UI's 2 GiB Seedr
+    # limit, so enrich generic searches with episode-level EZTV results.
+    # search_tv_eztv already verifies the title against TVmaze before querying
+    # EZTV, so movie searches do not get arbitrary TV results.
+    _title_query, _season, _episode = _media_search_parts(query)
+    has_explicit_tv_part = _season is not None or _episode is not None
+    has_quality_or_year = bool(re.search(
+        r"\b(?:19|20)\d{2}\b|\b(?:2160p|1440p|1080p|720p|480p|4k|8k)\b",
+        query,
+        re.I,
+    ))
+    tv_task = (
+        asyncio.create_task(search_tv_eztv(query, limit))
+        if _title_query and (has_explicit_tv_part or not has_quality_or_year)
+        else None
+    )
+
     tasks = {csv_task, api_task}
+    if tv_task is not None:
+        tasks.add(tv_task)
     providers: list[dict[str, Any]] = []
     deadline = now + SEARCH_TOTAL_TIMEOUT_SECONDS
 
@@ -2779,10 +2800,11 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
                                 providers.append(provider)
                 break
     finally:
-        for task in (csv_task, api_task):
+        all_tasks = [csv_task, api_task] + ([tv_task] if tv_task is not None else [])
+        for task in all_tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(csv_task, api_task, return_exceptions=True)
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
     merged: dict[str, dict[str, Any]] = {}
     for provider in providers:
