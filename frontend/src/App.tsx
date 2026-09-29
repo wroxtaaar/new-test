@@ -1164,7 +1164,7 @@ export default function App() {
     size: number;
     folderId: string;
     folderPath: string;
-  }> }> => {
+  }>; deletedFolderIds: string[] }> => {
     if (!seedrConnected) {
       setSeedrOnboardingStep('welcome');
       setSeedrOnboardingOpen(true);
@@ -1207,6 +1207,37 @@ export default function App() {
     const requiredBytes = Number(resolvedMetadata?.totalSize || result.size || 0);
 
     const prepared = await api.prepareSeedrMagnet(magnet, requiredBytes, torrentName);
+
+    // Prepare can automatically remove older completed Seedr folders to make
+    // room for the new torrent. Remove those folders from every local cache
+    // immediately so Search cannot keep showing stale Play/Download/Copy
+    // buttons for files that no longer exist in Seedr.
+    const deletedFolderIds = Array.from(new Set(
+      (Array.isArray(prepared?.deletedFolders) ? prepared.deletedFolders : [])
+        .map((folder: any) => String(folder?.folder_id ?? folder?.folderId ?? folder?.id ?? '').trim())
+        .filter(Boolean)
+    ));
+
+    if (deletedFolderIds.length > 0) {
+      const deletedSet = new Set(deletedFolderIds);
+
+      setSeedrFolderContentsCache(prev =>
+        Object.fromEntries(
+          Object.entries(prev).filter(([folderId]) => !deletedSet.has(String(folderId)))
+        )
+      );
+      setSeedrLibraryFolders(prev =>
+        prev.filter(folder => !deletedSet.has(String(folder.folderId || folder.id || '')))
+      );
+      setSeedrFiles(prev =>
+        prev.filter(file => !deletedSet.has(String(file.folderId || '')))
+      );
+
+      if (selectedSeedrFolderId && deletedSet.has(String(selectedSeedrFolderId))) {
+        setSelectedSeedrFolderId(null);
+      }
+    }
+
     const taskId = prepared?.seedrTaskId;
     if (taskId == null || taskId === '') {
       throw new Error('Seedr accepted the request but did not return a task id.');
@@ -1237,7 +1268,11 @@ export default function App() {
       seedrReply: 'Seedr accepted the torrent. Preparing download…',
     });
 
-    return await waitForCompletion;
+    const completed = await waitForCompletion;
+    return {
+      ...completed,
+      deletedFolderIds,
+    };
   }, [seedrConnected, seedrDownloadActive, rememberSeedrTorrentName]);
 
   const handleSearchAdd = async (
