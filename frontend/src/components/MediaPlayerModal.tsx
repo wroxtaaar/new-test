@@ -93,7 +93,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setHlsSubtitleTracks([]);
     setSelectedSubtitleIndex(undefined);
     setSelectedHlsSubtitleIndex(undefined);
-    setAudioTracks(file?.audioTracks || []);
+    const initialAudioTracks = file?.audioTracks || [];
+    setAudioTracks(initialAudioTracks);
+    setSelectedAudioIndex(initialAudioTracks[0]?.index);
   }, [file?.id]);
 
 
