@@ -63,6 +63,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [timeSort, setTimeSort] = useState<'desc' | 'asc' | null>(null);
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [preparingTorrentKey, setPreparingTorrentKey] = useState<string | null>(null);
+  const [playingTorrentKey, setPlayingTorrentKey] = useState<string | null>(null);
   const [prepareWaitTitle, setPrepareWaitTitle] = useState('');
   const [prepareWaitOpen, setPrepareWaitOpen] = useState(false);
   const [prepareError, setPrepareError] = useState('');
@@ -605,16 +606,28 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       ) || preparedFiles[0];
 
                       if (preparedFiles.length > 0 && primaryFile) {
+                        const isPlaying = playingTorrentKey === torrentKey;
                         return (
                           <div className="flex items-center gap-1.5 shrink-0">
                             <button
                               type="button"
-                              onClick={() => void onPlaySeedrFile?.(primaryFile)}
-                              className="px-2 py-1.5 rounded-lg bg-emerald-400 text-slate-950 font-bold text-xs hover:bg-emerald-300 transition flex items-center gap-1"
-                              title="Play from Seedr"
+                              disabled={isPlaying}
+                              onClick={async () => {
+                                if (isPlaying) return;
+                                setPlayingTorrentKey(torrentKey);
+                                try {
+                                  await onPlaySeedrFile?.(primaryFile);
+                                } finally {
+                                  setPlayingTorrentKey(current => current === torrentKey ? null : current);
+                                }
+                              }}
+                              className="px-2 py-1.5 rounded-lg bg-emerald-400 text-slate-950 font-bold text-xs hover:bg-emerald-300 transition flex items-center gap-1 disabled:opacity-70 disabled:cursor-wait"
+                              title={isPlaying ? "Opening stream…" : "Play from Seedr"}
                             >
-                              <Play className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">Play</span>
+                              {isPlaying
+                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                : <Play className="w-3.5 h-3.5" />}
+                              <span className="hidden sm:inline">{isPlaying ? 'Loading…' : 'Play'}</span>
                             </button>
                             <button
                               type="button"
