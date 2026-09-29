@@ -28,6 +28,8 @@ from pydantic import BaseModel
 
 APP_NAME = "Torrent Studio API"
 logger = logging.getLogger("torrent-studio")
+GITHUB_FEEDBACK_TOKEN = os.getenv("GITHUB_FEEDBACK_TOKEN", "").strip()
+GITHUB_FEEDBACK_REPO = os.getenv("GITHUB_FEEDBACK_REPO", "wroxtaaar/new-test").strip()
 SEEDR_BASE = "https://www.seedr.cc/api/v0.1/p"
 SEEDR_MEDIA_BASE = "https://www.seedr.cc/api"
 SEEDR_V2_BASE = "https://v2.seedr.cc/api/v0.1/p"
@@ -346,6 +348,13 @@ async def add_timing_allow_origin(request: Request, call_next):
     response = await call_next(request)
     response.headers["Timing-Allow-Origin"] = "*"
     return response
+
+class FeedbackRequest(BaseModel):
+    type: str
+    rating: int | None = None
+    message: str
+    name: str | None = None
+
 
 class MagnetRequest(BaseModel):
     magnet: str
@@ -5414,6 +5423,94 @@ async def update_cleanup_settings(body: dict[str, Any]):
 @app.post("/api/cleanup/run")
 async def run_cleanup():
     return {"bytesFreed": 0, "filesRemoved": 0, "tempRemoved": 0, "orphansRemoved": 0}
+
+@app.post("/api/feedback")
+async def submit_feedback(body: FeedbackRequest, request: Request):
+    feedback_type = str(body.type or "").strip().lower()
+    if feedback_type not in {"review", "suggestion", "bug"}:
+        raise HTTPException(400, "Invalid feedback type")
+
+    message = str(body.message or "").strip()
+    if len(message) < 5:
+        raise HTTPException(400, "Feedback is too short")
+    if len(message) > 3000:
+        raise HTTPException(400, "Feedback is too long")
+
+    name = str(body.name or "").strip()[:80]
+    rating = int(body.rating) if body.rating is not None else None
+    if feedback_type == "review" and (rating is None or rating < 1 or rating > 5):
+        raise HTTPException(400, "A review rating from 1 to 5 is required")
+    if feedback_type != "review":
+        rating = None
+
+    if not GITHUB_FEEDBACK_TOKEN:
+        raise HTTPException(503, "Feedback is not configured yet")
+
+    repo = GITHUB_FEEDBACK_REPO.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise HTTPException(500, "Feedback repository is not configured correctly")
+
+    label = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug"}[feedback_type]
+    title_prefix = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug report"}[feedback_type]
+    title_text = message.replace("\\n", " ").strip()
+    title_text = re.sub(r"\\s+", " ", title_text)[:90] or "New feedback"
+    title = f"[{title_prefix}] {title_text}"
+
+    submitted_at = datetime.now(timezone.utc).isoformat()
+    forwarded_for = str(request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    body_lines = [
+        "## Torrent Studio Feedback",
+        "",
+        f"**Type:** {label}",
+    ]
+    if rating is not None:
+        body_lines.append(f"**Rating:** {rating}/5")
+    if name:
+        body_lines.append(f"**Name:** {name}")
+    body_lines.extend([
+        f"**Submitted:** {submitted_at}",
+        "",
+        "### Message",
+        message,
+        "",
+        "---",
+        "_Submitted through the Torrent Studio feedback form._",
+    ])
+    if forwarded_for:
+        # Do not persist or expose the visitor IP in the feedback issue.
+        pass
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GITHUB_FEEDBACK_TOKEN}",
+        "X-GitHub-Api-Version": "2026-03-10",
+        "User-Agent": "Torrent-Studio-Feedback",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            response = await client.post(
+                f"https://api.github.com/repos/{repo}/issues",
+                headers=headers,
+                json={"title": title, "body": "\\n".join(body_lines)},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("Feedback submission failed: %s", exc)
+        raise HTTPException(502, "Feedback service is temporarily unavailable")
+
+    if response.status_code != 201:
+        try:
+            detail = response.json().get("message")
+        except Exception:
+            detail = None
+        logger.warning("GitHub feedback submission failed: HTTP %s %s", response.status_code, detail or "")
+        raise HTTPException(502, "Feedback could not be submitted right now")
+
+    try:
+        issue = response.json()
+    except Exception:
+        issue = {}
+    return {"submitted": True, "issueUrl": issue.get("html_url")}
+
 
 @app.get("/api/qbt/settings")
 async def qbt_settings():
