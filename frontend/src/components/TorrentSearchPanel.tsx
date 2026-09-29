@@ -514,7 +514,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
               </div>
             ))}
           </div>
-          </div>
         </div>
       )}
 
