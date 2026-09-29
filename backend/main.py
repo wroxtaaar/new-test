@@ -2733,7 +2733,7 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
     cache_key = (re.sub(r"\s+", " ", query).lower(), limit)
     now = time.monotonic()
     cached = _search_cache.get(cache_key)
-    if cached and now - cached[0] < SEARCH_CACHE_SECONDS:
+    if cached and len(cached[1]) >= 8 and now - cached[0] < SEARCH_CACHE_SECONDS:
         return cached[1]
 
     csv_task = asyncio.create_task(search_torrents_csv(query, limit))
@@ -2863,10 +2863,17 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
         reverse=True,
     )
     results = results[:limit]
-    _search_cache[cache_key] = (now, results)
-    if len(_search_cache) > 100:
-        oldest = min(_search_cache.items(), key=lambda pair: pair[1][0])[0]
-        _search_cache.pop(oldest, None)
+    # Only cache searches that produced a useful result set. Searches with
+    # fewer than 8 matching torrents deliberately stay uncached so every
+    # subsequent click gets a fresh provider search and has a chance to find
+    # newly indexed/available results.
+    if len(results) >= 8:
+        _search_cache[cache_key] = (now, results)
+        if len(_search_cache) > 100:
+            oldest = min(_search_cache.items(), key=lambda pair: pair[1][0])[0]
+            _search_cache.pop(oldest, None)
+    else:
+        _search_cache.pop(cache_key, None)
 
     # TV-series fallback: a plain show-name search can return very few rows
     # because torrent indexes often require season/episode tokens in the title.
