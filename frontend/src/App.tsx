@@ -53,7 +53,7 @@ import {
 } from './types/index.ts';
 
 import { api } from './api/client.ts';
-import { formatBytes, formatQuotaBytes, formatSpeed } from './utils/formatters.ts';
+import { formatBytes, formatQuotaBytes } from './utils/formatters.ts';
 import { dispatchBrowserNotification, playNotificationSound } from './utils/notifications.ts';
 
 import { TorrentCard } from './components/TorrentCard.tsx';
