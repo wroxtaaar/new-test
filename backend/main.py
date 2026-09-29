@@ -2214,19 +2214,12 @@ async def _x1337_size_bytes(size_text: str) -> int:
     return int(float(match.group(1)) * units.get(match.group(2).upper(), 1))
 
 
-async def search_1337x_direct(query: str, limit: int = 50) -> list[dict[str, Any]]:
-    """Fast multi-page 1337x search.
-
-    The listing pages are fetched in parallel, size filtering happens before
-    opening detail pages, and only the best eligible candidates have their
-    magnets resolved. This keeps 1337x useful without turning search into a
-    slow detail-page crawl.
-    """
+async def search_1337x_direct(query: str, limit: int = 50, pages: int = 3) -> list[dict[str, Any]]:
+    """Fast 1337x fallback: fetch a few listing pages, filter locally, then resolve only eligible magnets."""
     q, season, episode = _media_search_parts(query)
     if not q:
         return []
 
-    limit = min(max(int(limit or 50), 1), 50)
     encoded = quote(q, safe="").replace("%20", "+")
     user_agent = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2237,126 +2230,103 @@ async def search_1337x_direct(query: str, limit: int = 50) -> list[dict[str, Any
         "User-Agent": user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
+    minimum_size = 100 * 1024 * 1024
+    maximum_size = 2 * 1024 * 1024 * 1024
 
-    # Probe all configured hosts at once. The first usable response wins,
-    # instead of waiting through several dead mirrors sequentially.
-    probe_timeout = min(2.0, max(1.0, SEARCH_SOURCE_TIMEOUT_SECONDS))
     async with httpx.AsyncClient(
-        timeout=probe_timeout,
+        timeout=min(SEARCH_SOURCE_TIMEOUT_SECONDS + 0.75, 3.0),
         follow_redirects=True,
         headers=headers,
     ) as client:
-        probe_tasks = {
-            asyncio.create_task(
-                client.get(f"https://{host}/search/{encoded}/1/")
-            ): host
-            for host in X1337_HOSTS
-        }
-        chosen: tuple[str, str] | None = None
-        try:
-            while probe_tasks and chosen is None:
-                done, pending = await asyncio.wait(
-                    probe_tasks,
-                    timeout=probe_timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                probe_tasks = pending
-                for task in done:
-                    host = next(
-                        (candidate for candidate, value in list(probe_tasks.items()) if value == task),
-                        None,
-                    )
-                    # The mapping above is no longer available after pending
-                    # replacement, so use the task's original host below.
-                    # This branch is intentionally handled by the result map.
-                for task in done:
-                    # Recover the host from the original task map by attaching
-                    # it to the task when possible; the fallback is harmless.
-                    try:
-                        response = await task
-                    except httpx.HTTPError:
-                        continue
-                    if response.status_code >= 400 or "table-list" not in response.text:
-                        continue
-                    # Find the matching configured host from the request URL.
-                    host = str(response.url.host or "")
-                    if host:
-                        chosen = (host, f"https://{host}")
-                        break
-        finally:
-            for task in probe_tasks:
-                task.cancel()
-            await asyncio.gather(*probe_tasks, return_exceptions=True)
+        base = ""
+        first_html = ""
+        # Find a working 1337x host with one cheap request. Avoid trying every
+        # host/path combination because this function is only a low-result fallback.
+        for host in X1337_HOSTS:
+            try:
+                response = await client.get(f"https://{host}/search/{encoded}/1/")
+                if response.status_code < 400 and "table-list" in response.text:
+                    base = f"https://{host}"
+                    first_html = response.text
+                    break
+            except httpx.HTTPError:
+                continue
 
-        if not chosen:
-            logger.info("1337x direct search '%s': no working host", query)
+        if not base:
             return []
 
-        host, base = chosen
-        # Three listing pages give us substantially more candidates while
-        # remaining cheap: only these HTML pages are fetched, not torrent
-        # detail pages for every result.
-        listing_paths = [
-            f"/search/{encoded}/{page}/" for page in range(1, 4)
-        ]
-        listing_tasks = [
-            asyncio.create_task(client.get(base + path))
-            for path in listing_paths
-        ]
-        listing_responses = await asyncio.gather(
-            *listing_tasks, return_exceptions=True
-        )
+        paths = [f"/search/{encoded}/{page}/" for page in range(1, max(1, pages) + 1)]
+        listing_pages: list[str] = [first_html]
 
+        async def fetch_listing(path: str) -> str:
+            try:
+                response = await client.get(base + path)
+                if response.status_code < 400 and "table-list" in response.text:
+                    return response.text
+            except httpx.HTTPError:
+                pass
+            return ""
+
+        if len(paths) > 1:
+            extra = await asyncio.gather(
+                *(fetch_listing(path) for path in paths[1:]),
+                return_exceptions=True,
+            )
+            listing_pages.extend(
+                html_text for html_text in extra if isinstance(html_text, str) and html_text
+            )
+
+        tokens = _search_tokens(q)
         candidates: list[dict[str, str]] = []
         seen_paths: set[str] = set()
-        tokens = _search_tokens(q)
-        for response in listing_responses:
-            if isinstance(response, Exception):
-                continue
-            if response.status_code >= 400 or "table-list" not in response.text:
-                continue
-            for row in _x1337_rows(response.text):
-                path = str(row.get("path") or "")
-                title = str(row.get("title") or "")
+
+        for html_text in listing_pages:
+            for row in _x1337_rows(html_text):
+                path = row.get("path") or ""
                 if not path or path in seen_paths:
                     continue
-                if not all(token in _normalize_title(title) for token in tokens):
+                seen_paths.add(path)
+
+                if not all(token in _normalize_title(row["title"]) for token in tokens):
                     continue
-                if not _season_episode_match(title, season, episode):
+                if not _season_episode_match(row["title"], season, episode):
                     continue
 
-                size = _x1337_size_bytes(str(row.get("size") or ""))
-                if not (100 * 1024 * 1024 <= size <= 2 * 1024 * 1024 * 1024):
+                size_match = re.match(
+                    r"([\d.]+)\s*([KMGT]i?B)",
+                    row.get("size", ""),
+                    re.IGNORECASE,
+                )
+                if not size_match:
+                    continue
+                units = {
+                    "KB": 1024, "KIB": 1024, "MB": 1024**2, "MIB": 1024**2,
+                    "GB": 1024**3, "GIB": 1024**3, "TB": 1024**4, "TIB": 1024**4,
+                }
+                size = int(float(size_match.group(1)) * units[size_match.group(2).upper()])
+                if not minimum_size <= size <= maximum_size:
                     continue
 
                 row["size_bytes"] = str(size)
-                seen_paths.add(path)
                 candidates.append(row)
 
-        # Resolve the strongest candidates first. If some detail pages fail,
-        # the result set still contains as many useful magnets as 1337x can
-        # provide within the short request window.
+        # Resolve the highest-value candidates first. This keeps the fallback
+        # useful without turning a low-result search into dozens of detail requests.
         candidates.sort(
-            key=lambda row: (
-                int(row.get("seeders") or 0),
-                int(row.get("leechers") or 0),
-            ),
+            key=lambda row: int(row.get("seeders") or 0),
             reverse=True,
         )
-        candidates = candidates[: min(50, max(limit, 24))]
+        candidates = candidates[: min(max(limit, 1), 30)]
 
         async def fetch_detail(row: dict[str, str]) -> dict[str, Any] | None:
             try:
-                response = await client.get(
-                    base + row["path"],
-                    timeout=min(2.0, max(1.0, SEARCH_SOURCE_TIMEOUT_SECONDS)),
-                )
+                response = await client.get(base + row["path"])
                 response.raise_for_status()
             except httpx.HTTPError:
                 return None
 
             match = re.search(
-                r"magnet:\\?\?xt=urn:btih:[^\\"'<>\\s]+",
+                r"magnet:\?xt=urn:btih:[^\"'<>\s]+",
                 response.text,
                 re.IGNORECASE,
             )
@@ -2364,21 +2334,17 @@ async def search_1337x_direct(query: str, limit: int = 50) -> list[dict[str, Any
                 return None
 
             magnet = html.unescape(match.group(0))
-            h = info_hash(magnet)
-            if not h:
-                return None
-
             return {
-                "guid": f"1337x-{h}",
+                "guid": f"1337x-{info_hash(magnet) or row['path']}",
                 "title": row["title"],
-                "size": int(row.get("size_bytes") or 0),
-                "seeders": int(row.get("seeders") or 0),
-                "leechers": int(row.get("leechers") or 0),
+                "size": int(row["size_bytes"]),
+                "seeders": int(row["seeders"] or 0),
+                "leechers": int(row["leechers"] or 0),
                 "indexer": "1337x",
                 "protocol": "torrent",
                 "publishDate": "",
                 "magnetUrl": magnet,
-                "infoHash": h,
+                "infoHash": info_hash(magnet),
                 "downloadUrl": magnet,
                 "infoUrl": base + row["path"],
                 "sourceUrl": base + row["path"],
@@ -2391,21 +2357,13 @@ async def search_1337x_direct(query: str, limit: int = 50) -> list[dict[str, Any
         )
 
     results = [item for item in fetched if isinstance(item, dict)]
-    results.sort(
-        key=lambda row: (
-            int(row.get("seeders") or 0),
-            int(row.get("leechers") or 0),
-            int(row.get("size") or 0),
-        ),
-        reverse=True,
-    )
     logger.info(
-        "1337x direct search '%s': %d results from 3 pages via %s",
+        "1337x direct fallback '%s': %d results from %d listing pages",
         query,
         len(results),
-        host,
+        len(listing_pages),
     )
-    return results[:limit]
+    return results
 
 
 async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -2989,45 +2947,45 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
         reverse=True,
     )
     results = results[:limit]
-    # Low-result TV fallback is intentionally server-side. If the primary
-    # search leaves fewer than 8 usable torrents, run S01/S02/S03 searches
-    # concurrently. These internal searches skip fallback themselves so one
-    # obscure query cannot recursively multiply into many more requests.
-    _, requested_season, requested_episode = _media_search_parts(query)
-    if (
-        allow_series_fallback
-        and len(results) < 8
-        and requested_season is None
-        and requested_episode is None
-    ):
-        variants = [f"{query} s01", f"{query} s02", f"{query} s03"]
+    # Keep the normal path fast. Only when the primary providers return
+    # fewer than 8 usable torrents do we pay the cost of a direct 1337x
+    # listing search. The direct fallback fetches only a few listing pages,
+    # filters the 100 MB–2 GB range locally, then resolves magnets for the
+    # highest-seeded candidates.
+    if allow_series_fallback and len(results) < 8:
         try:
-            variant_results = await asyncio.gather(
-                *(search_1337x(variant, limit=50, allow_series_fallback=False) for variant in variants),
-                return_exceptions=True,
+            direct_results = await asyncio.wait_for(
+                search_1337x_direct(query, limit=50, pages=3),
+                timeout=max(2.0, SEARCH_TOTAL_TIMEOUT_SECONDS + 3.0),
             )
-        except Exception as exc:
-            logger.info("Series fallback search failed for '%s': %s", query, exc)
-            variant_results = []
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.info("1337x fallback failed for '%s': %s", query, exc)
+            direct_results = []
 
-        merged_series: dict[str, dict[str, Any]] = {}
+        merged_direct: dict[str, dict[str, Any]] = {}
         for item in results:
-            key = str(item.get("infoHash") or item.get("magnetUrl") or item.get("title") or "").strip().lower()
+            key = str(
+                item.get("infoHash")
+                or item.get("magnetUrl")
+                or item.get("title")
+                or ""
+            ).strip().lower()
             if key:
-                merged_series[key] = item
+                merged_direct[key] = item
 
-        for batch in variant_results:
-            if isinstance(batch, Exception):
-                logger.info("Series fallback variant failed for '%s': %s", query, batch)
+        for item in direct_results:
+            if not isinstance(item, dict):
                 continue
-            for item in batch:
-                if not isinstance(item, dict):
-                    continue
-                key = str(item.get("infoHash") or item.get("magnetUrl") or item.get("title") or "").strip().lower()
-                if key:
-                    merged_series.setdefault(key, item)
+            key = str(
+                item.get("infoHash")
+                or item.get("magnetUrl")
+                or item.get("title")
+                or ""
+            ).strip().lower()
+            if key:
+                merged_direct.setdefault(key, item)
 
-        results = list(merged_series.values())
+        results = list(merged_direct.values())
         results.sort(
             key=lambda item: (
                 int(item.get("seeders") or 0),
