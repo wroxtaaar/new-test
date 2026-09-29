@@ -4868,11 +4868,9 @@ async def seedr_media_info(file_id: str):
         disposition = stream.get("disposition") if isinstance(stream.get("disposition"), dict) else {}
         if codec_type == "audio":
             language_label = language_names.get(lang, lang.upper() if lang else "")
-            # Prefer the language for the user-facing label. Container titles
-            # such as "BD 5.1" often describe the mix, not the language.
-            label = language_label or title or f"Audio {audio_index + 1}"
-            if language_label and title and title.lower() != language_label.lower():
-                label = f"{language_label} · {title}"
+            # Keep the raw mix title separate from the language. The frontend
+            # combines them into a clearer label such as "English (BD 5.1)".
+            label = title or language_label or f"Audio {audio_index + 1}"
             audio_tracks.append({
                 "index": audio_index,
                 "streamIndex": int(stream.get("index") or 0),
@@ -4889,9 +4887,7 @@ async def seedr_media_info(file_id: str):
             if codec in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}:
                 continue
             language_label = language_names.get(lang, lang.upper() if lang else "")
-            label = language_label or title or f"Subtitle {subtitle_index + 1}"
-            if language_label and title and title.lower() != language_label.lower():
-                label = f"{language_label} · {title}"
+            label = title or language_label or f"Subtitle {subtitle_index + 1}"
             subtitle_tracks.append({
                 "index": subtitle_index,
                 "streamIndex": int(stream.get("index") or 0),
