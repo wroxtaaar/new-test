@@ -76,8 +76,15 @@ export default function App() {
   // Navigation & Theme
   // Seedr is connected per browser session using the user's Personal Access Token.
   // The PAT is sent only to our backend over HTTPS and is never stored in localStorage.
+  const [productWelcomeOpen, setProductWelcomeOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem('torrent_studio_welcome_seen') !== 'true';
+    } catch {
+      return true;
+    }
+  });
   const [seedrOnboardingStep, setSeedrOnboardingStep] = useState<'welcome' | 'pat'>('welcome');
-  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(true);
+  const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(false);
   const [seedrConnected, setSeedrConnected] = useState(false);
   const [seedrSessionReady, setSeedrSessionReady] = useState(false);
   const [seedrPat, setSeedrPat] = useState('');
@@ -95,6 +102,10 @@ export default function App() {
           setSeedrConnected(true);
           setSeedrConfigured(true);
           setSeedrOnboardingOpen(false);
+          setProductWelcomeOpen(false);
+          try {
+            window.localStorage.setItem('torrent_studio_welcome_seen', 'true');
+          } catch {}
         }
       })
       .catch(() => {
@@ -669,6 +680,14 @@ export default function App() {
   }, []);
 
   const openAddMagnet = useCallback((source = '', sourceUrl = '', descriptorUrl = '') => {
+    if (!seedrConnected) {
+      setSeedrPat('');
+      setSeedrConnectError('');
+      setSeedrOnboardingStep('welcome');
+      setSeedrOnboardingOpen(true);
+      return;
+    }
+
     if (seedrDownloadActive) {
       setSeedrAddBlockedNotice(
         'A Seedr download is already in progress. Free Seedr accounts allow one parallel download. Wait for it to finish before adding another magnet link.'
@@ -682,7 +701,7 @@ export default function App() {
     setInitialSourceUrl(sourceUrl);
     setInitialDescriptorUrl(descriptorUrl);
     setIsAddMagnetOpen(true);
-  }, [seedrDownloadActive]);
+  }, [seedrDownloadActive, seedrConnected]);
 
   // Load lightweight application metadata first. The actual files for the
   // currently open folder are fetched separately, after folder metadata exists.
@@ -1136,6 +1155,15 @@ export default function App() {
       totalSize: number;
     }
   ) => {
+    if (!seedrConnected) {
+      setSeedrPat('');
+      setSeedrConnectError('');
+      setSeedrOnboardingStep('welcome');
+      setSeedrOnboardingOpen(true);
+      setActiveTab('search');
+      return;
+    }
+
     const trimmedSource = source.trim();
     const seedrSource =
       source.toLowerCase().startsWith('magnet:?')
@@ -2246,6 +2274,45 @@ export default function App() {
       return remainder.length > 0 && !remainder.includes('/');
     });
 
+  if (productWelcomeOpen) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center px-6 py-10">
+        <div className="w-full max-w-2xl text-center">
+          <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-tr from-cyan-500 via-blue-600 to-indigo-600 shadow-2xl shadow-cyan-500/20">
+            <Cloud className="h-10 w-10 text-slate-950 fill-current" />
+          </div>
+
+          <p className="mt-8 text-xs font-bold uppercase tracking-[0.3em] text-cyan-400">
+            Torrent Studio
+          </p>
+          <h1 className="mt-4 text-4xl font-black tracking-tight text-white sm:text-6xl">
+            Welcome to Torrent Studio
+          </h1>
+          <p className="mx-auto mt-5 max-w-xl text-base leading-7 text-slate-400 sm:text-lg">
+            Search torrents, explore releases, and discover everything you need before deciding where to download.
+          </p>
+
+          <button
+            type="button"
+            onClick={() => {
+              try {
+                window.localStorage.setItem('torrent_studio_welcome_seen', 'true');
+              } catch {}
+              setProductWelcomeOpen(false);
+            }}
+            className="mt-10 inline-flex min-w-44 items-center justify-center rounded-2xl bg-cyan-500 px-7 py-3.5 text-base font-bold text-slate-950 shadow-xl shadow-cyan-500/20 transition hover:bg-cyan-400"
+          >
+            Start Now
+          </button>
+
+          <p className="mt-5 text-xs text-slate-600">
+            You can explore search without connecting a Seedr account.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : theme === 'dim' ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'} transition-colors duration-200`}>
       {/* Top Main Navigation Header */}
@@ -3331,13 +3398,13 @@ export default function App() {
               </div>
               <div className="min-w-0">
                 <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
-                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Your own Seedr account' : 'Connect your Seedr account'}
+                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Connect your Seedr account' : 'Connect your Seedr account'}
                 </h2>
                 <p className="mt-1 text-sm leading-5 text-slate-400">
                   {seedrConnected
                     ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
                     : seedrOnboardingStep === 'welcome'
-                      ? 'Use your own Seedr account so your torrents and storage stay separate from other users.'
+                      ? 'You can explore Torrent Studio first. Connect your own Seedr account when you are ready to add a torrent.'
                       : 'Paste your Seedr Personal Access Token. Your Seedr password is never entered into Torrent Studio.'}
                 </p>
               </div>
@@ -3346,9 +3413,9 @@ export default function App() {
             {seedrOnboardingStep === 'welcome' && !seedrConnected ? (
               <>
                 <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                  <p className="text-sm font-semibold text-slate-200">Use your own Seedr account</p>
+                  <p className="text-sm font-semibold text-slate-200">Ready to download?</p>
                   <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Create a free Seedr account, then generate a Personal Access Token from Seedr Settings. Existing Seedr users can use an existing PAT.
+                    Create a free Seedr account, then connect it with a Personal Access Token. Existing Seedr users can use an existing PAT.
                   </p>
                 </div>
                 <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
