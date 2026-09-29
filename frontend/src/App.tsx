@@ -2356,6 +2356,22 @@ export default function App() {
 
           {/* Right: Quick actions & User Switcher */}
           <div className="flex items-center gap-2">
+            {!seedrConnected && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSeedrPat('');
+                  setSeedrConnectError('');
+                  setSeedrOnboardingStep('welcome');
+                  setSeedrOnboardingOpen(true);
+                }}
+                className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/20"
+              >
+                <Cloud className="h-3.5 w-3.5" />
+                Connect Seedr
+              </button>
+            )}
+
             {/* "+ Add Magnet" Primary CTA */}
             <button
               onClick={() => openAddMagnet()}
@@ -3390,8 +3406,40 @@ export default function App() {
         />
       )}
       {seedrOnboardingOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 px-4 py-6 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="seedr-onboarding-title">
-          <div className="w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6">
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[2px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="seedr-onboarding-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSeedrOnboardingOpen(false);
+              setActiveTab('search');
+            }
+          }}
+          onTouchStart={(event) => {
+            if (event.target === event.currentTarget) {
+              setSeedrOnboardingOpen(false);
+              setActiveTab('search');
+            }
+          }}
+        >
+          <div
+            className="relative w-full max-w-md rounded-2xl border border-emerald-500/25 bg-slate-900/95 p-5 shadow-2xl shadow-emerald-500/10 sm:p-6"
+            onMouseDown={(event) => event.stopPropagation()}
+            onTouchStart={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              aria-label="Close Seedr connection dialog"
+              onClick={() => {
+                setSeedrOnboardingOpen(false);
+                setActiveTab('search');
+              }}
+              className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-white"
+            >
+              <span className="text-2xl leading-none">×</span>
+            </button>
             <div className="flex items-start gap-3">
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-400">
                 <Cloud className="h-6 w-6" />
