@@ -4829,6 +4829,11 @@ async def seedr_video_media(file_id: str, request: Request):
     )
 
 
+@app.get("/api/seedr/media/audio/{file_id}")
+async def seedr_audio_media_route(file_id: str, request: Request):
+    """Range-aware browser audio endpoint backed by Seedr."""
+    return await seedr_audio_media(file_id, request)
+
 async def seedr_audio_media(file_id: str, request: Request):
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
