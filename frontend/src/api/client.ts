@@ -987,6 +987,24 @@ export const api = {
     await apiFetch('/api/notifications/test', { method: 'POST' });
   },
 
+  async submitFeedback(feedback: {
+    type: 'review' | 'suggestion' | 'bug';
+    rating?: number;
+    message: string;
+    name?: string;
+  }): Promise<{ submitted: boolean; issueUrl?: string }> {
+    const res = await apiFetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(feedback)
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw new Error(data?.error || body || 'Failed to send feedback');
+    return data || { submitted: true };
+  },
+
   // qBittorrent Configuration
   async getQbtSettings(): Promise<QbtSettings> {
     const res = await apiFetch('/api/qbt/settings');
