@@ -223,7 +223,42 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       setShowRecentSearches(false);
       setError('');
       saveRecentSearch(trimmed);
-      const data = await api.searchTorrents(trimmed, 50);
+
+      // TV/series searches often return large season packs first. Those are
+      // intentionally hidden from the normal Seedr-friendly result list when
+      // they exceed 2 GiB, which can make a plain show-name search look empty.
+      // If the initial result set has fewer than 10 Seedr-friendly results,
+      // silently run a second search for "<show> s01" and concatenate both
+      // result sets. Explicit Sxx/Exx/Season N searches are left untouched.
+      let data = await api.searchTorrents(trimmed, 50);
+      const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
+      const hasExplicitEpisodeOrSeason = /\b(?:s\d{1,2}(?:e\d{1,3})?|season\s*\d{1,2}|series\s*\d{1,2})\b/i.test(trimmed);
+      const seedrFriendlyCount = data.filter(result => (Number(result.size) || 0) <= maxSeedrFriendlySize).length;
+
+      if (seedrFriendlyCount < 10 && !hasExplicitEpisodeOrSeason) {
+        try {
+          const seasonOneResults = await api.searchTorrents(trimmed + ' s01', 50);
+          const merged = new Map<string, TorrentSearchResult>();
+
+          for (const result of [...data, ...seasonOneResults]) {
+            const key = String(
+              result.infoHash ||
+              result.magnetUrl ||
+              result.downloadUrl ||
+              result.sourceUrl ||
+              result.title
+            ).trim().toLowerCase();
+            if (key && !merged.has(key)) {
+              merged.set(key, result);
+            }
+          }
+
+          data = Array.from(merged.values());
+        } catch {
+          // Keep the original results if the internal S01 search fails.
+        }
+      }
+
       setResults(data);
       setSearched(true);
 
