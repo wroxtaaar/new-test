@@ -680,6 +680,36 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     }
   };
 
+  const languageNames: Record<string, string> = {
+    en: 'English', eng: 'English',
+    hi: 'Hindi', hin: 'Hindi',
+    fr: 'French', fra: 'French',
+    de: 'German', deu: 'German',
+    es: 'Spanish', spa: 'Spanish',
+    it: 'Italian', ita: 'Italian',
+    pt: 'Portuguese', por: 'Portuguese',
+    ru: 'Russian', rus: 'Russian',
+    ja: 'Japanese', jpn: 'Japanese',
+    ko: 'Korean', kor: 'Korean',
+    zh: 'Chinese', zho: 'Chinese',
+    ar: 'Arabic', ara: 'Arabic',
+    bn: 'Bengali', ben: 'Bengali',
+  };
+
+  const formatTrackLabel = (
+    track: { language?: string; title?: string },
+    index: number,
+    fallbackPrefix: string
+  ) => {
+    const languageCode = String(track.language || '').trim().toLowerCase();
+    const language = languageNames[languageCode] || languageCode.toUpperCase();
+    const title = String(track.title || '').trim();
+    if (language && title && title.toLowerCase() !== language.toLowerCase()) {
+      return language + ' (' + title + ')';
+    }
+    return language || title || fallbackPrefix + ' ' + (index + 1);
+  };
+
   // Fullscreen
   const lockLandscape = async () => {
     if (!isVideo) return;
@@ -843,6 +873,8 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
             onEnded={() => setIsPlaying(false)}
           />
         )}
+
+        <audio ref={alternateAudioRef} preload="auto" className="hidden" aria-hidden="true" />
 
         {/* Mini Controls */}
         <div className="flex items-center justify-between pt-1">
@@ -1057,6 +1089,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               />
             </div>
           )}
+          <audio ref={alternateAudioRef} preload="auto" className="hidden" aria-hidden="true" />
         </div>
 
         {/* Player Controls Bar */}
@@ -1147,48 +1180,49 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               )}
 
               {audioTracks.length > 1 && (
-                <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
-                  <Languages className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <label className="flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
+                  <Languages className="h-4 w-4 shrink-0 text-cyan-400" />
+                  <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:inline">Audio</span>
                   <select
                     value={selectedAudioIndex !== undefined ? selectedAudioIndex : (audioTracks[0]?.index ?? '')}
                     onChange={(e) => handleAudioTrackChange(e.target.value)}
-                    className="bg-transparent text-[11px] text-slate-200 outline-none max-w-[130px]"
+                    className="min-w-[115px] max-w-[185px] bg-transparent text-xs font-semibold text-slate-100 outline-none"
                     title="Audio track"
                   >
                     {audioTracks.map((track, index) => (
                       <option key={track.index} value={track.index}>
-                        {track.title || track.language?.toUpperCase() || `Audio ${index + 1}`}{track.default ? ' · Default' : ''}
+                        {formatTrackLabel(track, index, 'Audio')}{track.default ? ' · Default' : ''}
                       </option>
                     ))}
                   </select>
                 </label>
               )}
 
-              {!tracksLoading && (hlsSubtitleTracks.length > 0 || subtitleTracks.length > 0) && (
-                <label className="flex items-center gap-1.5 bg-slate-800/80 rounded-lg px-2 py-1.5">
-                  <Captions className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              {isVideo && (
+                <label className="flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
+                  <Captions className="h-4 w-4 shrink-0 text-cyan-400" />
+                  <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:inline">Subs</span>
                   <select
-                    value={selectedHlsSubtitleIndex !== undefined ? `hls:${selectedHlsSubtitleIndex}` : selectedSubtitleIndex !== undefined ? `external:${selectedSubtitleIndex}` : 'off'}
+                    disabled={tracksLoading || (hlsSubtitleTracks.length === 0 && subtitleTracks.length === 0)}
+                    value={selectedHlsSubtitleIndex !== undefined ? 'hls:' + selectedHlsSubtitleIndex : selectedSubtitleIndex !== undefined ? 'external:' + selectedSubtitleIndex : 'off'}
                     onChange={(e) => handleSubtitleTrackChange(e.target.value)}
-                    className="bg-transparent text-[11px] text-slate-200 outline-none max-w-[150px]"
-                    title="Subtitles"
+                    className="min-w-[110px] max-w-[185px] bg-transparent text-xs font-semibold text-slate-100 outline-none disabled:cursor-not-allowed disabled:text-slate-500"
+                    title={tracksLoading ? 'Loading subtitles' : 'Subtitles'}
                   >
-                    <option value="off">Subtitles Off</option>
+                    <option value="off">{tracksLoading ? 'Loading…' : 'Subtitles Off'}</option>
                     {hlsSubtitleTracks.map((track, index) => (
-                      <option key={`hls-sub-${track.index}`} value={`hls:${track.index}`}>
-                        {track.title || track.language?.toUpperCase() || `Embedded ${index + 1}`}
+                      <option key={'hls-sub-' + track.index} value={'hls:' + track.index}>
+                        {formatTrackLabel(track, index, 'Subtitle')}
                       </option>
                     ))}
                     {subtitleTracks.map((track, index) => (
-                      <option key={`external-sub-${track.index}`} value={`external:${track.index}`}>
-                        {track.title || track.language?.toUpperCase() || `Subtitle ${index + 1}`}
+                      <option key={'external-sub-' + track.index} value={'external:' + track.index}>
+                        {formatTrackLabel(track, index, 'Subtitle')}
                       </option>
                     ))}
                   </select>
                 </label>
               )}
-
-
 
               {/* Playback Speed selector */}
               <div className="flex items-center bg-slate-800/80 rounded-lg p-0.5 text-xs font-medium text-slate-300">
