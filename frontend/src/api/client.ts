@@ -81,7 +81,7 @@ const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
 
 export const api = {
   // Torrents (qBittorrent WebAPI)
-  async searchTorrents(query: string, limit = 50): Promise<TorrentSearchResult[]> {
+  async searchTorrents(query: string, limit = 50, signal?: AbortSignal): Promise<TorrentSearchResult[]> {
     const params = new URLSearchParams({
       q: query,
       limit: String(Math.min(Math.max(limit, 1), 50))
@@ -96,7 +96,7 @@ export const api = {
     let res: Response;
     try {
       res = await fetch(searchBase + '/api/search?' + params.toString(), {
-        signal: controller.signal
+        signal: signal || controller.signal
       });
     } catch (error: any) {
       if (error?.name === 'AbortError') {
