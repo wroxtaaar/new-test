@@ -2229,16 +2229,14 @@ export default function App() {
   }, [seedrAllPrefetchedFiles, seedrFolderContentsCache]);
 
   const handleStreamSeedrFile = async (file: { id: string; streamId?: string; name: string; size: number; folderId: string; folderPath: string }) => {
-    // Do not make playback depend on the /files/stream resolver. That endpoint
-    // performs provider probing and can be slow or transient even when the
-    // actual media endpoints are healthy. Use the stable same-origin HLS
-    // endpoint first and the Range-aware direct video endpoint as fallback.
+    // Restore the tested Seedr direct-browser-stream flow. The backend chooses
+    // the correct presentation: a Range-aware direct stream when Seedr gives
+    // a browser-playable presentation, otherwise the HLS proxy.
     setSeedrStreamLoadingId(file.id);
     try {
-      const lower = file.name.toLowerCase();
       const type: StorageFile['type'] =
-        /\.(mkv|mp4|m4v|webm|mov|avi|m3u8|ts)$/i.test(lower) ? 'video' :
-        /\.(mp3|wav|flac|aac|ogg|m4a)$/i.test(lower) ? 'audio' :
+        /\.(mkv|mp4|m4v|webm|mov|avi|m3u8|ts)$/i.test(file.name) ? 'video' :
+        /\.(mp3|wav|flac|aac|ogg|m4a)$/i.test(file.name) ? 'audio' :
         'document';
 
       if (type !== 'video' && type !== 'audio') {
@@ -2246,21 +2244,23 @@ export default function App() {
         return;
       }
 
-      const playbackId = encodeURIComponent(file.streamId || file.id);
-      const browserStreamUrl = type === 'video'
-        ? API_BASE + '/api/seedr/hls/' + playbackId
-        : API_BASE + '/api/seedr/media/audio/' + playbackId;
-      const directFallbackUrl = type === 'video'
-        ? API_BASE + '/api/seedr/media/video/' + playbackId
-        : browserStreamUrl;
+      setSeedrError(null);
+      const result = await api.getSeedrFileStream(file.streamId || file.id, file.name, type);
+      const apiOrigin = (() => {
+        try {
+          return new URL(result.url, window.location.origin).origin;
+        } catch {
+          return window.location.origin;
+        }
+      })();
 
       const subtitleTracks = type === 'video'
-        ? findSeedrSubtitleTracks(file, API_BASE)
+        ? findSeedrSubtitleTracks(file, apiOrigin)
         : [];
 
       const syntheticFile: StorageFile = {
         id: 'seedr-' + file.id,
-        name: file.name,
+        name: result.name || file.name,
         path: file.folderPath === '/' ? '/' + file.name : file.folderPath + '/' + file.name,
         folder: file.folderPath,
         size: file.size,
@@ -2270,20 +2270,20 @@ export default function App() {
         ownerId: activeUser?.id || 'user_admin',
         ownerName: activeUser?.name || 'Admin',
         isStreamable: true,
-        // HLS is preferred so dual-audio/subtitle renditions are exposed.
-        streamUrl: browserStreamUrl,
-        // Direct same-origin proxy is the fallback when HLS is unavailable.
-        externalStreamUrl: directFallbackUrl,
+        // IMPORTANT: use the backend browser URL, not the external Seedr URL.
+        // For direct presentations this is /api/seedr/media/video/{id}; for
+        // HLS presentations it is /api/seedr/hls/{id}.
+        streamUrl: result.url,
+        externalStreamUrl: result.externalUrl,
         subtitleTracks,
         downloadUrl: API_BASE + '/api/seedr/files/' + encodeURIComponent(file.id) + '/download',
       };
 
-      setSeedrError(null);
       setActiveMediaFile(syntheticFile);
       setIsPlayerMinimized(false);
     } catch (error) {
-      console.error('Failed to prepare Seedr playback:', error);
-      setSeedrError(error instanceof Error ? error.message : 'Failed to prepare Seedr playback');
+      console.error('Failed to create Seedr stream URL:', error);
+      setSeedrError(error instanceof Error ? error.message : 'Failed to create Seedr stream URL');
     } finally {
       setSeedrStreamLoadingId(current => current === file.id ? null : current);
     }
