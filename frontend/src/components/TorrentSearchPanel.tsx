@@ -4,6 +4,8 @@ import {
   X,
   Loader2,
   Download,
+  Play,
+  Copy,
   ExternalLink,
   Users,
   Database,
@@ -13,21 +15,31 @@ import {
 import { api, TorrentSearchResult } from '../api/client.ts';
 import { formatBytes } from '../utils/formatters.ts';
 
+type SeedrSearchFile = {
+  id: string;
+  streamId?: string;
+  name: string;
+  size: number;
+  folderId: string;
+  folderPath: string;
+};
+
 interface TorrentSearchPanelProps {
-  onAdd: (
-    source: string,
-    size: number,
-    title: string,
-    infoHash?: string,
-    sourceUrl?: string,
-    descriptorUrl?: string,
+  onPrepare: (
+    result: TorrentSearchResult,
     metadata?: {
       name: string;
       hash: string;
       files: { index: number; name: string; size: number; path: string; type: string; priority?: number }[];
       totalSize: number;
     }
-  ) => void | Promise<void>;
+  ) => Promise<{ files: SeedrSearchFile[] }>;
+  onCancelPrepare?: () => void | Promise<void>;
+  onOpenProgress?: () => void;
+  seedrFiles?: SeedrSearchFile[];
+  onPlaySeedrFile?: (file: SeedrSearchFile) => void | Promise<void>;
+  onDownloadSeedrFile?: (file: SeedrSearchFile) => void | Promise<void>;
+  onCopySeedrFileUrl?: (file: SeedrSearchFile) => void | Promise<void>;
 }
 
 function formatPublished(value?: string) {
@@ -37,7 +49,7 @@ function formatPublished(value?: string) {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd }) => {
+export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], onPlaySeedrFile, onDownloadSeedrFile, onCopySeedrFileUrl }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TorrentSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -49,7 +61,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
   const [sizeSort, setSizeSort] = useState<'asc' | 'desc' | null>(null);
   const [timeSort, setTimeSort] = useState<'desc' | 'asc' | null>(null);
   const [showRecentSearches, setShowRecentSearches] = useState(false);
-  const [addingTorrentKey, setAddingTorrentKey] = useState<string | null>(null);
+  const [preparingTorrentKey, setPreparingTorrentKey] = useState<string | null>(null);
+  const [prepareWaitTitle, setPrepareWaitTitle] = useState('');
+  const [prepareWaitOpen, setPrepareWaitOpen] = useState(false);
+  const [prepareError, setPrepareError] = useState('');
 
   // Metadata is prefetched in small batches so search remains fast while the
   // most likely results are already resolved when the user clicks Add.
@@ -62,6 +77,48 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
   const metadataInFlightRef = useRef(new Set<string>());
   const prefetchGenerationRef = useRef(0);
   const recentSearchRef = useRef<HTMLDivElement | null>(null);
+
+  const normalizeMatchText = (value: string) =>
+    String(value || '')
+      .toLowerCase()
+      .replace(/\.[a-z0-9]{2,5}$/i, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const findPreparedFiles = (result: TorrentSearchResult): SeedrSearchFile[] => {
+    const title = normalizeMatchText(result.title);
+    if (!title || title.length < 4) return [];
+
+    const exact: SeedrSearchFile[] = [];
+    const related: SeedrSearchFile[] = [];
+
+    for (const file of seedrFiles) {
+      const folderPath = String(file.folderPath || '');
+      const folderName = folderPath.split('/').filter(Boolean).pop() || '';
+      const fileName = normalizeMatchText(file.name);
+      const folder = normalizeMatchText(folderName);
+
+      if (folder === title || fileName === title) {
+        exact.push(file);
+        continue;
+      }
+
+      if (title.length >= 8 && (folder.includes(title) || title.includes(folder) || fileName.includes(title))) {
+        related.push(file);
+      }
+    }
+
+    return exact.length > 0 ? exact : related;
+  };
+
+  const preparedForResult = (result: TorrentSearchResult): SeedrSearchFile[] => {
+    const key = result.infoHash || result.magnetUrl || result.downloadUrl || result.sourceUrl || result.title;
+    const local = preparedByKeyRef.current.get(key);
+    return local?.files?.length ? local.files : findPreparedFiles(result);
+  };
+
+  const preparedByKeyRef = useRef(new Map<string, { files: SeedrSearchFile[] }>());
   const apiFetchRecent = (input: RequestInfo | URL, init?: RequestInit) => {
     const base = (String(import.meta.env.VITE_API_URL || '').trim() || 'https://torrent-studio-vercel-render-seedr-26fd.onrender.com').replace(/\/+$/, '');
     const value = String(input);
@@ -386,6 +443,52 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
 
       </div>
 
+      {prepareError && (
+        <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center justify-between gap-2">
+          <span>{prepareError}</span>
+          <button type="button" onClick={() => setPrepareError('')} className="shrink-0 p-1 rounded text-slate-400 hover:text-slate-200" aria-label="Dismiss preparation error">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {prepareWaitOpen && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-cyan-400/20 bg-slate-900/95 shadow-2xl p-5">
+            <div className="flex items-start gap-3">
+              <div className="shrink-0 rounded-xl bg-cyan-500/10 border border-cyan-500/20 p-2">
+                <Loader2 className="w-5 h-5 text-cyan-300 animate-spin" />
+              </div>
+              <div className="min-w-0">
+                <div className="font-bold text-slate-100 text-sm">Loading is taking a little longer</div>
+                <div className="mt-1 text-xs leading-5 text-slate-400">
+                  <span className="text-slate-200">{prepareWaitTitle || 'This torrent'}</span> is still being prepared by Seedr. You can explore the app or wait for it to finish.
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPrepareWaitOpen(false)}
+                className="flex-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 text-xs font-semibold transition"
+              >
+                Explore
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPrepareWaitOpen(false);
+                  onOpenProgress?.();
+                }}
+                className="flex-1 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 px-3 py-2 text-xs font-bold transition"
+              >
+                View loading progress
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-2.5">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -473,40 +576,90 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
                     {(() => {
                       const source = result.magnetUrl || result.downloadUrl || result.sourceUrl;
                       const torrentKey = result.infoHash || source || result.title;
-                      const isAdding = addingTorrentKey === torrentKey;
+                      const isPreparing = preparingTorrentKey === torrentKey;
+                      const preparedFiles = preparedForResult(result);
+                      const primaryFile = preparedFiles.find(file =>
+                        /\.(mkv|mp4|m4v|webm|mov|avi|m3u8|ts|mp3|wav|flac|aac|ogg|m4a)$/i.test(file.name)
+                      ) || preparedFiles[0];
+
+                      if (preparedFiles.length > 0 && primaryFile) {
+                        return (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => void onPlaySeedrFile?.(primaryFile)}
+                              className="px-2 py-1.5 rounded-lg bg-emerald-400 text-slate-950 font-bold text-xs hover:bg-emerald-300 transition flex items-center gap-1"
+                              title="Play from Seedr"
+                            >
+                              <Play className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Play</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void onDownloadSeedrFile?.(primaryFile)}
+                              className="px-2 py-1.5 rounded-lg bg-slate-800 text-slate-200 font-bold text-xs hover:bg-slate-700 transition flex items-center gap-1"
+                              title="Download from Seedr"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Download</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void onCopySeedrFileUrl?.(primaryFile)}
+                              className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 transition"
+                              title="Copy Seedr link"
+                              aria-label="Copy Seedr link"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      }
 
                       return (
-                        <button
-                          type="button"
-                          disabled={!source || isAdding}
-                          onClick={async () => {
-                            if (!source || isAdding) return;
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={!source || isPreparing}
+                            onClick={async () => {
+                              if (!source || isPreparing) return;
 
-                            setAddingTorrentKey(torrentKey);
-                            try {
-                              const metadata = metadataCacheRef.current.get(torrentKey);
-                              await onAdd(
-                                source,
-                                Number(result.size) || 0,
-                                result.title,
-                                result.infoHash,
-                                result.infoUrl || result.sourceUrl || '',
-                                result.descriptorUrl || '',
-                                metadata
-                              );
-                            } finally {
-                              setAddingTorrentKey(current => current === torrentKey ? null : current);
-                            }
-                          }}
-                          className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 text-xs font-bold flex items-center gap-1.5 transition"
-                        >
-                          {isAdding ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Download className="w-4 h-4" />
+                              setPrepareError('');
+                              setPreparingTorrentKey(torrentKey);
+                              setPrepareWaitTitle(result.title);
+                              setPrepareWaitOpen(false);
+                              const longWaitTimer = window.setTimeout(() => setPrepareWaitOpen(true), 15000);
+
+                              try {
+                                const metadata = metadataCacheRef.current.get(torrentKey);
+                                const prepared = await onPrepare(result, metadata);
+                                if (prepared?.files?.length) {
+                                  preparedByKeyRef.current.set(torrentKey, { files: prepared.files });
+                                }
+                                setPrepareWaitOpen(false);
+                              } catch (error: any) {
+                                setPrepareError(String(error?.message || 'Could not prepare this torrent.'));
+                              } finally {
+                                window.clearTimeout(longWaitTimer);
+                                setPreparingTorrentKey(current => current === torrentKey ? null : current);
+                              }
+                            }}
+                            className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 text-xs font-bold flex items-center gap-1.5 transition"
+                          >
+                            {isPreparing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                            <span>{isPreparing ? 'Preparing…' : 'Prepare'}</span>
+                          </button>
+                          {isPreparing && onCancelPrepare && (
+                            <button
+                              type="button"
+                              onClick={() => void onCancelPrepare()}
+                              className="px-2 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-300 hover:bg-rose-500/20 text-[10px] font-bold transition"
+                              title="Cancel preparation"
+                            >
+                              Cancel
+                            </button>
                           )}
-                          <span className="hidden sm:inline">{isAdding ? 'Adding…' : 'Add'}</span>
-                        </button>
+                        </div>
                       );
                     })()}
                   </div>
