@@ -5202,35 +5202,6 @@ async def seedr_audio_media_route(
         },
     )
 
-@app.get("/api/seedr/media/audio/{file_id}")
-async def seedr_audio_media_route(file_id: str, request: Request):
-    """Range-aware browser audio endpoint backed by Seedr."""
-    return await seedr_audio_media(file_id, request)
-
-async def seedr_audio_media(file_id: str, request: Request):
-    if not current_seedr_token():
-        raise HTTPException(503, "Seedr is not configured")
-
-    headers = {"Accept": "*/*"}
-    range_header = request.headers.get("range")
-    if range_header:
-        headers["Range"] = range_header
-
-    upstream_url = _seedr_media_url(file_id, "audio")
-    async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
-        response = await client.get(upstream_url, headers=headers)
-
-    return Response(
-        content=response.content,
-        status_code=response.status_code,
-        media_type=response.headers.get("content-type", "audio/mpeg"),
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Accept-Ranges": response.headers.get("accept-ranges", "bytes"),
-            "Content-Range": response.headers.get("content-range", ""),
-        },
-    )
-
 @app.get("/api/seedr/files/{file_id}/subtitle")
 async def seedr_file_subtitle(
     file_id: str,
