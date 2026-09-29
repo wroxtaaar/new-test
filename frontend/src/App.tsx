@@ -2477,11 +2477,13 @@ export default function App() {
                 setSeedrOnboardingStep(seedrConnected ? 'welcome' : 'welcome');
                 setSeedrOnboardingOpen(true);
               }}
-              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition tap-target"
-              title="Connect to Seedr"
+              className={seedrConnected
+                ? "px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/10 transition tap-target"
+                : "px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition tap-target"}
+              title={seedrConnected ? "Seedr is connected" : "Connect to Seedr"}
             >
-              <Cloud className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-              <span>Connect to Seedr</span>
+              {seedrConnected ? <CheckCircle2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Cloud className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
+              <span>{seedrConnected ? 'Seedr is Connected' : 'Connect to Seedr'}</span>
             </button>
 
             {/* Notification Bell */}
