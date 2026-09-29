@@ -22,6 +22,7 @@ import {
   Loader2
 } from 'lucide-react';
 import Hls from 'hls.js';
+import { api, API_BASE } from '../api/client.ts';
 import { StorageFile } from '../types/index.ts';
 import { formatBytes, formatDuration } from '../utils/formatters.ts';
 
@@ -76,6 +77,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const alternateAudioRef = useRef<HTMLAudioElement>(null);
+  const alternateAudioIndexRef = useRef<number | undefined>(undefined);
+  const primaryAudioIndexRef = useRef<number | undefined>(undefined);
+  const alternateAudioRequestRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const isVideo = file?.type === 'video';
@@ -94,9 +99,20 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setHlsSubtitleTracks([]);
     setSelectedSubtitleIndex(undefined);
     setSelectedHlsSubtitleIndex(undefined);
+    alternateAudioIndexRef.current = undefined;
+    primaryAudioIndexRef.current = undefined;
+    alternateAudioRequestRef.current += 1;
+    const alternateAudio = alternateAudioRef.current;
+    if (alternateAudio) {
+      alternateAudio.pause();
+      alternateAudio.removeAttribute('src');
+      alternateAudio.load();
+    }
     const initialAudioTracks = file?.audioTracks || [];
+    const initialAudio = initialAudioTracks.find((track: any) => track.default) || initialAudioTracks[0];
+    primaryAudioIndexRef.current = initialAudio?.index;
     setAudioTracks(initialAudioTracks);
-    setSelectedAudioIndex(initialAudioTracks[0]?.index);
+    setSelectedAudioIndex(initialAudio?.index);
   }, [file?.id]);
 
 
@@ -281,10 +297,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     let cancelled = false;
     setTracksLoading(true);
 
-    fetch('/api/seedr/media-info/' + encodeURIComponent(fileId), {
-      signal: controller.signal,
-    })
-      .then(response => response.ok ? response.json() : null)
+    api.getSeedrMediaInfo(fileId)
       .then(data => {
         if (cancelled || !data) return;
 
@@ -293,14 +306,17 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
 
         setAudioTracks(realAudio);
+        const defaultAudio = realAudio.find((track: any) => track.default) || realAudio[0];
+        primaryAudioIndexRef.current = defaultAudio?.index;
         setSelectedAudioIndex(prev =>
           prev !== undefined && realAudio.some((track: any) => track.index === prev)
             ? prev
-            : realAudio[0]?.index
+            : defaultAudio?.index
         );
 
-        // Keep both sources available. Embedded text subtitles take priority,
-        // while matching SRT/VTT sidecars remain available as separate choices.
+        // Keep both embedded WebVTT tracks and Seedr sidecar tracks. The API
+        // client converts embedded relative URLs to the Render API origin so
+        // a Vercel-hosted frontend can actually load the subtitle file.
         const seen = new Set<string>();
         const mergedSubtitles = [...embeddedSubtitles, ...sidecarSubtitles].filter((track: any) => {
           const key = String(track.url || '') + '|' + String(track.title || '');
@@ -312,13 +328,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         setSubtitleTracks(mergedSubtitles);
         setSelectedSubtitleIndex(undefined);
         setSelectedHlsSubtitleIndex(undefined);
-      })
-      .catch(error => {
-        if (!controller.signal.aborted) {
-          console.warn('[MEDIA] Seedr track metadata unavailable:', error);
-          setAudioTracks(file.audioTracks || []);
-          setSubtitleTracks(file.subtitleTracks || []);
-        }
       })
       .finally(() => {
         if (!cancelled) setTracksLoading(false);
@@ -477,6 +486,77 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     }
   };
 
+  const loadAlternateAudio = (trackIndex: number, position: number, resumePlaying: boolean) => {
+    const media = mediaRef.current;
+    const audio = alternateAudioRef.current;
+    const fileId = file?.streamId || file?.id?.replace(/^seedr-/, '');
+
+    if (!media || !audio || !fileId) {
+      setTrackNotice('Selected audio track is not available in this stream.');
+      return;
+    }
+
+    const requestId = ++alternateAudioRequestRef.current;
+    const safePosition = Math.max(0, Number.isFinite(position) ? position : 0);
+
+    // Keep the original video resource and timeline intact. Only its audio
+    // output is muted while the selected track is prepared in a second audio
+    // element. This avoids resetting the video's duration/seekable range.
+    media.pause();
+    media.muted = true;
+    audio.pause();
+    audio.volume = media.volume;
+    audio.muted = isMuted;
+    audio.playbackRate = playbackSpeed;
+
+    const url =
+      API_BASE +
+      '/api/seedr/media/audio/' + encodeURIComponent(fileId) +
+      '?track=' + encodeURIComponent(String(trackIndex)) +
+      '&start=' + encodeURIComponent(String(safePosition));
+
+    setTrackNotice('Switching audio…');
+    setMediaError('');
+    setIsSeeking(true);
+    alternateAudioIndexRef.current = trackIndex;
+    audio.src = url;
+    audio.load();
+
+    const startTogether = () => {
+      if (requestId !== alternateAudioRequestRef.current) return;
+      audio.removeEventListener('canplay', startTogether);
+      audio.currentTime = 0;
+
+      const startVideo = media.play();
+      const startAudio = audio.play();
+      Promise.allSettled([startVideo, startAudio]).then(() => {
+        if (requestId !== alternateAudioRequestRef.current) return;
+        setIsSeeking(false);
+        setIsPlaying(!media.paused);
+        setTrackNotice('');
+      });
+    };
+
+    audio.addEventListener('canplay', startTogether, { once: true });
+  };
+
+  const clearAlternateAudio = (restoreVideoAudio = true) => {
+    const media = mediaRef.current;
+    const audio = alternateAudioRef.current;
+    alternateAudioRequestRef.current += 1;
+
+    if (audio) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+    alternateAudioIndexRef.current = undefined;
+
+    if (restoreVideoAudio && media) {
+      media.muted = isMuted;
+    }
+  };
+
   const handleAudioTrackChange = (value: string) => {
     const next = Number(value);
     if (!Number.isInteger(next)) return;
@@ -494,35 +574,28 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     if (media && file?.streamId && file.streamUrl.includes('/api/seedr/media/video/')) {
       const position = Number.isFinite(media.currentTime) ? media.currentTime : currentTime;
       const wasPlaying = !media.paused;
-      const baseUrl = file.streamUrl.split('?')[0];
-      const nextUrl =
-        baseUrl +
-        '?audio=' + encodeURIComponent(String(next)) +
-        '&start=' + encodeURIComponent(String(Math.max(0, position)));
+      const primaryIndex = primaryAudioIndexRef.current;
 
-      setTrackNotice('Switching audio…');
       setSelectedAudioIndex(next);
-      setMediaError('');
-      media.src = nextUrl;
-      media.load();
 
-      const restore = () => {
-        // The server seeks before creating the new fragmented MP4, so the
-        // media timeline begins near the previous position.
+      if (primaryIndex !== undefined && next === primaryIndex) {
+        clearAlternateAudio(true);
+        media.currentTime = position;
         if (wasPlaying) {
-          media.play().then(() => {
-            setIsPlaying(true);
-            setTrackNotice('');
-          }).catch(() => {
-            setIsPlaying(false);
-            setTrackNotice('');
-          });
+          media.play()
+            .then(() => {
+              setIsPlaying(true);
+              setTrackNotice('');
+            })
+            .catch(() => setIsPlaying(false));
         } else {
+          setIsPlaying(false);
           setTrackNotice('');
         }
-        media.removeEventListener('loadedmetadata', restore);
-      };
-      media.addEventListener('loadedmetadata', restore);
+        return;
+      }
+
+      loadAlternateAudio(next, position, wasPlaying);
       return;
     }
 
