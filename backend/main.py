@@ -3398,6 +3398,117 @@ async def seedr_quota():
         "remainingSpace": max(0, max_space - used),
     }
 
+async def _prepare_seedr_space(required_bytes: int) -> list[dict[str, Any]]:
+    """Free the oldest completed Seedr torrent folders when a new torrent needs more space."""
+    required = max(0, int(required_bytes or 0))
+    if required <= 0:
+        return []
+
+    quota = await seedr_quota()
+    remaining = int(quota.get("remainingSpace") or 0)
+    if remaining >= required:
+        return []
+
+    library = await get_seedr_metadata_tree(force_refresh=True)
+    folders = [
+        folder for folder in (library.get("folders") or [])
+        if isinstance(folder, dict)
+        and str(folder.get("folderId") or folder.get("id") or "").strip()
+        and str(folder.get("folderId") or folder.get("id") or "").strip() != "0"
+    ]
+
+    # Prefer actual Seedr task timestamps so the oldest completed torrent is
+    # removed first. Fall back to the library order when a provider response
+    # does not expose a timestamp.
+    task_meta: dict[str, dict[str, Any]] = {}
+    active_folder_ids: set[str] = set()
+    try:
+        tasks_payload = seedr_data(await seedr_request("/tasks"))
+        for raw_task in arr(tasks_payload, ("tasks", "torrents", "items")):
+            task = unwrap_seedr_task(seedr_data(raw_task))
+            if not task:
+                continue
+            folder_id = seedr_task_folder_id(task)
+            if not folder_id:
+                continue
+            if not task_complete(task):
+                active_folder_ids.add(str(folder_id))
+            task_meta[str(folder_id)] = task
+    except (HTTPException, SeedrError):
+        pass
+
+    def task_timestamp(task: dict[str, Any]) -> float:
+        for key in (
+            "created_at", "createdAt", "created", "added_at", "addedAt",
+            "time_added", "timeAdded", "timestamp", "date_added", "dateAdded",
+        ):
+            value = task.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return float(value if value < 10_000_000_000 else value / 1000)
+            if isinstance(value, str) and value.strip():
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    return parsed.timestamp()
+                except Exception:
+                    continue
+        return 0.0
+
+    candidates: list[tuple[int, float, dict[str, Any]]] = []
+    for index, folder in enumerate(folders):
+        folder_id = str(folder.get("folderId") or folder.get("id") or "").strip()
+        if not folder_id or folder_id in active_folder_ids:
+            continue
+        task = task_meta.get(folder_id, {})
+        candidates.append((index, task_timestamp(task), folder))
+
+    candidates.sort(key=lambda item: (item[1] if item[1] > 0 else float("inf"), item[0]))
+
+    deleted: list[dict[str, Any]] = []
+    for _, _, folder in candidates:
+        if remaining >= required:
+            break
+
+        folder_id = str(folder.get("folderId") or folder.get("id") or "").strip()
+        folder_name = str(folder.get("torrentName") or folder.get("name") or folder_id).strip()
+        folder_size = max(0, int(float(folder.get("totalSize") or 0)))
+
+        try:
+            await seedr_request(f"/fs/folder/{quote(folder_id)}", "DELETE")
+            deleted.append({
+                "folderId": folder_id,
+                "name": folder_name,
+                "size": folder_size,
+            })
+            remaining += folder_size
+            _seedr_folder_cache.pop(folder_id, None)
+        except (HTTPException, SeedrError) as exc:
+            logger.warning(
+                "Seedr automatic cleanup skipped folder=%s status=%s detail=%s",
+                folder_id,
+                getattr(exc, "status_code", 0),
+                getattr(exc, "detail", str(exc)),
+            )
+
+    global _seedr_metadata_cache
+    _seedr_metadata_cache = None
+    _seedr_folder_cache.clear()
+
+    if remaining < required:
+        raise SeedrError(
+            "SEEDR_QUOTA_UNAVAILABLE",
+            413,
+            "Seedr does not have enough space for this torrent, even after removing older completed files.",
+        )
+
+    logger.info(
+        "Seedr automatic cleanup freed=%s required=%s deleted=%s",
+        sum(int(item.get("size") or 0) for item in deleted),
+        required,
+        len(deleted),
+    )
+    return deleted
+
+
 @app.post("/api/seedr/add")
 async def seedr_add(request: Request):
     if not current_seedr_token():
@@ -3422,6 +3533,8 @@ async def seedr_add(request: Request):
 
     requested_folder = str(payload.get("folder_id") or "").strip()
     folder = int(requested_folder) if requested_folder.isdigit() else 0
+    auto_cleanup = bool(payload.get("auto_cleanup"))
+    required_bytes = max(0, int(float(payload.get("required_bytes") or 0)))
 
     session_id = _seedr_request_session_id.get().strip()
     logger.info(
@@ -3434,6 +3547,10 @@ async def seedr_add(request: Request):
         requested_folder or "<none>",
         folder,
     )
+
+    deleted_folders: list[dict[str, Any]] = []
+    if auto_cleanup and required_bytes > 0:
+        deleted_folders = await _prepare_seedr_space(required_bytes)
 
     try:
         task = unwrap_seedr_task(await add_task(raw_magnet, folder))
@@ -3479,6 +3596,7 @@ async def seedr_add(request: Request):
         "id": int(tid) if tid.isdigit() else tid,
         "torrent_name": task_name,
         "folder_id": task_folder_id,
+        "deleted_folders": deleted_folders,
     }
 
 def _seedr_file_folder_id(files: list[dict[str, Any]]) -> str:
