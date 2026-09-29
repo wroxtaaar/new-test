@@ -3436,7 +3436,7 @@ export default function App() {
                         Verifying with Seedr…
                       </span>
                     ) : (
-                      'Connect Now'
+                      'Connect'
                     )}
                   </button>
                 </div>
