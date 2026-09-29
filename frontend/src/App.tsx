@@ -2945,8 +2945,23 @@ export default function App() {
                         streamLoading={file.ownerId === 'seedr' && seedrStreamLoadingId === file.id}
                         onRename={(f) => setRenameItem({ id: f.id, name: f.name, isFolder: false })}
                         onMove={(f) => setMoveFile(f)}
+                        onSeedrDownload={file.ownerId === 'seedr'
+                          ? (f) => handleDownloadSeedrFile(f.id, f.name)
+                          : undefined}
+                        onSeedrCopy={file.ownerId === 'seedr'
+                          ? (f) => handleCopySeedrFileUrl(f.id)
+                          : undefined}
+                        onSeedrDelete={file.ownerId === 'seedr'
+                          ? (f) => handleDeleteSeedrFile({
+                              id: f.id,
+                              name: f.name,
+                              size: f.size,
+                              folderId: f.folder || '',
+                              folderPath: f.folder || '/'
+                            })
+                          : undefined}
                         canEdit={activeUser?.role !== 'viewer'}
-                        canDelete={activeUser?.role === 'admin'}
+                        canDelete={file.ownerId === 'seedr' ? true : activeUser?.role === 'admin'}
                       />
                     ))}
                   </div>
