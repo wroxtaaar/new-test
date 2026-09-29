@@ -371,6 +371,51 @@ export const api = {
     return res.json();
   },
 
+  async prepareSeedrMagnet(
+    magnet: string,
+    requiredBytes = 0,
+    torrentName?: string
+  ): Promise<any> {
+    const value = String(magnet || '');
+    if (!value.trim().toLowerCase().startsWith('magnet:?')) {
+      throw new Error('A valid magnet URL is required');
+    }
+
+    const res = await apiFetch('/api/seedr/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        magnet: value,
+        required_bytes: Math.max(0, Number(requiredBytes) || 0),
+        auto_cleanup: true,
+        torrent_name: torrentName || undefined,
+      })
+    });
+
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+
+    if (!res.ok) {
+      const error = new Error(
+        data?.error || data?.message || data?.detail || body ||
+        `Seedr prepare failed (HTTP ${res.status})`
+      );
+      Object.assign(error as any, data || {});
+      if (res.status === 413) (error as any).code = data?.code || 'SEEDR_INSUFFICIENT_SPACE';
+      throw error;
+    }
+
+    return {
+      backend: 'seedr',
+      seedrTaskId: data?.task_id ?? data?.taskId ?? data?.id ?? data?.task?.id ?? null,
+      seedrResponse: data,
+      seedrFolderName: data?.torrent_name || data?.name || data?.task?.name || torrentName || null,
+      seedrFolderId: data?.folder_id ?? data?.folderId ?? data?.task?.folder_id ?? null,
+      deletedFolders: Array.isArray(data?.deleted_folders) ? data.deleted_folders : [],
+    };
+  },
+
   async addMagnet(
     urls: string,
     category = 'Downloads',
