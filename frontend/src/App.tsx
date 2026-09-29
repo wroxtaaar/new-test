@@ -3105,7 +3105,7 @@ export default function App() {
 
       {/* Mobile Bottom Navigation */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-950/95 backdrop-blur-xl border-t border-slate-800 px-1 pb-[calc(env(safe-area-inset-bottom)+2px)] pt-1">
-        <div className="grid grid-cols-4 items-center">
+        <div className="grid grid-cols-3 items-center">
           <button
             onClick={() => { setActiveTab('search'); setIsMobileMoreOpen(false); }}
             className={`flex flex-col items-center justify-center gap-0.5 min-h-11 px-1 rounded-lg transition ${activeTab === 'search' ? 'text-cyan-400' : 'text-slate-400'}`}
