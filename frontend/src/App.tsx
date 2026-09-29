@@ -1046,6 +1046,13 @@ export default function App() {
     if (activeTab === 'files') loadSeedrLibrary();
   }, [activeTab, loadSeedrLibrary]);
 
+  // Load Seedr library metadata once when a personal Seedr connection becomes
+  // available so Search can immediately recognize already-prepared torrents.
+  useEffect(() => {
+    if (seedrConnected) void loadSeedrLibrary();
+  }, [seedrConnected]);
+
+
 
   const hasActiveQbtTransfers = useMemo(
     () => torrents.some(t =>
@@ -1834,6 +1841,13 @@ export default function App() {
                     [resolvedFolderId]: mapped,
                   }));
 
+                  const waiterKey = String(seedrNotice.taskId);
+                  const waiter = seedrPrepareWaiters.current[waiterKey];
+                  if (waiter && mapped.length > 0) {
+                    delete seedrPrepareWaiters.current[waiterKey];
+                    waiter.resolve({ files: mapped });
+                  }
+
                   if (selectedSeedrFolderId === resolvedFolderId) {
                     setSeedrFiles(mapped);
                     setSeedrFolderContentsLoading(false);
@@ -2569,7 +2583,6 @@ export default function App() {
             onCancelPrepare={handleCancelSeedrDownload}
             onOpenProgress={() => {
               setActiveTab('files');
-              setPrepareWaitOpen?.(false);
             }}
             seedrFiles={seedrAllPrefetchedFiles}
             onPlaySeedrFile={handleStreamSeedrFile}
