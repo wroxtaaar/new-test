@@ -692,51 +692,6 @@ export const api = {
     };
   },
 
-  async getSeedrMediaInfo(fileId: string): Promise<{
-    name: string;
-    audioTracks: Array<{
-      index: number;
-      streamIndex?: number;
-      language: string;
-      title: string;
-      codec: string;
-      channels: number;
-      default: boolean;
-    }>;
-    subtitleTracks: Array<{
-      index: number;
-      streamIndex?: number;
-      language: string;
-      title: string;
-      codec: string;
-      url: string;
-    }>;
-  }> {
-    const res = await apiFetch('/api/seedr/media-info/' + encodeURIComponent(fileId));
-    const body = await res.text();
-    let data: any = null;
-    try { data = body ? JSON.parse(body) : null; } catch { data = null; }
-
-    if (!res.ok) {
-      throw new Error(data?.error || data?.message || body || 'Failed to inspect Seedr media tracks');
-    }
-
-    const subtitleTracks = Array.isArray(data?.subtitleTracks)
-      ? data.subtitleTracks.map((track: any) => ({
-          ...track,
-          url: typeof track?.url === 'string' && track.url.startsWith('/')
-            ? API_BASE + track.url
-            : track?.url,
-        }))
-      : [];
-
-    return {
-      name: String(data?.name || fileId),
-      audioTracks: Array.isArray(data?.audioTracks) ? data.audioTracks : [],
-      subtitleTracks,
-    };
-  },
-
   openSeedrFolderDownload(folderId: string, filename = ''): void {
     const query = filename ? '?filename=' + encodeURIComponent(filename) : '';
     const url = '/api/seedr/folders/' + encodeURIComponent(folderId) + '/download' + query;
