@@ -4873,7 +4873,6 @@ async def seedr_media_info(file_id: str):
             codec = str(stream.get("codec_name") or "").lower()
             # Bitmap subtitle codecs cannot be represented as browser WebVTT.
             if codec in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}:
-                subtitle_index += 1
                 continue
             label = title or language_names.get(lang, lang.upper() if lang else "") or f"Subtitle {subtitle_index + 1}"
             subtitle_tracks.append({
@@ -4916,6 +4915,7 @@ async def seedr_embedded_subtitle(
     stream_index = int(subtitle_streams[track].get("index") or 0)
     command = [
         "ffmpeg", "-v", "error", "-nostdin",
+        *([ "-ss", str(max(0.0, start)) ] if start > 0 else []),
         "-i", source_url,
         "-map", f"0:{stream_index}",
         "-c:s", "webvtt",
@@ -5038,12 +5038,13 @@ async def seedr_video_media(
     file_id: str,
     request: Request,
     audio: int | None = Query(None, ge=0),
+    start: float = Query(0.0, ge=0.0),
 ):
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
     if audio is not None:
-        return await _stream_selected_audio(file_id, audio)
+        return await _stream_selected_audio(file_id, audio, start=start)
 
     upstream_url = await seedr_v2_video_url(file_id)
     if not upstream_url:
