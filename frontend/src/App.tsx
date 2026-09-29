@@ -3269,14 +3269,14 @@ export default function App() {
               </div>
               <div className="min-w-0">
                 <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
-                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Your own Seedr account' : 'Connect your Seedr account'}
+                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Welcome to Torrent Studio' : 'Welcome! Let’s connect your Seedr account'}
                 </h2>
                 <p className="mt-1 text-sm leading-5 text-slate-400">
                   {seedrConnected
                     ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
                     : seedrOnboardingStep === 'welcome'
-                      ? 'Use your own Seedr account so your torrents and storage stay separate from other users.'
-                      : 'Paste your Seedr Personal Access Token. Your Seedr password is never entered into Torrent Studio.'}
+                      ? 'Welcome! Connect your own Seedr account and keep your torrents and storage separate from everyone else.'
+                      : 'You’re almost ready. Connect your own Seedr account so Torrent Studio can send torrents directly to your Seedr storage.'}
                 </p>
               </div>
             </div>
@@ -3284,9 +3284,9 @@ export default function App() {
             {seedrOnboardingStep === 'welcome' && !seedrConnected ? (
               <>
                 <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
-                  <p className="text-sm font-semibold text-slate-200">Use your own Seedr account</p>
+                  <p className="text-sm font-semibold text-slate-200">Get started with Torrent Studio</p>
                   <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Create a free Seedr account, then generate a Personal Access Token from Seedr Settings. Existing Seedr users can use an existing PAT.
+                    Torrent Studio uses your own Seedr account for torrent downloads and media storage. Create a free Seedr account, or connect an existing one with a Personal Access Token.
                   </p>
                 </div>
                 <div className="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
