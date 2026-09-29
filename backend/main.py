@@ -2159,46 +2159,56 @@ X1337_HOSTS = [
 
 
 def _x1337_rows(html_text: str) -> list[dict[str, str]]:
-    """Parse the 1337x search table without requiring the source's API."""
-    start = html_text.find("table-list")
-    if start < 0:
-        return []
-
+    """Parse 1337x search rows across mirror HTML variations."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
     rows: list[dict[str, str]] = []
-    for tr in html_text[start:].split("<tr")[1:]:
-        link_match = re.search(
-            r'href="(/torrent/[^"]+)"[^>]*>([^<]+)</a>',
-            tr,
-            re.IGNORECASE,
-        )
-        if not link_match:
+    seen_paths: set[str] = set()
+
+    for link in soup.find_all("a", href=re.compile(r"^/torrent/")):
+        href = str(link.get("href") or "").strip()
+        if not href or href in seen_paths:
             continue
-        size_match = re.search(
-            r'class="coll-4 size[^"]*">\s*([\d.]+\s*[KMGT]i?B)',
-            tr,
-            re.IGNORECASE,
-        )
-        seeds_match = re.search(
-            r'class="coll-2 seeds[^"]*">\s*([\d,]+)',
-            tr,
-            re.IGNORECASE,
-        )
-        leech_match = re.search(
-            r'class="coll-3 leeches[^"]*">\s*([\d,]+)',
-            tr,
-            re.IGNORECASE,
-        )
+        row = link.find_parent("tr")
+        if row is None:
+            continue
+        title = link.get_text(" ", strip=True)
+        if not title:
+            continue
+        cells = row.find_all("td")
+        cell_text = [cell.get_text(" ", strip=True) for cell in cells]
+        row_text = " ".join(cell_text) or row.get_text(" ", strip=True)
+        size = ""
+        seeders = "0"
+        leechers = "0"
+        for cell in cells:
+            classes = " ".join(cell.get("class") or []).lower()
+            text = cell.get_text(" ", strip=True)
+            size_match = re.search(r"([\d.]+\s*[KMGT]i?B)", text, re.I)
+            if not size and size_match:
+                size = size_match.group(1)
+            number = re.search(r"\d[\d,]*", text)
+            if number and "seed" in classes:
+                seeders = number.group(0).replace(",", "")
+            elif number and ("leech" in classes or "leeches" in classes):
+                leechers = number.group(0).replace(",", "")
+        if not size:
+            size_match = re.search(r"([\d.]+\s*[KMGT]i?B)", row_text, re.I)
+            if size_match:
+                size = size_match.group(1)
+        numeric_cells = [re.sub(r"[^\d,]", "", text) for text in cell_text if re.fullmatch(r"\s*[\d,]+\s*", text or "")]
+        if seeders == "0" and len(numeric_cells) >= 2:
+            seeders = numeric_cells[-2] or "0"
+        if leechers == "0" and len(numeric_cells) >= 1:
+            leechers = numeric_cells[-1] or "0"
+        seen_paths.add(href)
         rows.append({
-            "title": BeautifulSoup(
-                html.unescape(link_match.group(2).strip()), "html.parser"
-            ).get_text(" ", strip=True),
-            "path": link_match.group(1),
-            "size": size_match.group(1) if size_match else "0 B",
-            "seeders": (seeds_match.group(1).replace(",", "") if seeds_match else "0"),
-            "leechers": (leech_match.group(1).replace(",", "") if leech_match else "0"),
+            "title": title,
+            "path": href,
+            "size": size or "0 B",
+            "seeders": seeders,
+            "leechers": leechers,
         })
     return rows
-
 
 async def search_1337x_direct(query: str, limit: int = 50, pages: int = 3) -> list[dict[str, Any]]:
     """Fast 1337x fallback: fetch a few listing pages, filter locally, then resolve only eligible magnets."""
@@ -2257,7 +2267,7 @@ async def search_1337x_direct(query: str, limit: int = 50, pages: int = 3) -> li
         async def fetch_listing(path: str) -> str:
             try:
                 response = await client.get(base + path)
-                if response.status_code < 400 and "table-list" in response.text:
+                if response.status_code < 400 and _x1337_rows(response.text):
                     return response.text
             except httpx.HTTPError:
                 pass
