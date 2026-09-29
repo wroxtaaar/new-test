@@ -2254,7 +2254,7 @@ export default function App() {
           return window.location.origin;
         }
       })();
-      const resolvedStreamUrl =
+      const seedrResolvedStreamUrl =
         result.protocol === 'direct' && result.externalUrl
           ? result.externalUrl
           : result.url;
@@ -2273,7 +2273,7 @@ export default function App() {
         ownerId: activeUser?.id || 'user_admin',
         ownerName: activeUser?.name || 'Admin',
         isStreamable: true,
-        streamUrl: resolvedStreamUrl,
+        streamUrl: seedrResolvedStreamUrl,
         externalStreamUrl: result.externalUrl,
         subtitleTracks,
         downloadUrl: '/api/seedr/files/' + encodeURIComponent(file.id) + '/download',
