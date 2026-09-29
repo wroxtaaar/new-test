@@ -2177,55 +2177,6 @@ export default function App() {
     }
   };
 
-  const findSeedrAudioTracks = useCallback((name: string) => {
-    const languageNames: Record<string, string> = {
-      en: 'English', eng: 'English', english: 'English',
-      hi: 'Hindi', hin: 'Hindi', hindi: 'Hindi',
-      ar: 'Arabic', ara: 'Arabic', arabic: 'Arabic',
-      es: 'Spanish', spa: 'Spanish', spanish: 'Spanish',
-      fr: 'French', fra: 'French', french: 'French',
-      de: 'German', deu: 'German', german: 'German',
-      it: 'Italian', ita: 'Italian', italian: 'Italian',
-      pt: 'Portuguese', por: 'Portuguese', portuguese: 'Portuguese',
-      ru: 'Russian', rus: 'Russian', russian: 'Russian',
-      ja: 'Japanese', jpn: 'Japanese', japanese: 'Japanese',
-      ko: 'Korean', kor: 'Korean', korean: 'Korean',
-      zh: 'Chinese', zho: 'Chinese', chinese: 'Chinese'
-    };
-
-    const base = name.replace(/\.[^.]+$/, '');
-    const matches = base.match(/(?:dual|multi)[ ._-]*(?:audio)?[\[\(._ -]*([^\]\)]+)[\]\)]?/i);
-    const candidate = matches?.[1] || '';
-    const tokens = candidate
-      .split(/[+,&/|_-]+/)
-      .map(token => token.trim().toLowerCase())
-      .filter(Boolean);
-
-    const languages = tokens
-      .map(token => languageNames[token])
-      .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
-
-    if (languages.length < 2) {
-      const broad = base.match(/\b(hindi|english|spanish|french|german|italian|portuguese|russian|japanese|korean|chinese)\b/gi) || [];
-      for (const token of broad) {
-        const value = languageNames[token.toLowerCase()];
-        if (value && !languages.includes(value)) languages.push(value);
-      }
-    }
-
-    const isMulti = /\b(?:dual|multi)[ ._-]*audio\b/i.test(base) || languages.length > 1;
-    if (!isMulti) return [];
-
-    const labels = languages.length >= 2 ? languages.slice(0, 4) : ['Audio 1', 'Audio 2'];
-    return labels.map((title, index) => ({
-      index,
-      language: title.toLowerCase(),
-      title,
-      codec: '',
-      channels: 0,
-      default: index === 0,
-    }));
-  }, []);
 
   const findSeedrSubtitleTracks = useCallback((
     file: { id: string; name: string; folderId: string; folderPath: string },
@@ -2307,9 +2258,7 @@ export default function App() {
       const subtitleTracks = type === 'video'
         ? findSeedrSubtitleTracks(file, apiOrigin)
         : [];
-      const audioTracks = type === 'video'
-        ? findSeedrAudioTracks(file.name)
-        : [];
+      const audioTracks: StorageFile['audioTracks'] = [];
 
       const syntheticFile: StorageFile = {
         id: 'seedr-' + file.id,
@@ -2328,6 +2277,8 @@ export default function App() {
         // HLS presentations it is /api/seedr/hls/{id}.
         streamUrl: result.url,
         externalStreamUrl: result.externalUrl,
+        streamId: result.resolvedFileId || file.streamId || file.id,
+        audioTracks,
         subtitleTracks,
         audioTracks,
         downloadUrl: API_BASE + '/api/seedr/files/' + encodeURIComponent(file.id) + '/download',
