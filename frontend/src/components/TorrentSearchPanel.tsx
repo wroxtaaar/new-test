@@ -78,6 +78,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const metadataInFlightRef = useRef(new Set<string>());
   const prefetchGenerationRef = useRef(0);
   const recentSearchRef = useRef<HTMLDivElement | null>(null);
+  const searchRequestRef = useRef<AbortController | null>(null);
+  const searchGenerationRef = useRef(0);
 
   const normalizeMatchText = (value: string) =>
     String(value || '')
@@ -218,6 +220,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       return;
     }
 
+    const generation = ++searchGenerationRef.current;
+    searchRequestRef.current?.abort();
+    const controller = new AbortController();
+    searchRequestRef.current = controller;
+
     try {
       setIsSearching(true);
       setShowRecentSearches(false);
@@ -226,7 +233,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
       // The backend owns low-result TV/season fallback. Keeping that logic
       // server-side avoids launching duplicate season searches from the browser.
-      const data = await api.searchTorrents(trimmed, 50);
+      const data = await api.searchTorrents(trimmed, 50, controller.signal);
+
+      // Never let an older request overwrite a newer search. This matters
+      // when a slow 1337x fallback finishes after a later click.
+      if (generation !== searchGenerationRef.current) return;
+
       setResults(data);
       setSearched(true);
 
@@ -282,11 +294,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         setError('No matching torrent results were found.');
       }
     } catch (err: any) {
+      if (generation !== searchGenerationRef.current) return;
+      if (err?.name === 'AbortError') return;
       setResults([]);
       setSearched(true);
       setError(err?.message || 'Torrent search failed.');
     } finally {
-      setIsSearching(false);
+      if (generation === searchGenerationRef.current) {
+        setIsSearching(false);
+        if (searchRequestRef.current === controller) {
+          searchRequestRef.current = null;
+        }
+      }
     }
   };
 
