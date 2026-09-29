@@ -872,6 +872,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         {isVideo ? (
           <video
             ref={videoRef}
+            crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
             src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
             className="w-full h-32 object-contain bg-black rounded-lg"
             onTimeUpdate={onTimeUpdate}
@@ -1047,6 +1048,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           {isVideo ? (
             <video
               ref={videoRef}
+              crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
               autoPlay
               className={`w-full h-full object-contain cursor-pointer ${
                 isFullscreen ? 'max-h-none' : 'max-h-[60vh]'
