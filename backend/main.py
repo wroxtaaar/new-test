@@ -4400,12 +4400,15 @@ async def seedr_v2_request(path: str) -> Any:
         )
     return data
 
-async def seedr_v2_video_url(file_id: str) -> str:
+async def seedr_v2_video_url(file_id: str, audio_index: int | None = None) -> str:
     """Use Seedr V2 current presentation URL, with direct-download fallback."""
     if not file_id:
         return ""
     try:
-        payload = seedr_data(await seedr_v2_request(f"/presentations/file/{quote(file_id)}/video"))
+        presentation_path = f"/presentations/file/{quote(file_id)}/video"
+        if audio_index is not None and audio_index >= 0:
+            presentation_path += "?" + urlencode({"audio": str(audio_index)})
+        payload = seedr_data(await seedr_v2_request(presentation_path))
         if isinstance(payload, dict):
             link = payload.get("link")
             link_url = link.get("url") if isinstance(link, dict) else ""
@@ -4765,11 +4768,15 @@ async def seedr_video_media_stats(file_id: str):
     }
 
 @app.get("/api/seedr/media/video/{file_id}")
-async def seedr_video_media(file_id: str, request: Request):
+async def seedr_video_media(
+    file_id: str,
+    request: Request,
+    audio: int | None = Query(None, ge=0),
+):
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
-    upstream_url = await seedr_v2_video_url(file_id)
+    upstream_url = await seedr_v2_video_url(file_id, audio_index=audio)
     if not upstream_url:
         raise HTTPException(404, "Seedr returned no video presentation URL")
 
