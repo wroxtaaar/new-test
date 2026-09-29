@@ -4760,6 +4760,272 @@ async def seedr_hls_resource(request: Request, file_id: str, u: str = Query(...)
     )
 
 
+async def _seedr_media_source_url(file_id: str) -> str:
+    result = await download_url(file_id)
+    url = str(result.get("url") or "").strip()
+    if not url:
+        raise HTTPException(502, "Seedr returned no media URL")
+    return url
+
+
+async def _ffprobe_seedr_file(file_id: str) -> dict[str, Any]:
+    """Inspect the original Seedr file without downloading it into Render."""
+    source_url = await _seedr_media_source_url(file_id)
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-print_format", "json",
+        "-show_streams",
+        "-show_format",
+        "-analyzeduration", "10M",
+        "-probesize", "20M",
+        source_url,
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=45)
+    except asyncio.TimeoutError as exc:
+        try:
+            process.kill()
+            await process.wait()
+        except Exception:
+            pass
+        raise HTTPException(504, "Media track inspection timed out") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(503, "FFmpeg is not installed on the media server") from exc
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace")[-1000:]
+        raise HTTPException(502, detail or "FFprobe could not inspect the Seedr file")
+
+    try:
+        return json.loads(stdout.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise HTTPException(502, "FFprobe returned invalid metadata") from exc
+
+
+def _track_language(stream: dict[str, Any]) -> str:
+    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+    return str(tags.get("language") or "").strip().lower()
+
+
+def _track_title(stream: dict[str, Any], fallback: str) -> str:
+    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+    return str(tags.get("title") or tags.get("handler_name") or fallback).strip()
+
+
+@app.get("/api/seedr/media-info/{file_id}")
+async def seedr_media_info(file_id: str):
+    if not current_seedr_token():
+        raise HTTPException(503, "Seedr is not configured")
+
+    data = await _ffprobe_seedr_file(file_id)
+    streams = data.get("streams") if isinstance(data, dict) else []
+    if not isinstance(streams, list):
+        streams = []
+
+    language_names = {
+        "en": "English", "eng": "English",
+        "hi": "Hindi", "hin": "Hindi",
+        "fr": "French", "fra": "French",
+        "de": "German", "deu": "German",
+        "es": "Spanish", "spa": "Spanish",
+        "it": "Italian", "ita": "Italian",
+        "pt": "Portuguese", "por": "Portuguese",
+        "ru": "Russian", "rus": "Russian",
+        "ja": "Japanese", "jpn": "Japanese",
+        "ko": "Korean", "kor": "Korean",
+        "zh": "Chinese", "zho": "Chinese",
+        "ar": "Arabic", "ara": "Arabic",
+        "bn": "Bengali", "ben": "Bengali",
+    }
+
+    audio_tracks = []
+    subtitle_tracks = []
+    audio_index = 0
+    subtitle_index = 0
+
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        codec_type = str(stream.get("codec_type") or "").lower()
+        tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+        lang = _track_language(stream)
+        title = _track_title(stream, "")
+        disposition = stream.get("disposition") if isinstance(stream.get("disposition"), dict) else {}
+        if codec_type == "audio":
+            label = title or language_names.get(lang, lang.upper() if lang else "") or f"Audio {audio_index + 1}"
+            audio_tracks.append({
+                "index": audio_index,
+                "streamIndex": int(stream.get("index") or 0),
+                "language": lang,
+                "title": label,
+                "codec": str(stream.get("codec_name") or "").upper(),
+                "channels": int(stream.get("channels") or 0),
+                "default": bool(disposition.get("default")),
+            })
+            audio_index += 1
+        elif codec_type == "subtitle":
+            codec = str(stream.get("codec_name") or "").lower()
+            # Bitmap subtitle codecs cannot be represented as browser WebVTT.
+            if codec in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}:
+                subtitle_index += 1
+                continue
+            label = title or language_names.get(lang, lang.upper() if lang else "") or f"Subtitle {subtitle_index + 1}"
+            subtitle_tracks.append({
+                "index": subtitle_index,
+                "streamIndex": int(stream.get("index") or 0),
+                "language": lang,
+                "title": label,
+                "codec": str(stream.get("codec_name") or "").upper(),
+                "url": f"/api/seedr/media-info/{quote(file_id, safe='')}/subtitle?track={subtitle_index}&name={quote(label, safe='')}",
+            })
+            subtitle_index += 1
+
+    return {
+        "name": str((data.get("format") or {}).get("filename") or file_id) if isinstance(data, dict) else file_id,
+        "audioTracks": audio_tracks,
+        "subtitleTracks": subtitle_tracks,
+    }
+
+
+@app.get("/api/seedr/media-info/{file_id}/subtitle")
+async def seedr_embedded_subtitle(
+    file_id: str,
+    track: int = Query(..., ge=0),
+    name: str = Query("subtitle"),
+):
+    if not current_seedr_token():
+        raise HTTPException(503, "Seedr is not configured")
+
+    data = await _ffprobe_seedr_file(file_id)
+    streams = data.get("streams") if isinstance(data, dict) else []
+    subtitle_streams = [
+        stream for stream in streams
+        if isinstance(stream, dict) and str(stream.get("codec_type") or "").lower() == "subtitle"
+        and str(stream.get("codec_name") or "").lower() not in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}
+    ]
+    if track >= len(subtitle_streams):
+        raise HTTPException(404, "Subtitle track not found")
+
+    source_url = await _seedr_media_source_url(file_id)
+    stream_index = int(subtitle_streams[track].get("index") or 0)
+    command = [
+        "ffmpeg", "-v", "error", "-nostdin",
+        "-i", source_url,
+        "-map", f"0:{stream_index}",
+        "-c:s", "webvtt",
+        "-f", "webvtt",
+        "pipe:1",
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+    except asyncio.TimeoutError as exc:
+        try:
+            process.kill()
+            await process.wait()
+        except Exception:
+            pass
+        raise HTTPException(504, "Subtitle extraction timed out") from exc
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace")[-1000:]
+        raise HTTPException(502, detail or "Subtitle extraction failed")
+
+    return Response(
+        content=stdout,
+        media_type="text/vtt; charset=utf-8",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="{Path(name).name.replace(chr(34), "_")}.vtt"',
+        },
+    )
+
+
+async def _stream_selected_audio(file_id: str, audio_index: int) -> StreamingResponse:
+    data = await _ffprobe_seedr_file(file_id)
+    streams = data.get("streams") if isinstance(data, dict) else []
+    audio_streams = [
+        stream for stream in streams
+        if isinstance(stream, dict) and str(stream.get("codec_type") or "").lower() == "audio"
+    ]
+    if audio_index >= len(audio_streams):
+        raise HTTPException(404, "Audio track not found")
+
+    source_url = await _seedr_media_source_url(file_id)
+    stream = audio_streams[audio_index]
+    video_streams = [
+        item for item in streams
+        if isinstance(item, dict) and str(item.get("codec_type") or "").lower() == "video"
+    ]
+    video_codec = str((video_streams[0] if video_streams else {}).get("codec_name") or "").lower()
+
+    command = [
+        "ffmpeg", "-v", "error", "-nostdin",
+        "-i", source_url,
+        "-map", "0:v:0",
+        "-map", f"0:a:{audio_index}",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "pipe:1",
+    ]
+    if video_codec in {"h264", "avc1"}:
+        command[command.index("-c:a"):command.index("-c:a")] = ["-c:v", "copy"]
+    else:
+        command[command.index("-c:a"):command.index("-c:a")] = [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+        ]
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def body():
+        try:
+            while True:
+                chunk = await process.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
+                await process.wait()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        body(),
+        media_type="video/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
 @app.get("/api/seedr/media/video/{file_id}/stats")
 async def seedr_video_media_stats(file_id: str):
     return {
@@ -4776,7 +5042,10 @@ async def seedr_video_media(
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
-    upstream_url = await seedr_v2_video_url(file_id, audio_index=audio)
+    if audio is not None:
+        return await _stream_selected_audio(file_id, audio)
+
+    upstream_url = await seedr_v2_video_url(file_id)
     if not upstream_url:
         raise HTTPException(404, "Seedr returned no video presentation URL")
 
