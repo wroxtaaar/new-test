@@ -31,7 +31,6 @@ import {
   Users,
   ChevronRight,
   Sparkles,
-  Layers,
   ArrowUpDown,
   ExternalLink,
   Film,
@@ -614,7 +613,6 @@ export default function App() {
   const [prioTorrent, setPrioTorrent] = useState<TorrentItem | null>(null);
   const [isCleanupOpen, setIsCleanupOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
-  const [isMobileMoreOpen, setIsMobileMoreOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [feedbackType, setFeedbackType] = useState<'review' | 'suggestion' | 'bug'>('review');
   const [feedbackRating, setFeedbackRating] = useState(5);
@@ -3132,51 +3130,11 @@ export default function App() {
         onToggleMinimize={() => setIsPlayerMinimized(!isPlayerMinimized)}
       />
 
-      {/* Mobile More actions sheet */}
-      {isMobileMoreOpen && (
-        <>
-          <button
-            type="button"
-            aria-label="Close more menu"
-            onClick={() => setIsMobileMoreOpen(false)}
-            className="md:hidden fixed inset-0 z-40 bg-black/50 backdrop-blur-[1px]"
-          />
-          <div className="md:hidden fixed left-3 right-3 bottom-20 z-50 rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl p-3">
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setFeedbackOpen(true);
-                  setFeedbackSuccess('');
-                  setFeedbackError('');
-                  setIsMobileMoreOpen(false);
-                }}
-                className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2"
-              >
-                <MessageSquare className="w-4 h-4 text-cyan-400" />
-                Feedback
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setTheme(theme === 'dark' ? 'dim' : 'dark');
-                }}
-                className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2"
-              >
-                <Moon className="w-4 h-4 text-cyan-400" />
-                Theme: {theme}
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-
       {/* Mobile Bottom Navigation */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-slate-950/95 backdrop-blur-xl border-t border-slate-800 px-1 pb-[calc(env(safe-area-inset-bottom)+2px)] pt-1">
         <div className="grid grid-cols-3 items-center">
           <button
-            onClick={() => { setActiveTab('search'); setIsMobileMoreOpen(false); }}
+            onClick={() => { setActiveTab('search'); }}
             className={`flex flex-col items-center justify-center gap-0.5 min-h-11 px-1 rounded-lg transition ${activeTab === 'search' ? 'text-cyan-400' : 'text-slate-400'}`}
           >
             <Search className="w-[18px] h-[18px]" />
@@ -3184,7 +3142,7 @@ export default function App() {
           </button>
 
           <button
-            onClick={() => { setActiveTab('files'); setIsMobileMoreOpen(false); }}
+            onClick={() => { setActiveTab('files'); }}
             className={`flex flex-col items-center justify-center gap-0.5 min-h-12 px-1 rounded-xl transition ${activeTab === 'files' ? 'text-cyan-400' : 'text-slate-400'}`}
           >
             <Folder className="w-5 h-5" />
@@ -3192,11 +3150,16 @@ export default function App() {
           </button>
 
           <button
-            onClick={() => setIsMobileMoreOpen(prev => !prev)}
-            className={`flex flex-col items-center justify-center gap-0.5 min-h-12 px-1 rounded-xl transition ${isMobileMoreOpen ? 'text-cyan-400' : 'text-slate-400'}`}
+            type="button"
+            onClick={() => {
+              setFeedbackOpen(true);
+              setFeedbackSuccess('');
+              setFeedbackError('');
+            }}
+            className={`flex flex-col items-center justify-center gap-0.5 min-h-12 px-1 rounded-xl transition ${feedbackOpen ? 'text-cyan-400' : 'text-slate-400'}`}
           >
-            <Layers className="w-5 h-5" />
-            <span className="text-[9px] font-semibold">More</span>
+            <MessageSquare className="w-5 h-5" />
+            <span className="text-[9px] font-semibold">Feedback</span>
           </button>
         </div>
       </nav>
