@@ -80,12 +80,22 @@ export default function App() {
   // Seedr connection is optional. Never open the connection dialog automatically
   // on page load/refresh; the user opens it explicitly or reaches a Seedr action.
   const [seedrOnboardingOpen, setSeedrOnboardingOpen] = useState(false);
+  const seedrOnboardingSeenKey = 'seedflow_seedr_onboarding_seen';
   const [seedrConnected, setSeedrConnected] = useState(false);
   const [seedrSessionReady, setSeedrSessionReady] = useState(false);
   const [seedrPat, setSeedrPat] = useState('');
   const [seedrPatSubmitting, setSeedrPatSubmitting] = useState(false);
   const [seedrConnectError, setSeedrConnectError] = useState('');
   const [showSeedrPatHelp, setShowSeedrPatHelp] = useState(false);
+
+  const markSeedrOnboardingSeen = useCallback(() => {
+    try {
+      window.localStorage.setItem(seedrOnboardingSeenKey, '1');
+    } catch {
+      // Storage can be unavailable in private/sandboxed contexts.
+    }
+    setSeedrOnboardingOpen(false);
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -96,7 +106,7 @@ export default function App() {
         if (session.connected) {
           setSeedrConnected(true);
           setSeedrConfigured(true);
-          setSeedrOnboardingOpen(false);
+          markSeedrOnboardingSeen();
         }
       })
       .catch(() => {
@@ -106,7 +116,24 @@ export default function App() {
     return () => {
       stopped = true;
     };
-  }, []);
+  }, [markSeedrOnboardingSeen]);
+
+  // Show the welcome screen once for a genuinely new browser/user session.
+  // Existing users who have dismissed or completed onboarding should not be
+  // interrupted on every refresh.
+  useEffect(() => {
+    if (!seedrSessionReady || seedrConnected) return;
+    try {
+      if (!window.localStorage.getItem(seedrOnboardingSeenKey)) {
+        setSeedrOnboardingStep('welcome');
+        setSeedrOnboardingOpen(true);
+      }
+    } catch {
+      // If storage is unavailable, still give a new user the welcome screen.
+      setSeedrOnboardingStep('welcome');
+      setSeedrOnboardingOpen(true);
+    }
+  }, [seedrSessionReady, seedrConnected]);
 
   const connectSeedrWithPat = useCallback(async () => {
     const pat = seedrPat.trim();
@@ -3209,7 +3236,7 @@ export default function App() {
           aria-labelledby="seedr-onboarding-title"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
-              setSeedrOnboardingOpen(false);
+              markSeedrOnboardingSeen();
               setActiveTab('search');
             }
           }}
@@ -3229,7 +3256,7 @@ export default function App() {
               type="button"
               aria-label="Close Seedr connection dialog"
               onClick={() => {
-                setSeedrOnboardingOpen(false);
+                markSeedrOnboardingSeen();
                 setActiveTab('search');
               }}
               className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-white"
@@ -3290,7 +3317,7 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setSeedrOnboardingOpen(false)}
+                  onClick={markSeedrOnboardingSeen}
                   className="mt-5 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
                 >
                   Continue to Torrent Studio
