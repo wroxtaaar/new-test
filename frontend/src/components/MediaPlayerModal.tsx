@@ -423,46 +423,63 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
   // Toggle play/pause
   const togglePlay = () => {
-    if (!mediaRef.current) return;
+    const media = mediaRef.current;
+    const alternateAudio = alternateAudioRef.current;
+    if (!media) return;
+
     if (isPlaying) {
-      mediaRef.current.pause();
-    } else {
-      mediaRef.current.play();
+      media.pause();
+      alternateAudio?.pause();
+      setIsPlaying(false);
+      return;
     }
-    setIsPlaying(!isPlaying);
+
+    const playRequests: Promise<any>[] = [media.play()];
+    if (alternateAudioIndexRef.current !== undefined && alternateAudio?.src) {
+      playRequests.push(alternateAudio.play());
+    }
+    Promise.allSettled(playRequests).then(() => {
+      setIsPlaying(!media.paused);
+    });
   };
 
   // Seek
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(e.target.value);
     const media = mediaRef.current;
+    if (!media || !Number.isFinite(time)) return;
 
+    const wasPlaying = !media.paused;
     setCurrentTime(time);
     setIsSeeking(true);
     setTrackNotice('Seeking…');
 
-    if (media) {
-      media.currentTime = time;
+    media.currentTime = Math.max(0, Math.min(duration || file.duration || time, time));
 
-      // If the video is paused, there will be no "playing" event to dismiss
-      // the loader. The seeked event below handles that case.
-      if (media.paused) {
-        const clearPausedSeek = () => {
-          setIsSeeking(false);
-          setTrackNotice('');
-          media.removeEventListener('seeked', clearPausedSeek);
-        };
-        media.addEventListener('seeked', clearPausedSeek, { once: true });
-      }
+    // When an alternate Seedr audio track is active, reload that audio from
+    // the requested absolute video position. The video itself remains on its
+    // original full-duration timeline.
+    if (alternateAudioIndexRef.current !== undefined) {
+      loadAlternateAudio(alternateAudioIndexRef.current, time, wasPlaying);
+      return;
+    }
+
+    if (media.paused) {
+      const clearPausedSeek = () => {
+        setIsSeeking(false);
+        setTrackNotice('');
+        media.removeEventListener('seeked', clearPausedSeek);
+      };
+      media.addEventListener('seeked', clearPausedSeek, { once: true });
     }
   };
 
   // Skip
   const skip = (seconds: number) => {
-    if (!mediaRef.current) return;
-    setIsSeeking(true);
-    setTrackNotice('Seeking…');
-    mediaRef.current.currentTime = Math.max(0, Math.min(duration, mediaRef.current.currentTime + seconds));
+    const media = mediaRef.current;
+    if (!media) return;
+    const nextTime = Math.max(0, Math.min(duration || file.duration || media.duration || 0, currentTime + seconds));
+    handleSeek({ target: { value: String(nextTime) } } as React.ChangeEvent<HTMLInputElement>);
   };
 
   // Volume
@@ -473,15 +490,33 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     if (mediaRef.current) {
       mediaRef.current.volume = val;
     }
+    if (alternateAudioRef.current) {
+      alternateAudioRef.current.volume = val;
+      alternateAudioRef.current.muted = val === 0;
+    }
   };
 
   const toggleMute = () => {
-    if (!mediaRef.current) return;
+    const media = mediaRef.current;
+    const alternateAudio = alternateAudioRef.current;
+    if (!media) return;
+
     if (isMuted) {
-      mediaRef.current.volume = volume || 0.8;
+      const nextVolume = volume || 0.8;
+      media.volume = nextVolume;
+      media.muted = false;
+      if (alternateAudio) {
+        alternateAudio.volume = nextVolume;
+        alternateAudio.muted = false;
+      }
       setIsMuted(false);
     } else {
-      mediaRef.current.volume = 0;
+      media.volume = 0;
+      media.muted = true;
+      if (alternateAudio) {
+        alternateAudio.volume = 0;
+        alternateAudio.muted = true;
+      }
       setIsMuted(true);
     }
   };
@@ -527,12 +562,22 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       audio.removeEventListener('canplay', startTogether);
       audio.currentTime = 0;
 
+      if (!resumePlaying) {
+        setIsSeeking(false);
+        setIsPlaying(false);
+        setTrackNotice('');
+        return;
+      }
+
+      // Start both elements from the same user-visible position only after
+      // the alternate audio is playable. This prevents the audio track from
+      // getting ahead of the first video frame during a track switch.
       const startVideo = media.play();
       const startAudio = audio.play();
       Promise.allSettled([startVideo, startAudio]).then(() => {
         if (requestId !== alternateAudioRequestRef.current) return;
         setIsSeeking(false);
-        setIsPlaying(!media.paused);
+        setIsPlaying(!media.paused && !audio.paused);
         setTrackNotice('');
       });
     };
@@ -629,6 +674,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setPlaybackSpeed(speed);
     if (mediaRef.current) {
       mediaRef.current.playbackRate = speed;
+    }
+    if (alternateAudioRef.current) {
+      alternateAudioRef.current.playbackRate = speed;
     }
   };
 
