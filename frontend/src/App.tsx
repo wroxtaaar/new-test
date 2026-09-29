@@ -2356,30 +2356,19 @@ export default function App() {
 
           {/* Right: Quick actions & User Switcher */}
           <div className="flex items-center gap-2">
-            {!seedrConnected && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSeedrPat('');
-                  setSeedrConnectError('');
-                  setSeedrOnboardingStep('welcome');
-                  setSeedrOnboardingOpen(true);
-                }}
-                className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/20"
-              >
-                <Cloud className="h-3.5 w-3.5" />
-                Connect Seedr
-              </button>
-            )}
-
-            {/* "+ Add Magnet" Primary CTA */}
             <button
-              onClick={() => openAddMagnet()}
-              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-cyan-500/20 transition tap-target"
+              type="button"
+              onClick={() => {
+                setSeedrPat('');
+                setSeedrConnectError('');
+                setSeedrOnboardingStep(seedrConnected ? 'pat' : 'welcome');
+                setSeedrOnboardingOpen(true);
+              }}
+              className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-lg sm:rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-slate-950 text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition tap-target"
+              title="Connect your Seedr account"
             >
-              <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4 stroke-[3]" />
-              <span className="hidden sm:inline">Add Magnet</span>
-              <span className="sm:hidden">Add</span>
+              <Cloud className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              <span>Connect to Seedr</span>
             </button>
 
             {/* Notification Bell */}
@@ -2478,51 +2467,6 @@ export default function App() {
         <div className={activeTab === 'search' ? 'block' : 'hidden'}>
           <TorrentSearchPanel onAdd={handleSearchAdd} />
 
-          {seedrInsufficientSpacePrompt && (
-            <div className="fixed inset-x-3 top-20 z-[100] flex justify-center pointer-events-none">
-              <div className="w-full max-w-md rounded-2xl border border-rose-400/40 bg-slate-950/95 backdrop-blur-xl shadow-[0_0_30px_rgba(244,63,94,0.22)] p-4 pointer-events-auto">
-                <div className="flex items-start gap-3">
-                  <div className="shrink-0 rounded-xl bg-rose-500/10 border border-rose-500/20 p-2">
-                    <AlertTriangle className="w-5 h-5 text-rose-400" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-bold text-rose-300 text-sm">Seedr storage is full</div>
-                    <div className="mt-1 text-xs leading-5 text-slate-300">
-                      This torrent needs <span className="font-semibold text-slate-100">{formatBytes(seedrInsufficientSpacePrompt.requiredBytes)}</span>,
-                      but only <span className="font-semibold text-rose-300">{formatBytes(seedrInsufficientSpacePrompt.remainingBytes)}</span> is available.
-                    </div>
-                    <div className="mt-3 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const prompt = seedrInsufficientSpacePrompt;
-                          setSeedrInsufficientSpacePrompt(null);
-                          void handleAddMagnet(
-                            prompt.magnet,
-                            prompt.category,
-                            prompt.selectedFiles,
-                            prompt.manifest,
-                            prompt.existingHash,
-                            'qbittorrent'
-                          );
-                        }}
-                        className="flex-1 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 px-3 py-2 text-xs font-bold transition"
-                      >
-                        Use qBittorrent
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSeedrInsufficientSpacePrompt(null)}
-                        className="rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 text-xs font-semibold transition"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* TAB 2: MY CLOUD FILES */}

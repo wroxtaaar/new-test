@@ -43,9 +43,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
   const [isSearching, setIsSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState('');
+  // Seed count is the default ranking so the strongest swarms appear first.
   const [sortBy, setSortBy] = useState<'time' | 'size' | 'seeds'>('seeds');
   const [sortDirection, setSortDirection] = useState<'desc' | 'asc'>('desc');
   const [minSeeders, setMinSeeders] = useState(0);
+  const [resolutionFilter, setResolutionFilter] = useState<'all' | '720p' | '1080p'>('all');
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [addingTorrentKey, setAddingTorrentKey] = useState<string | null>(null);
 
@@ -226,7 +228,22 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
   };
 
   const sortedResults = useMemo(() => {
-    const sorted = results.filter(result => (Number(result.seeders) || 0) >= minSeeders);
+    const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
+    const sorted = results.filter(result => {
+      const size = Number(result.size) || 0;
+      if (size > maxSeedrFriendlySize) return false;
+      if ((Number(result.seeders) || 0) < minSeeders) return false;
+
+      if (resolutionFilter !== 'all') {
+        const title = String(result.title || '').toLowerCase();
+        const pattern = resolutionFilter === '720p'
+          ? /(?:^|[^0-9])720p(?:[^0-9]|$)/i
+          : /(?:^|[^0-9])1080p(?:[^0-9]|$)/i;
+        if (!pattern.test(title)) return false;
+      }
+
+      return true;
+    });
 
     sorted.sort((a, b) => {
       let aValue = 0;
@@ -248,7 +265,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
     });
 
     return sorted;
-  }, [results, minSeeders, sortBy, sortDirection]);
+  }, [results, minSeeders, resolutionFilter, sortBy, sortDirection]);
 
   return (
     <div className="space-y-2.5 sm:space-y-4">
@@ -395,6 +412,35 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
 
       {sortedResults.length > 0 && (
         <div className="space-y-2">
+          <div className="grid grid-cols-1 md:grid-cols-[150px_minmax(0,1fr)] gap-2.5 sm:gap-3">
+            <aside className="rounded-xl border border-slate-800 bg-slate-900 p-2.5 md:sticky md:top-24 md:self-start">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 px-1 mb-2">Filters</div>
+              <div className="space-y-1.5">
+                {([
+                  ['all', 'All'],
+                  ['720p', '720p'],
+                  ['1080p', '1080p'],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setResolutionFilter(value)}
+                    className={`w-full rounded-lg px-2.5 py-2 text-left text-xs font-semibold transition ${
+                      resolutionFilter === value
+                        ? 'bg-cyan-500 text-slate-950'
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 px-1 text-[10px] leading-4 text-slate-600">
+                Torrents over 2 GiB are hidden automatically.
+              </div>
+            </aside>
+
+            <div className="min-w-0">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
             <div className="text-xs text-slate-400">
               {sortedResults.length} of {results.length} result{results.length === 1 ? '' : 's'}
@@ -547,6 +593,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onAdd })
                 </div>
               </div>
             ))}
+          </div>
+            </div>
           </div>
         </div>
       )}
