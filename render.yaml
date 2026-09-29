@@ -17,3 +17,7 @@ services:
         sync: false
       - key: ALLOW_LEGACY_SEEDR_TOKEN
         sync: false
+      - key: GITHUB_FEEDBACK_TOKEN
+        sync: false
+      - key: GITHUB_FEEDBACK_REPO
+        value: wroxtaaar/new-test
