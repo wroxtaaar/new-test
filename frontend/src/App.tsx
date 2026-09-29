@@ -24,7 +24,6 @@ import {
   Search,
   Filter,
   Moon,
-  Sun,
   ShieldCheck,
   AlertTriangle,
   RefreshCw,
@@ -269,15 +268,13 @@ export default function App() {
   const [initialSourceUrl, setInitialSourceUrl] = useState('');
   const [initialDescriptorUrl, setInitialDescriptorUrl] = useState('');
 
-  const [theme, setTheme] = useState<'dark' | 'dim' | 'light'>(() => {
+  const [theme, setTheme] = useState<'dark' | 'dim'>(() => {
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-  return (localStorage.getItem('seedflow_theme') as any) || 'dark';
-      }
+      const saved = window.localStorage.getItem('seedflow_theme');
+      return saved === 'dim' ? 'dim' : 'dark';
     } catch {
-      // Sandboxed or iframe storage restricted
+      return 'dark';
     }
-    return 'dark';
   });
 
   // Core Data
@@ -670,25 +667,20 @@ export default function App() {
     }
   }, [selectedSeedrFolderId]);
 
-  // Theme synchronization
+  // Keep the dark/dim theme preference in sync.
   useEffect(() => {
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        localStorage.setItem('seedflow_theme', theme);
-      }
+      window.localStorage.setItem('seedflow_theme', theme);
     } catch {}
     try {
       const root = document.documentElement;
-      root.classList.remove('dark', 'dim', 'light');
+      root.classList.remove('dark', 'dim');
       if (theme === 'dark') {
         root.classList.add('dark');
         root.style.backgroundColor = '#020617';
-      } else if (theme === 'dim') {
+      } else {
         root.classList.add('dark');
         root.style.backgroundColor = '#0f172a';
-      } else {
-        root.classList.add('light');
-        root.style.backgroundColor = '#f8fafc';
       }
     } catch {}
   }, [theme]);
@@ -2556,7 +2548,7 @@ export default function App() {
   }
 
   return (
-    <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'bg-slate-950 text-slate-100' : theme === 'dim' ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'} transition-colors duration-200`}>
+    <div className={`min-h-screen flex flex-col ${theme === 'dark' ? 'bg-slate-950' : 'bg-slate-900'} text-slate-100 transition-colors duration-200`}>
       {/* Top Main Navigation Header */}
       <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 px-2.5 sm:px-6 py-1.5 sm:py-3">
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-2 sm:gap-3">
@@ -2610,11 +2602,12 @@ export default function App() {
 
             {/* Theme Toggle */}
             <button
-              onClick={() => setTheme(theme === 'dark' ? 'dim' : theme === 'dim' ? 'light' : 'dark')}
+              onClick={() => setTheme(theme === 'dark' ? 'dim' : 'dark')}
               className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 transition tap-target hidden sm:flex items-center justify-center border border-slate-800"
               title={`Theme: ${theme}`}
             >
-              {theme === 'light' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-cyan-400" />}            </button>
+              <Moon className="w-4 h-4 text-cyan-400" />
+            </button>
 
           </div>
         </div>
@@ -3167,13 +3160,11 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  setTheme(theme === 'dark' ? 'dim' : theme === 'dim' ? 'light' : 'dark');
+                  setTheme(theme === 'dark' ? 'dim' : 'dark');
                 }}
                 className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2"
               >
-                {theme === 'light'
-                  ? <Sun className="w-4 h-4 text-amber-400" />
-                  : <Moon className="w-4 h-4 text-cyan-400" />}
+                <Moon className="w-4 h-4 text-cyan-400" />
                 Theme: {theme}
               </button>
             </div>
