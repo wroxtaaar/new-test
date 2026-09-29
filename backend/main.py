@@ -4808,6 +4808,10 @@ async def _ffprobe_seedr_file(file_id: str) -> dict[str, Any]:
         raise HTTPException(502, "FFprobe returned invalid metadata") from exc
 
 
+_SEEDR_MEDIA_INFO_CACHE_SECONDS = 600
+_seedr_media_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 def _track_language(stream: dict[str, Any]) -> str:
     tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
     return str(tags.get("language") or "").strip().lower()
@@ -4822,6 +4826,11 @@ def _track_title(stream: dict[str, Any], fallback: str) -> str:
 async def seedr_media_info(file_id: str):
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
+
+    cached = _seedr_media_info_cache.get(file_id)
+    now = asyncio.get_running_loop().time()
+    if cached and cached[0] > now:
+        return cached[1]
 
     data = await _ffprobe_seedr_file(file_id)
     streams = data.get("streams") if isinstance(data, dict) else []
@@ -4885,11 +4894,13 @@ async def seedr_media_info(file_id: str):
             })
             subtitle_index += 1
 
-    return {
+    result = {
         "name": str((data.get("format") or {}).get("filename") or file_id) if isinstance(data, dict) else file_id,
         "audioTracks": audio_tracks,
         "subtitleTracks": subtitle_tracks,
     }
+    _seedr_media_info_cache[file_id] = (now + _SEEDR_MEDIA_INFO_CACHE_SECONDS, result)
+    return result
 
 
 @app.get("/api/seedr/media-info/{file_id}/subtitle")
@@ -4915,7 +4926,6 @@ async def seedr_embedded_subtitle(
     stream_index = int(subtitle_streams[track].get("index") or 0)
     command = [
         "ffmpeg", "-v", "error", "-nostdin",
-        *([ "-ss", str(max(0.0, start)) ] if start > 0 else []),
         "-i", source_url,
         "-map", f"0:{stream_index}",
         "-c:s", "webvtt",
@@ -4953,7 +4963,7 @@ async def seedr_embedded_subtitle(
     )
 
 
-async def _stream_selected_audio(file_id: str, audio_index: int) -> StreamingResponse:
+async def _stream_selected_audio(file_id: str, audio_index: int, start: float = 0.0) -> StreamingResponse:
     data = await _ffprobe_seedr_file(file_id)
     streams = data.get("streams") if isinstance(data, dict) else []
     audio_streams = [
@@ -4973,6 +4983,7 @@ async def _stream_selected_audio(file_id: str, audio_index: int) -> StreamingRes
 
     command = [
         "ffmpeg", "-v", "error", "-nostdin",
+        *([ "-ss", str(max(0.0, start)) ] if start > 0 else []),
         "-i", source_url,
         "-map", "0:v:0",
         "-map", f"0:a:{audio_index}",
