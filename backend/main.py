@@ -5116,6 +5116,93 @@ async def seedr_video_media(
 
 
 @app.get("/api/seedr/media/audio/{file_id}")
+async def seedr_audio_media_route(
+    file_id: str,
+    request: Request,
+    track: int = Query(0, ge=0),
+    start: float = Query(0.0, ge=0.0),
+):
+    """Stream one Seedr audio track as browser-compatible fragmented MP4.
+
+    This route is used for alternate-audio playback so the video element never
+    has to be replaced. Keeping video on its original timeline avoids the
+    shortened-duration and A/V drift caused by remuxing the whole video when a
+    user changes audio tracks.
+    """
+    if not current_seedr_token():
+        raise HTTPException(503, "Seedr is not configured")
+
+    data = await _ffprobe_seedr_file(file_id)
+    streams = data.get("streams") if isinstance(data, dict) else []
+    audio_streams = [
+        stream for stream in streams
+        if isinstance(stream, dict) and str(stream.get("codec_type") or "").lower() == "audio"
+    ]
+    if track >= len(audio_streams):
+        raise HTTPException(404, "Audio track not found")
+
+    source_url = await _seedr_media_source_url(file_id)
+    source = audio_streams[track]
+    codec = str(source.get("codec_name") or "").lower()
+
+    command = [
+        "ffmpeg", "-v", "error", "-nostdin",
+        *(["-ss", str(max(0.0, start))] if start > 0 else []),
+        "-i", source_url,
+        "-map", f"0:a:{track}",
+    ]
+
+    # AAC can be copied directly into MP4, which makes the common case much
+    # faster. Other codecs are transcoded to AAC for broad browser support.
+    if codec == "aac":
+        command += ["-c:a", "copy"]
+    else:
+        command += ["-c:a", "aac", "-b:a", "192k"]
+
+    command += [
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "pipe:1",
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(503, "FFmpeg is not installed on the media server") from exc
+
+    async def body():
+        try:
+            while True:
+                chunk = await process.stdout.read(512 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
+                await process.wait()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        body(),
+        media_type="audio/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+@app.get("/api/seedr/media/audio/{file_id}")
 async def seedr_audio_media_route(file_id: str, request: Request):
     """Range-aware browser audio endpoint backed by Seedr."""
     return await seedr_audio_media(file_id, request)
