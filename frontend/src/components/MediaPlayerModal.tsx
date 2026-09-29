@@ -96,7 +96,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setAudioTracks([]);
   }, [file?.id]);
 
-, [file?.id, file?.streamUrl, file?.externalStreamUrl]);
 
   useEffect(() => {
     const media = mediaRef.current;
