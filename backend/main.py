@@ -2798,6 +2798,26 @@ async def search_1337x(query: str, limit: int = 50) -> list[dict[str, Any]]:
                                 continue
                             if isinstance(provider, dict):
                                 providers.append(provider)
+
+                # Episode enrichment is the one optional provider we give a
+                # little more time to. Generic indexes can return a large
+                # season pack first, while EZTV can return individual
+                # S01E01/S01E02/... torrents that fit the Seedr size limit.
+                if (
+                    tv_task is not None
+                    and not tv_task.done()
+                    and time.monotonic() < deadline
+                ):
+                    tv_wait = min(1.25, max(0.0, deadline - time.monotonic()))
+                    if tv_wait > 0:
+                        tv_done, _ = await asyncio.wait({tv_task}, timeout=tv_wait)
+                        if tv_done:
+                            try:
+                                provider = await tv_task
+                                if isinstance(provider, dict):
+                                    providers.append(provider)
+                            except Exception as exc:
+                                logger.info("TV episode enrichment failed for '%s': %s", query, exc)
                 break
     finally:
         all_tasks = [csv_task, api_task] + ([tv_task] if tv_task is not None else [])
