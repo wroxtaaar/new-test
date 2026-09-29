@@ -631,7 +631,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                               setPreparingTorrentKey(torrentKey);
                               setPrepareWaitTitle(result.title);
                               setPrepareWaitOpen(false);
-                              const longWaitTimer = window.setTimeout(() => setPrepareWaitOpen(true), 15000);
+                              const longWaitTimer = window.setTimeout(() => setPrepareWaitOpen(true), 30000);
 
                               try {
                                 const metadata = metadataCacheRef.current.get(torrentKey);
