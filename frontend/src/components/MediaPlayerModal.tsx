@@ -170,25 +170,22 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setMediaError('');
     setTrackNotice('Preparing browser stream…');
 
-    const directBaseUrl = file.streamUrl.includes('/api/torrents/stream/')
-      ? file.streamUrl.replace('/api/torrents/stream/', '/api/torrents/direct-stream/')
-      : file.streamUrl;
+    // Always have a concrete browser source. Prefer the resolved backend
+    // stream, then the direct Seedr presentation URL, then the download
+    // endpoint as the final browser-playback fallback.
+    const rawStreamUrl = String(file.streamUrl || '').trim();
+    const directBaseUrl = rawStreamUrl.includes('/api/torrents/stream/')
+      ? rawStreamUrl.replace('/api/torrents/stream/', '/api/torrents/direct-stream/')
+      : rawStreamUrl;
+    const streamUrl = rawStreamUrl || String(file.externalStreamUrl || '').trim() || String(file.downloadUrl || '').trim();
 
-    // Seedr supplies the exact HLS URL that external players use (e.g. MX
-    // Player). Try that URL first in Hls.js; if browser CORS blocks it, fall
-    // back automatically to our Render same-origin proxy.
-    // Browser playback must use the backend URL. The backend decides whether the
-    // Seedr presentation is HLS or a direct video stream and provides the proper
-    // same-origin endpoint. Keep externalStreamUrl only for VLC/MX Player.
-    const preferredSeedrUrl = file.streamUrl || file.externalStreamUrl || directBaseUrl;
-    // Use the resolved preferred URL for every playback operation below.
-    // Previously the code referenced an undefined streamUrl variable, which
-    // crashed the entire app as soon as the player effect ran.
-    const streamUrl = preferredSeedrUrl;
     // HLS audio tracks are switched through HLS.js. Do not append an audio query parameter.
-    const fallbackStreamUrl = file.externalStreamUrl && file.streamUrl && file.streamUrl !== file.externalStreamUrl
-      ? file.streamUrl
-      : '';
+    const fallbackStreamUrl = String(file.externalStreamUrl || '').trim() &&
+      String(file.externalStreamUrl || '').trim() !== streamUrl
+      ? String(file.externalStreamUrl || '').trim()
+      : String(file.downloadUrl || '').trim() !== streamUrl
+        ? String(file.downloadUrl || '').trim()
+        : '';
 
     const restoreTime = resumeTimeRef.current;
     const restorePlaying = resumePlayingRef.current || (!media.paused && duration > 0);
@@ -684,7 +681,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         {isVideo ? (
           <video
             ref={videoRef}
-            src={file.streamUrl || file.externalStreamUrl}
+            src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
             className="w-full h-32 object-contain bg-black rounded-lg"
             onTimeUpdate={onTimeUpdate}
             onSeeking={onSeeking}
@@ -701,7 +698,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           <audio
             ref={audioRef}
             autoPlay
-            src={file.streamUrl}
+            src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
             onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onLoadedMetadata}
             onEnded={() => setIsPlaying(false)}
