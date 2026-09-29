@@ -2280,7 +2280,6 @@ export default function App() {
         streamId: result.resolvedFileId || file.streamId || file.id,
         audioTracks,
         subtitleTracks,
-        audioTracks,
         downloadUrl: API_BASE + '/api/seedr/files/' + encodeURIComponent(file.id) + '/download',
       };
 
