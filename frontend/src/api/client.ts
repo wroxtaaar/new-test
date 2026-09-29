@@ -38,7 +38,7 @@ import {
 const configuredApiBase = String(import.meta.env.VITE_API_URL || '').trim();
 const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
 const isRenderFullStackHost = currentHost.endsWith('.onrender.com');
-const API_BASE = (
+export const API_BASE = (
   configuredApiBase ||
   (isRenderFullStackHost
     ? window.location.origin
