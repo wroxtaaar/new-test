@@ -3331,14 +3331,14 @@ export default function App() {
               </div>
               <div className="min-w-0">
                 <h2 id="seedr-onboarding-title" className="text-lg font-bold text-slate-100">
-                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Welcome to Torrent Studio' : 'Welcome! Let’s connect your Seedr account'}
+                  {seedrConnected ? 'Seedr account connected' : seedrOnboardingStep === 'welcome' ? 'Your own Seedr account' : 'Connect your Seedr account'}
                 </h2>
                 <p className="mt-1 text-sm leading-5 text-slate-400">
                   {seedrConnected
                     ? 'Torrent Studio is now connected to your Seedr account. Your Seedr storage is used for torrents and media.'
                     : seedrOnboardingStep === 'welcome'
-                      ? 'Welcome! Connect your own Seedr account and keep your torrents and storage separate from everyone else.'
-                      : 'You’re almost ready. Connect your own Seedr account so Torrent Studio can send torrents directly to your Seedr storage.'}
+                      ? 'Use your own Seedr account so your torrents and storage stay separate from other users.'
+                      : 'Paste your Seedr Personal Access Token. Your Seedr password is never entered into Torrent Studio.'}
                 </p>
               </div>
             </div>
@@ -3388,16 +3388,6 @@ export default function App() {
             ) : (
               <>
                 <div className="mt-5 space-y-3">
-                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
-                    <p className="text-sm font-semibold text-slate-100">You’re in the right place 👋</p>
-                    <p className="mt-1 text-xs leading-5 text-slate-400">
-                      Connect once, then Torrent Studio will use your own Seedr storage for your downloads and media. Your Seedr password is never sent here.
-                    </p>
-                    <div className="mt-3 grid grid-cols-1 gap-2 text-[11px] text-slate-400 sm:grid-cols-2">
-                      <div className="rounded-lg bg-slate-950/50 px-3 py-2">✓ Your own Seedr storage</div>
-                      <div className="rounded-lg bg-slate-950/50 px-3 py-2">✓ No shared Seedr account</div>
-                    </div>
-                  </div>
                   <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div>
@@ -3441,7 +3431,7 @@ export default function App() {
                           <li>Open the <span className="font-semibold text-slate-300">Seedr Personal Access Tokens</span> page.</li>
                           <li>Give the token a descriptive <span className="font-semibold text-slate-300">name</span>.</li>
                           <li>Set <span className="font-semibold text-slate-300">Expiration</span> to <span className="font-semibold text-slate-300">Never</span>.</li>
-                          <li>Under Scopes, select <span className="font-semibold text-slate-300">Full access</span>.</li>
+                          <li>Under Scopes, click <span className="font-semibold text-slate-300">Read &amp; Add Torrents</span>.</li>
                           <li>Click <span className="font-semibold text-slate-300">Generate Token</span>.</li>
                           <li>Copy the token and save it somewhere safe.</li>
                           <li>Paste that same token into Torrent Studio below and click <span className="font-semibold text-slate-300">Connect with PAT</span>.</li>
@@ -3449,7 +3439,14 @@ export default function App() {
                         <p className="mt-2 text-[11px] leading-4 text-slate-500">
                           Use the PAT here, not your Seedr password or an app password.
                         </p>
-    
+                        <a
+                          href="https://www.seedr.cc/api/v0.1/console/tokens"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300 hover:text-emerald-200"
+                        >
+                          Open Seedr Personal Access Tokens <ExternalLink className="h-3 w-3" />
+                        </a>
                       </div>
                     )}
 
