@@ -557,9 +557,20 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     audio.src = url;
     audio.load();
 
+    const handleAudioError = () => {
+      if (requestId !== alternateAudioRequestRef.current) return;
+      alternateAudioIndexRef.current = undefined;
+      media.muted = isMuted;
+      setIsSeeking(false);
+      setIsPlaying(false);
+      setTrackNotice('Unable to load the selected audio track.');
+      audio.removeEventListener('canplay', startTogether);
+    };
+
     const startTogether = () => {
       if (requestId !== alternateAudioRequestRef.current) return;
       audio.removeEventListener('canplay', startTogether);
+      audio.removeEventListener('error', handleAudioError);
       audio.currentTime = 0;
 
       if (!resumePlaying) {
@@ -574,15 +585,26 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       // getting ahead of the first video frame during a track switch.
       const startVideo = media.play();
       const startAudio = audio.play();
-      Promise.allSettled([startVideo, startAudio]).then(() => {
+      Promise.allSettled([startVideo, startAudio]).then((results) => {
         if (requestId !== alternateAudioRequestRef.current) return;
+        const videoStarted = results[0]?.status === 'fulfilled';
+        const audioStarted = results[1]?.status === 'fulfilled';
+        if (!videoStarted || !audioStarted) {
+          media.pause();
+          audio.pause();
+          setIsSeeking(false);
+          setIsPlaying(false);
+          setTrackNotice('Playback could not resume with the selected audio track.');
+          return;
+        }
         setIsSeeking(false);
-        setIsPlaying(!media.paused && !audio.paused);
+        setIsPlaying(true);
         setTrackNotice('');
       });
     };
 
     audio.addEventListener('canplay', startTogether, { once: true });
+    audio.addEventListener('error', handleAudioError, { once: true });
   };
 
   const clearAlternateAudio = (restoreVideoAudio = true) => {
@@ -616,7 +638,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       return;
     }
 
-    if (media && file?.streamId && file.streamUrl.includes('/api/seedr/media/video/')) {
+    if (media && file?.streamUrl.includes('/api/seedr/media/video/')) {
       const position = Number.isFinite(media.currentTime) ? media.currentTime : currentTime;
       const wasPlaying = !media.paused;
       const primaryIndex = primaryAudioIndexRef.current;
