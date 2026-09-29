@@ -37,6 +37,7 @@ interface TorrentSearchPanelProps {
   onCancelPrepare?: () => void | Promise<void>;
   onOpenProgress?: () => void;
   seedrFiles?: SeedrSearchFile[];
+  seedrDeletedFolderIds?: string[];
   onPlaySeedrFile?: (file: SeedrSearchFile) => void | Promise<void>;
   onDownloadSeedrFile?: (file: SeedrSearchFile) => void | Promise<void>;
   onCopySeedrFileUrl?: (file: SeedrSearchFile) => void | Promise<void>;
@@ -49,7 +50,7 @@ function formatPublished(value?: string) {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], onPlaySeedrFile, onDownloadSeedrFile, onCopySeedrFileUrl }) => {
+export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], seedrDeletedFolderIds = [], onPlaySeedrFile, onDownloadSeedrFile, onCopySeedrFileUrl }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TorrentSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -114,8 +115,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
   const preparedForResult = (result: TorrentSearchResult): SeedrSearchFile[] => {
     const key = result.infoHash || result.magnetUrl || result.downloadUrl || result.sourceUrl || result.title;
+    const deletedIds = new Set(seedrDeletedFolderIds.map(id => String(id)));
     const local = preparedByKeyRef.current.get(key);
-    return local?.files?.length ? local.files : findPreparedFiles(result);
+    const localFiles = local?.files?.filter(file => !deletedIds.has(String(file.folderId))) || [];
+    return localFiles.length ? localFiles : findPreparedFiles(result);
   };
 
   const preparedByKeyRef = useRef(new Map<string, { files: SeedrSearchFile[] }>());
