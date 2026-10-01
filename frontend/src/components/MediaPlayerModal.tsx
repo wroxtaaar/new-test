@@ -720,11 +720,11 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       if (!media) return;
 
       const selected = subtitleTracks.find(track => track.index === selectedSubtitleIndex);
+      const selectedTextTrack = subtitleTrackRef.current?.track;
       const textTracks = Array.from(media.textTracks || []);
-      const selectedTextTrack = textTracks[textTracks.length - 1];
 
       textTracks.forEach(track => {
-        track.mode = track === selectedTextTrack ? 'showing' : 'disabled';
+        track.mode = selectedTextTrack && track === selectedTextTrack ? 'showing' : 'disabled';
       });
 
       if (selected) {
@@ -1127,10 +1127,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                     // Force activation again after the browser finishes
                     // loading the WebVTT resource.
                     const media = videoRef.current;
-                    if (!media) return;
-                    const tracks = Array.from(media.textTracks || []);
-                    tracks.forEach(track => {
-                      track.mode = track === tracks[tracks.length - 1] ? 'showing' : 'disabled';
+                    const selectedTextTrack = subtitleTrackRef.current?.track;
+                    if (!media || !selectedTextTrack) return;
+                    Array.from(media.textTracks || []).forEach(track => {
+                      track.mode = track === selectedTextTrack ? 'showing' : 'disabled';
                     });
                   }}
                   onError={() => {
