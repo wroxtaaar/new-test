@@ -4820,8 +4820,22 @@ async def _seedr_media_source_url(file_id: str) -> str:
     return url
 
 
+_SEEDR_FFPROBE_CACHE_SECONDS = 600
+_seedr_ffprobe_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 async def _ffprobe_seedr_file(file_id: str) -> dict[str, Any]:
-    """Inspect the original Seedr file without downloading it into Render."""
+    """Inspect a Seedr file and reuse the result for media/subtitle requests.
+
+    The same MKV was previously probed once for track discovery and then probed
+    again when the user selected an embedded subtitle. Reusing the probe keeps
+    Render Free from doing the expensive remote MKV inspection twice.
+    """
+    now = asyncio.get_running_loop().time()
+    cached = _seedr_ffprobe_cache.get(file_id)
+    if cached and cached[0] > now:
+        return cached[1]
+
     source_url = await _seedr_media_source_url(file_id)
     command = [
         "ffprobe",
@@ -4855,13 +4869,18 @@ async def _ffprobe_seedr_file(file_id: str) -> dict[str, Any]:
         raise HTTPException(502, detail or "FFprobe could not inspect the Seedr file")
 
     try:
-        return json.loads(stdout.decode("utf-8", errors="replace"))
+        data = json.loads(stdout.decode("utf-8", errors="replace"))
     except Exception as exc:
         raise HTTPException(502, "FFprobe returned invalid metadata") from exc
+
+    _seedr_ffprobe_cache[file_id] = (now + _SEEDR_FFPROBE_CACHE_SECONDS, data)
+    return data
 
 
 _SEEDR_MEDIA_INFO_CACHE_SECONDS = 600
 _seedr_media_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_SEEDR_EMBEDDED_SUBTITLE_CACHE_SECONDS = 600
+_seedr_embedded_subtitle_cache: dict[str, tuple[float, bytes]] = {}
 
 
 def _track_language(stream: dict[str, Any]) -> str:
@@ -4968,6 +4987,22 @@ async def seedr_embedded_subtitle(
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
 
+    cache_key = f"{file_id}:{track}"
+    now = asyncio.get_running_loop().time()
+    cached = _seedr_embedded_subtitle_cache.get(cache_key)
+    if cached and cached[0] > now:
+        return Response(
+            content=cached[1],
+            media_type="text/vtt; charset=utf-8",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "private, max-age=600",
+                "Content-Disposition": f'inline; filename="{Path(name).name.replace(chr(34), "_")}.vtt"',
+            },
+        )
+
+    # Reuses the media-info FFprobe result instead of probing the remote MKV
+    # a second time when the user selects an embedded subtitle.
     data = await _ffprobe_seedr_file(file_id)
     streams = data.get("streams") if isinstance(data, dict) else []
     subtitle_streams = [
@@ -5008,12 +5043,17 @@ async def seedr_embedded_subtitle(
         detail = stderr.decode("utf-8", errors="replace")[-1000:]
         raise HTTPException(502, detail or "Subtitle extraction failed")
 
+    _seedr_embedded_subtitle_cache[cache_key] = (
+        now + _SEEDR_EMBEDDED_SUBTITLE_CACHE_SECONDS,
+        stdout,
+    )
+
     return Response(
         content=stdout,
         media_type="text/vtt; charset=utf-8",
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-store",
+            "Cache-Control": "private, max-age=600",
             "Content-Disposition": f'inline; filename="{Path(name).name.replace(chr(34), "_")}.vtt"',
         },
     )
