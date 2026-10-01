@@ -5307,16 +5307,19 @@ async def seedr_audio_media_route(
         "-map", f"0:a:{track}",
     ]
 
-    # AAC can be copied directly into MP4, which makes the common case much
-    # faster. Other codecs are transcoded to AAC for broad browser support.
-    if codec == "aac":
-        command += ["-c:a", "copy"]
-    else:
-        command += ["-c:a", "aac", "-b:a", "192k"]
-
+    # Always emit a streaming WebM/Opus audio resource for the fallback.
+    # Chromium handles fragmented WebM/Opus reliably even when the original
+    # MKV track is E-AC-3, AC-3, DTS, TrueHD, PCM, etc. Using one browser-native
+    # output format also avoids MP4 muxing/canplay stalls on a non-seekable pipe.
     command += [
-        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "-f", "mp4",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-c:a", "libopus",
+        "-b:a", "160k",
+        "-vbr", "on",
+        "-application", "audio",
+        "-f", "webm",
         "pipe:1",
     ]
 
@@ -5349,7 +5352,7 @@ async def seedr_audio_media_route(
 
     return StreamingResponse(
         body(),
-        media_type="audio/mp4",
+        media_type="audio/webm",
         headers={
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
