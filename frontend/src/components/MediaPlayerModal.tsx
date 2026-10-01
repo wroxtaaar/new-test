@@ -1350,17 +1350,17 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                     disabled={tracksLoading || (hlsSubtitleTracks.length === 0 && subtitleTracks.length === 0)}
                     value={selectedHlsSubtitleIndex !== undefined ? 'hls:' + selectedHlsSubtitleIndex : selectedSubtitleIndex !== undefined ? 'external:' + selectedSubtitleIndex : 'off'}
                     onChange={(e) => handleSubtitleTrackChange(e.target.value)}
-                    className="min-w-[110px] max-w-[185px] bg-transparent text-xs font-semibold text-slate-100 outline-none disabled:cursor-not-allowed disabled:text-slate-500"
+                    className="min-w-[110px] max-w-[185px] max-w-[185px] bg-transparent text-xs font-semibold text-slate-100 outline-none disabled:cursor-not-allowed disabled:text-slate-500 [color-scheme:dark]"
                     title={tracksLoading ? 'Loading subtitles' : 'Subtitles'}
                   >
-                    <option value="off">{tracksLoading ? 'Loading…' : 'Subtitles Off'}</option>
+                    <option value="off" className="bg-slate-900 text-slate-100">{tracksLoading ? 'Loading…' : 'Subtitles Off'}</option>
                     {hlsSubtitleTracks.map((track, index) => (
-                      <option key={'hls-sub-' + track.index} value={'hls:' + track.index}>
+                      <option key={'hls-sub-' + track.index} value={'hls:' + track.index} className="bg-slate-900 text-slate-100">
                         {formatTrackLabel(track, index, 'Subtitle')}
                       </option>
                     ))}
                     {subtitleTracks.map((track, index) => (
-                      <option key={'external-sub-' + track.index} value={'external:' + track.index}>
+                      <option key={'external-sub-' + track.index} value={'external:' + track.index} className="bg-slate-900 text-slate-100">
                         {formatTrackLabel(track, index, 'Subtitle')}
                       </option>
                     ))}
