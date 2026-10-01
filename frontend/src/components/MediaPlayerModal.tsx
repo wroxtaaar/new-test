@@ -401,6 +401,32 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, [isVideo]);
 
+  // Native <track> elements can be inserted after the video has already
+  // loaded. Explicitly switch the selected track to "showing" so mobile
+  // Chrome/Android does not leave the newly-created TextTrack in "disabled".
+  useEffect(() => {
+    if (!isVideo || selectedSubtitleIndex === undefined) return;
+
+    const timer = window.setTimeout(() => {
+      const media = videoRef.current;
+      if (!media) return;
+
+      const selected = subtitleTracks.find(track => track.index === selectedSubtitleIndex);
+      const selectedTextTrack = subtitleTrackRef.current?.track;
+      const textTracks = Array.from(media.textTracks || []);
+
+      textTracks.forEach(track => {
+        track.mode = selectedTextTrack && track === selectedTextTrack ? 'showing' : 'disabled';
+      });
+
+      if (selected) {
+        setTrackNotice('');
+      }
+    }, 50);
+
+    return () => window.clearTimeout(timer);
+  }, [isVideo, selectedSubtitleIndex, subtitleTracks]);
+
   if (!file) return null;
 
   const handleMediaError = () => {
@@ -708,32 +734,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       }
     }
   };
-
-  // Native <track> elements can be inserted after the video has already
-  // loaded. Explicitly switch the selected track to "showing" so mobile
-  // Chrome/Android does not leave the newly-created TextTrack in "disabled".
-  useEffect(() => {
-    if (!isVideo || selectedSubtitleIndex === undefined) return;
-
-    const timer = window.setTimeout(() => {
-      const media = videoRef.current;
-      if (!media) return;
-
-      const selected = subtitleTracks.find(track => track.index === selectedSubtitleIndex);
-      const selectedTextTrack = subtitleTrackRef.current?.track;
-      const textTracks = Array.from(media.textTracks || []);
-
-      textTracks.forEach(track => {
-        track.mode = selectedTextTrack && track === selectedTextTrack ? 'showing' : 'disabled';
-      });
-
-      if (selected) {
-        setTrackNotice('');
-      }
-    }, 50);
-
-    return () => window.clearTimeout(timer);
-  }, [isVideo, selectedSubtitleIndex, subtitleTracks]);
 
   // Speed
   const handleSpeedChange = (speed: number) => {
