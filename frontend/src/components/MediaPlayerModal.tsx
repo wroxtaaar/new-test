@@ -297,6 +297,22 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     let cancelled = false;
     setTracksLoading(true);
 
+    // Sidecar subtitles from the Seedr folder are already browser-ready after
+    // the lightweight /files/{id}/subtitle proxy. Do not run FFprobe on Render
+    // just to discover them; that keeps the common sidecar-subtitle path cheap
+    // on the Render Free instance.
+    const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
+    if (sidecarSubtitles.length > 0) {
+      setSubtitleTracks(sidecarSubtitles.map((track: any, index: number) => ({ ...track, index })));
+      setSelectedSubtitleIndex(undefined);
+      setSelectedHlsSubtitleIndex(undefined);
+      setTracksLoading(false);
+      return () => {
+        cancelled = true;
+        controller.abort();
+      };
+    }
+
     api.getSeedrMediaInfo(fileId)
       .then(data => {
         if (cancelled || !data) return;
