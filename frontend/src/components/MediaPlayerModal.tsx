@@ -659,11 +659,14 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       setIsSeeking(false);
       setIsPlaying(false);
       setTrackNotice('Unable to load the selected audio track.');
+      audio.removeEventListener('loadeddata', startTogether);
       audio.removeEventListener('canplay', startTogether);
+      audio.removeEventListener('error', handleAudioError);
     };
 
     const startTogether = () => {
       if (requestId !== alternateAudioRequestRef.current) return;
+      audio.removeEventListener('loadeddata', startTogether);
       audio.removeEventListener('canplay', startTogether);
       audio.removeEventListener('error', handleAudioError);
       audio.currentTime = 0;
@@ -698,6 +701,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       });
     };
 
+    // WebM/Opus can become playable before the browser reaches the native
+    // canplay threshold. loadeddata is enough to start the synchronized pair.
+    audio.addEventListener('loadeddata', startTogether, { once: true });
     audio.addEventListener('canplay', startTogether, { once: true });
     audio.addEventListener('error', handleAudioError, { once: true });
   };
