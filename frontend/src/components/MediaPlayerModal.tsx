@@ -1013,7 +1013,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           }`}
           onClick={() => {
             if (isFullscreen) {
-              setFullscreenControlsVisible(true);
+              setFullscreenControlsVisible(prev => !prev);
             }
           }}
         >
@@ -1055,7 +1055,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
               }`}
               onClick={(event) => {
                 event.stopPropagation();
-                if (isFullscreen) setFullscreenControlsVisible(true);
+                if (isFullscreen) {
+                  setFullscreenControlsVisible(prev => !prev);
+                }
               }}
               onTimeUpdate={onTimeUpdate}
               onSeeking={onSeeking}
