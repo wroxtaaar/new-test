@@ -3528,8 +3528,8 @@ export default function App() {
                     <li><span className="font-semibold text-slate-100">Expiration</span> = <span className="font-semibold text-slate-100">Never</span>.</li>
                     <li>Scopes = click <span className="font-semibold text-slate-100">Full Account Access</span>.</li>
                     <li>Go below and click <span className="font-semibold text-slate-100">Generate Token</span>.</li>
-                    <li>Copy the token and save it somewhere safe.</li>
-                    <li>Paste that same token into Torrent Studio above and click <span className="font-semibold text-slate-100">Connect</span>.</li>
+                    <li>Copy the token code and save it somewhere safe.</li>
+                    <li>Paste the token code above and click <span className="font-semibold text-slate-100">Connect</span>.</li>
                   </ol>
                 </div>
 
