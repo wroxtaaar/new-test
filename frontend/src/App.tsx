@@ -2184,7 +2184,7 @@ export default function App() {
     apiOrigin: string,
     siblingFiles?: Array<{ id: string; name: string; folderId?: string }>
   ): StorageFile['subtitleTracks'] => {
-    const extension = (name: string) => name.match(/\\.([^.]+)$/)?.[1]?.toLowerCase() || '';
+    const extension = (name: string) => name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() || '';
     const videoExt = extension(file.name);
     if (!/^(mkv|mp4|m4v|webm|mov|avi|ts)$/.test(videoExt)) return [];
 
@@ -2208,9 +2208,9 @@ export default function App() {
     };
 
     const subtitleFiles = cachedSiblings
-      .filter(item => item.id !== file.id && /\\.(srt|vtt)$/i.test(item.name));
+      .filter(item => item.id !== file.id && /\.(srt|vtt)$/i.test(item.name));
     const videoFiles = cachedSiblings
-      .filter(item => /\\.(mkv|mp4|m4v|webm|mov|avi|ts)$/i.test(item.name));
+      .filter(item => /\.(mkv|mp4|m4v|webm|mov|avi|ts)$/i.test(item.name));
     const hasMultipleVideos = videoFiles.length > 1;
 
     return subtitleFiles
