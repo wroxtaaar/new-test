@@ -4883,14 +4883,31 @@ _SEEDR_EMBEDDED_SUBTITLE_CACHE_SECONDS = 600
 _seedr_embedded_subtitle_cache: dict[str, tuple[float, bytes]] = {}
 
 
+def _stream_tags(stream: dict[str, Any]) -> dict[str, Any]:
+    raw = stream.get("tags")
+    if not isinstance(raw, dict):
+        return {}
+    # FFprobe normally emits lowercase Matroska tag keys, but some containers
+    # expose alternate casing/names. Normalize them before building labels.
+    return {str(key).strip().lower(): value for key, value in raw.items()}
+
+
 def _track_language(stream: dict[str, Any]) -> str:
-    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
-    return str(tags.get("language") or "").strip().lower()
+    tags = _stream_tags(stream)
+    for key in ("language", "lang", "language-eng", "language_ietf"):
+        value = str(tags.get(key) or "").strip().lower()
+        if value:
+            return value.split("-")[0]
+    return ""
 
 
 def _track_title(stream: dict[str, Any], fallback: str) -> str:
-    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
-    return str(tags.get("title") or tags.get("handler_name") or fallback).strip()
+    tags = _stream_tags(stream)
+    for key in ("title", "handler_name", "name", "track_name"):
+        value = str(tags.get(key) or "").strip()
+        if value:
+            return value
+    return fallback
 
 
 @app.get("/api/seedr/media-info/{file_id}")
@@ -4958,14 +4975,32 @@ async def seedr_media_info(file_id: str):
             if codec in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}:
                 continue
             language_label = language_names.get(lang, lang.upper() if lang else "")
-            label = title or language_label or f"Subtitle {subtitle_index + 1}"
+            forced = bool(disposition.get("forced"))
+            default = bool(disposition.get("default"))
+            codec_label = {
+                "subrip": "SRT",
+                "ass": "ASS",
+                "ssa": "SSA",
+                "webvtt": "WebVTT",
+                "mov_text": "Text",
+                "text": "Text",
+            }.get(codec, codec.upper() or "Text")
+            # Preserve the real Matroska title/language whenever available.
+            # If the file has no descriptive tags, use a useful codec/flag
+            # fallback rather than hiding the track behind "Subtitle 1".
+            label = title or language_label or codec_label
+            if forced and "forced" not in label.lower():
+                label += " · Forced"
+            elif default and not language_label and "default" not in label.lower():
+                label += " · Default"
+            stream_index = int(stream.get("index") or 0)
             subtitle_tracks.append({
                 "index": subtitle_index,
-                "streamIndex": int(stream.get("index") or 0),
+                "streamIndex": stream_index,
                 "language": lang,
                 "title": label,
                 "codec": str(stream.get("codec_name") or "").upper(),
-                "url": f"/api/seedr/media-info/{quote(file_id, safe='')}/subtitle?track={subtitle_index}&name={quote(label, safe='')}",
+                "url": f"/api/seedr/media-info/{quote(file_id, safe='')}/subtitle?stream={stream_index}&name={quote(label, safe='')}",
             })
             subtitle_index += 1
 
@@ -4981,7 +5016,8 @@ async def seedr_media_info(file_id: str):
 @app.get("/api/seedr/media-info/{file_id}/subtitle")
 async def seedr_embedded_subtitle(
     file_id: str,
-    track: int = Query(..., ge=0),
+    track: int | None = Query(None, ge=0),
+    stream: int | None = Query(None, ge=0),
     name: str = Query("subtitle"),
 ):
     if not current_seedr_token():
@@ -5010,11 +5046,25 @@ async def seedr_embedded_subtitle(
         if isinstance(stream, dict) and str(stream.get("codec_type") or "").lower() == "subtitle"
         and str(stream.get("codec_name") or "").lower() not in {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle"}
     ]
-    if track >= len(subtitle_streams):
-        raise HTTPException(404, "Subtitle track not found")
+    if stream is not None:
+        selected = next(
+            (
+                item for item in subtitle_streams
+                if int(item.get("index") or -1) == stream
+            ),
+            None,
+        )
+        if selected is None:
+            raise HTTPException(404, "Subtitle stream not found")
+        stream_index = int(selected.get("index") or 0)
+        cache_key = f"{file_id}:stream:{stream_index}"
+    else:
+        if track is None or track >= len(subtitle_streams):
+            raise HTTPException(404, "Subtitle track not found")
+        stream_index = int(subtitle_streams[track].get("index") or 0)
+        cache_key = f"{file_id}:{track}"
 
     source_url = await _seedr_media_source_url(file_id)
-    stream_index = int(subtitle_streams[track].get("index") or 0)
     command = [
         "ffmpeg", "-v", "error", "-nostdin",
         "-i", source_url,
