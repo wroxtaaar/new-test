@@ -1186,9 +1186,12 @@ export default function App() {
     folderPath: string;
   }>; deletedFolderIds: string[] }> => {
     if (!seedrConnected) {
-      setSeedrOnboardingStep('welcome');
+      // Preparing a search result requires a personal Seedr connection.
+      // Open the same connection dialog used by the header instead of
+      // surfacing a JavaScript error to the user.
+      setSeedrConnectError('');
       setSeedrOnboardingOpen(true);
-      throw new Error('Connect your Seedr account first.');
+      throw new Error('Connect your Seedr account first.'); 
     }
 
     if (seedrDownloadActive) {
