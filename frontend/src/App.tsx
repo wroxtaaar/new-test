@@ -2273,17 +2273,30 @@ export default function App() {
       if (type === 'video' && file.folderId) {
         try {
           // A torrent folder can contain the video and a separate .srt/.vtt.
-          // Load that folder on demand so subtitles work even when the user
-          // opens the video before the folder contents were cached. This only
-          // fetches the tiny Seedr metadata/list response; the subtitle itself
-          // is fetched later only when the user turns it on.
+          // Use the cache first, but do not trust a cache entry that contains
+          // no sidecar subtitles: the folder may have been indexed before the
+          // subtitle was added. In that case refresh the tiny Seedr folder
+          // listing once so the player can discover the new sidecar.
           const cached = seedrFolderContentsCache[file.folderId];
           if (cached?.length) {
             subtitleSiblings = cached;
+
+            const cachedHasSidecar = cached.some(item => /\.(srt|vtt)$/i.test(item.name));
+            if (!cachedHasSidecar) {
+              const contents = await api.getSeedrFolderContents(file.folderId);
+              subtitleSiblings = contents.files || [];
+              setSeedrFolderContentsCache(prev => ({
+                ...prev,
+                [file.folderId]: contents.files || [],
+              }));
+            }
           } else {
             const contents = await api.getSeedrFolderContents(file.folderId);
             subtitleSiblings = contents.files || [];
-            setSeedrFolderContentsCache(prev => ({ ...prev, [file.folderId]: contents.files || [] }));
+            setSeedrFolderContentsCache(prev => ({
+              ...prev,
+              [file.folderId]: contents.files || [],
+            }));
           }
         } catch (subtitleFolderError) {
           console.debug('Seedr sidecar subtitle discovery skipped:', subtitleFolderError);
