@@ -4986,12 +4986,21 @@ async def seedr_media_info(file_id: str):
                 "text": "Text",
             }.get(codec, codec.upper() or "Text")
             # Preserve the real Matroska title/language whenever available.
-            # If the file has no descriptive tags, use a useful codec/flag
-            # fallback rather than hiding the track behind "Subtitle 1".
-            label = title or language_label or codec_label
+            # Some MKVs contain no subtitle language/title tags at all. In that
+            # case the old fallback produced identical entries such as
+            # "SRT", making it impossible to tell tracks apart. Give unnamed
+            # tracks a stable ordinal while keeping the real language when one
+            # is available.
+            if title:
+                label = title
+            elif language_label:
+                label = f"{language_label} {subtitle_index + 1}"
+            else:
+                label = f"{codec_label} {subtitle_index + 1}"
+
             if forced and "forced" not in label.lower():
                 label += " · Forced"
-            elif default and not language_label and "default" not in label.lower():
+            elif default and "default" not in label.lower():
                 label += " · Default"
             stream_index = int(stream.get("index") or 0)
             subtitle_tracks.append({
