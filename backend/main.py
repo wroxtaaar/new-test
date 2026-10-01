@@ -4117,14 +4117,58 @@ async def get_seedr_metadata_tree(force_refresh: bool = False) -> dict[str, Any]
                 folder_name_overrides,
             )
         except (HTTPException, SeedrError) as exc:
-            # Some Seedr API tokens can read tasks and file operations while
-            # denying the account-root filesystem listing. Reconstruct the
-            # visible library from task folder IDs instead of failing the
-            # entire Seedr Library panel.
-            if getattr(exc, "status_code", 0) not in {401, 403} or not task_folders:
+            # Some Seedr tokens can authenticate and manage transfers while
+            # denying the account-root filesystem listing. Do not turn that
+            # provider limitation into a library-wide error. Reconstruct the
+            # visible library from the task list and each task's own contents.
+            if getattr(exc, "status_code", 0) not in {401, 403}:
                 raise
 
+            # First collect folder IDs from the task list. Seedr may expose
+            # the created folder only after a task has started/completed, so
+            # also resolve task contents below when the task object has no
+            # folder_created_id.
+            task_candidates: list[dict[str, Any]] = []
+            try:
+                tasks_payload = seedr_data(await seedr_request("/tasks"))
+                for raw_task in arr(tasks_payload, ("tasks", "torrents", "items")):
+                    task = unwrap_seedr_task(seedr_data(raw_task))
+                    if task:
+                        task_candidates.append(task)
+            except (HTTPException, SeedrError):
+                task_candidates = []
+
             unique_folders: dict[str, str] = {}
+
+            for task in task_candidates:
+                tid = task_id(task)
+                task_name = (
+                    seedr_task_name(task)
+                    or (folder_name_overrides.get(seedr_task_folder_id(task)) if seedr_task_folder_id(task) else "")
+                    or f"Torrent {tid}"
+                ).strip()
+                folder_id = seedr_task_folder_id(task)
+
+                # If the task itself does not expose its created folder, the
+                # task contents endpoint often does. This is the same endpoint
+                # already used by the completion/progress flow.
+                if tid and (not folder_id or folder_id == "0"):
+                    try:
+                        task_files = await task_contents(tid)
+                        folder_id = _seedr_file_folder_id(task_files)
+                    except (HTTPException, SeedrError):
+                        folder_id = ""
+
+                if folder_id and folder_id != root:
+                    unique_folders.setdefault(
+                        folder_id,
+                        folder_name_overrides.get(folder_id)
+                        or _seedr_torrent_names.get(folder_id)
+                        or task_name
+                        or folder_id,
+                    )
+
+            # Preserve any folder IDs already learned from task metadata.
             for folder_id, task_name in task_folders:
                 if folder_id and folder_id != root:
                     unique_folders.setdefault(
@@ -4153,11 +4197,19 @@ async def get_seedr_metadata_tree(force_refresh: bool = False) -> dict[str, Any]
                 )
                 return summary
 
-            results = await asyncio.gather(
-                *(load_task_folder(folder_id, name) for folder_id, name in unique_folders.items()),
-                return_exceptions=True,
-            )
-            children = [result for result in results if isinstance(result, dict)]
+            if unique_folders:
+                results = await asyncio.gather(
+                    *(load_task_folder(folder_id, name) for folder_id, name in unique_folders.items()),
+                    return_exceptions=True,
+                )
+                children = [result for result in results if isinstance(result, dict)]
+            else:
+                children = []
+
+            # A denied root listing is a capability limitation, not an
+            # authentication failure. Returning an empty but valid library
+            # keeps Search/Prepare/Stream usable even for an account with no
+            # folders exposed through the token.
             root_summary = {
                 "id": root,
                 "folderId": root,
