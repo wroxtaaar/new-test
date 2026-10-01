@@ -709,6 +709,32 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     }
   };
 
+  // Native <track> elements can be inserted after the video has already
+  // loaded. Explicitly switch the selected track to "showing" so mobile
+  // Chrome/Android does not leave the newly-created TextTrack in "disabled".
+  useEffect(() => {
+    if (!isVideo || selectedSubtitleIndex === undefined) return;
+
+    const timer = window.setTimeout(() => {
+      const media = videoRef.current;
+      if (!media) return;
+
+      const selected = subtitleTracks.find(track => track.index === selectedSubtitleIndex);
+      const textTracks = Array.from(media.textTracks || []);
+      const selectedTextTrack = textTracks[textTracks.length - 1];
+
+      textTracks.forEach(track => {
+        track.mode = track === selectedTextTrack ? 'showing' : 'disabled';
+      });
+
+      if (selected) {
+        setTrackNotice('');
+      }
+    }, 50);
+
+    return () => window.clearTimeout(timer);
+  }, [isVideo, selectedSubtitleIndex, subtitleTracks]);
+
   // Speed
   const handleSpeedChange = (speed: number) => {
     setPlaybackSpeed(speed);
@@ -1097,6 +1123,23 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                   srcLang={subtitleTracks.find(track => track.index === selectedSubtitleIndex)?.language || 'en'}
                   label={subtitleTracks.find(track => track.index === selectedSubtitleIndex)?.title || subtitleTracks.find(track => track.index === selectedSubtitleIndex)?.language?.toUpperCase() || 'Subtitles'}
                   default
+                  onLoad={() => {
+                    // Force activation again after the browser finishes
+                    // loading the WebVTT resource.
+                    const media = videoRef.current;
+                    if (!media) return;
+                    const tracks = Array.from(media.textTracks || []);
+                    tracks.forEach(track => {
+                      track.mode = track === tracks[tracks.length - 1] ? 'showing' : 'disabled';
+                    });
+                  }}
+                  onError={() => {
+                    console.error('[MEDIA] Subtitle track failed to load:', {
+                      url: subtitleTracks.find(track => track.index === selectedSubtitleIndex)?.url,
+                      track: selectedSubtitleIndex,
+                    });
+                    setTrackNotice('Subtitle could not be loaded');
+                  }}
                 />
               )}
             </video>
