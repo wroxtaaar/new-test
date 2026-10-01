@@ -2269,8 +2269,29 @@ export default function App() {
         }
       })();
 
+      let subtitleSiblings: Array<{ id: string; name: string; folderId?: string }> = [];
+      if (type === 'video' && file.folderId) {
+        try {
+          // A torrent folder can contain the video and a separate .srt/.vtt.
+          // Load that folder on demand so subtitles work even when the user
+          // opens the video before the folder contents were cached. This only
+          // fetches the tiny Seedr metadata/list response; the subtitle itself
+          // is fetched later only when the user turns it on.
+          const cached = seedrFolderContentsCache[file.folderId];
+          if (cached?.length) {
+            subtitleSiblings = cached;
+          } else {
+            const contents = await api.getSeedrFolderContents(file.folderId);
+            subtitleSiblings = contents.files || [];
+            setSeedrFolderContentsCache(prev => ({ ...prev, [file.folderId]: contents.files || [] }));
+          }
+        } catch (subtitleFolderError) {
+          console.debug('Seedr sidecar subtitle discovery skipped:', subtitleFolderError);
+        }
+      }
+
       const subtitleTracks = type === 'video'
-        ? findSeedrSubtitleTracks(file, apiOrigin)
+        ? findSeedrSubtitleTracks(file, apiOrigin, subtitleSiblings)
         : [];
       const audioTracks: StorageFile['audioTracks'] = [];
 
