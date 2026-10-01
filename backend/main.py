@@ -5917,23 +5917,21 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
     forwarded_for = str(request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
 
     body_lines = [
-        "# Torrent Studio Feedback",
+        f"# {('⭐' * rating + ' ' + str(rating) + '/5 Review') if feedback_type == 'review' and rating is not None else label}",
         "",
-        f"**Type:** {label}",
     ]
-    if rating is not None:
-        body_lines.append(f"**Rating:** {'⭐' * rating} ({rating}/5)")
     if name:
-        body_lines.append(f"**Name:** {name}")
+        body_lines.append(f"**👤 Name:** {name}")
+    else:
+        body_lines.append("**👤 Name:** Anonymous")
+    if rating is not None:
+        body_lines.append(f"**⭐ Rating:** {rating}/5")
     body_lines.extend([
-        f"**Submitted:** {submitted_at}",
+        f"**🕒 Submitted:** {submitted_at}",
         "",
-        "## Feedback",
+        "### 💬 Feedback",
         "",
-        message,
-        "",
-        "---",
-        "_Submitted through the Torrent Studio feedback form._",
+        f"> {message.replace(chr(10), chr(10) + '> ')}",
     ])
     if forwarded_for:
         # Do not persist or expose the visitor IP in the feedback issue.
