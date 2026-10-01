@@ -429,6 +429,55 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     return () => window.clearTimeout(timer);
   }, [isVideo, selectedSubtitleIndex, subtitleTracks]);
 
+  // Some MKV files contain audio codecs that Chromium can demux poorly or not
+  // decode at all (E-AC-3, AC-3, DTS, TrueHD, PCM, etc.). In that case the
+  // video element can play normally while producing no audible sound. Reuse
+  // the existing FFmpeg audio-track endpoint automatically for the selected
+  // track instead of making the user manually switch tracks.
+  const browserNeedsAudioFallback = (codec: string) => {
+    const normalized = String(codec || '').trim().toLowerCase();
+    if (!normalized) return false;
+    const browserFriendly = new Set([
+      'aac', 'mp3', 'mpeg', 'opus', 'vorbis', 'flac', 'mp4a', 'alac'
+    ]);
+    if (browserFriendly.has(normalized)) return false;
+    return normalized.startsWith('ac3') ||
+      normalized.startsWith('eac3') ||
+      normalized.startsWith('dts') ||
+      normalized.startsWith('dca') ||
+      normalized.startsWith('truehd') ||
+      normalized.startsWith('mlp') ||
+      normalized.startsWith('pcm') ||
+      normalized.startsWith('wma') ||
+      normalized.startsWith('wmav') ||
+      normalized.startsWith('cook') ||
+      normalized.startsWith('atrac');
+  };
+
+  useEffect(() => {
+    if (!isVideo || !file || hlsActiveRef.current || selectedAudioIndex === undefined) return;
+    if (automaticAudioFallbackRef.current || alternateAudioIndexRef.current !== undefined) return;
+
+    const selectedTrack = audioTracks.find(track => track.index === selectedAudioIndex);
+    if (!selectedTrack || !browserNeedsAudioFallback(selectedTrack.codec)) return;
+
+    const media = videoRef.current;
+    if (!media) return;
+
+    automaticAudioFallbackRef.current = true;
+    const position = Number.isFinite(media.currentTime) ? media.currentTime : currentTime;
+    const wasPlaying = !media.paused;
+
+    console.info('[MEDIA] Native audio codec is not browser-safe; using FFmpeg fallback', {
+      codec: selectedTrack.codec,
+      track: selectedTrack.index,
+      position,
+    });
+
+    loadAlternateAudio(selectedTrack.index, position, wasPlaying);
+  }, [audioTracks, currentTime, file, isVideo, selectedAudioIndex]);
+
+
   if (!file) return null;
 
   const handleMediaError = () => {
@@ -714,54 +763,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
     setTrackNotice('Selected audio track is not available in this stream.');
   };
-  // Some MKV files contain audio codecs that Chromium can demux poorly or not
-  // decode at all (E-AC-3, AC-3, DTS, TrueHD, PCM, etc.). In that case the
-  // video element can play normally while producing no audible sound. Reuse
-  // the existing FFmpeg audio-track endpoint automatically for the selected
-  // track instead of making the user manually switch tracks.
-  const browserNeedsAudioFallback = (codec: string) => {
-    const normalized = String(codec || '').trim().toLowerCase();
-    if (!normalized) return false;
-    const browserFriendly = new Set([
-      'aac', 'mp3', 'mpeg', 'opus', 'vorbis', 'flac', 'mp4a', 'alac'
-    ]);
-    if (browserFriendly.has(normalized)) return false;
-    return normalized.startsWith('ac3') ||
-      normalized.startsWith('eac3') ||
-      normalized.startsWith('dts') ||
-      normalized.startsWith('dca') ||
-      normalized.startsWith('truehd') ||
-      normalized.startsWith('mlp') ||
-      normalized.startsWith('pcm') ||
-      normalized.startsWith('wma') ||
-      normalized.startsWith('wmav') ||
-      normalized.startsWith('cook') ||
-      normalized.startsWith('atrac');
-  };
-
-  useEffect(() => {
-    if (!isVideo || !file || hlsActiveRef.current || selectedAudioIndex === undefined) return;
-    if (automaticAudioFallbackRef.current || alternateAudioIndexRef.current !== undefined) return;
-
-    const selectedTrack = audioTracks.find(track => track.index === selectedAudioIndex);
-    if (!selectedTrack || !browserNeedsAudioFallback(selectedTrack.codec)) return;
-
-    const media = videoRef.current;
-    if (!media) return;
-
-    automaticAudioFallbackRef.current = true;
-    const position = Number.isFinite(media.currentTime) ? media.currentTime : currentTime;
-    const wasPlaying = !media.paused;
-
-    console.info('[MEDIA] Native audio codec is not browser-safe; using FFmpeg fallback', {
-      codec: selectedTrack.codec,
-      track: selectedTrack.index,
-      position,
-    });
-
-    loadAlternateAudio(selectedTrack.index, position, wasPlaying);
-  }, [audioTracks, currentTime, file, isVideo, selectedAudioIndex]);
-
   const handleSubtitleTrackChange = (value: string) => {
     if (value === 'off') {
       setSelectedSubtitleIndex(undefined);
