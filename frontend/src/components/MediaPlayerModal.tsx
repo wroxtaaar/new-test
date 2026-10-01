@@ -297,21 +297,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     let cancelled = false;
     setTracksLoading(true);
 
-    // Sidecar subtitles from the Seedr folder are already browser-ready after
-    // the lightweight /files/{id}/subtitle proxy. Do not run FFprobe on Render
-    // just to discover them; that keeps the common sidecar-subtitle path cheap
-    // on the Render Free instance.
+    // Keep any already-discovered sidecar subtitles, but still inspect the
+    // media container so embedded subtitles and embedded audio tracks are not
+    // hidden just because a folder also contains an .srt/.vtt file.
     const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
-    if (sidecarSubtitles.length > 0) {
-      setSubtitleTracks(sidecarSubtitles.map((track: any, index: number) => ({ ...track, index })));
-      setSelectedSubtitleIndex(undefined);
-      setSelectedHlsSubtitleIndex(undefined);
-      setTracksLoading(false);
-      return () => {
-        cancelled = true;
-        controller.abort();
-      };
-    }
 
     api.getSeedrMediaInfo(fileId)
       .then(data => {
@@ -344,6 +333,19 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         setSubtitleTracks(mergedSubtitles);
         setSelectedSubtitleIndex(undefined);
         setSelectedHlsSubtitleIndex(undefined);
+      })
+      .catch(error => {
+        // Embedded-track inspection is optional. If FFprobe is unavailable or
+        // the remote Seedr source cannot be inspected, keep the sidecar tracks
+        // that were already discovered instead of leaving the subtitle menu
+        // empty.
+        if (!cancelled) {
+          if (sidecarSubtitles.length > 0) {
+            setSubtitleTracks(sidecarSubtitles.map((track: any, index: number) => ({ ...track, index })));
+          } else {
+            console.warn('[MEDIA] Seedr track inspection failed:', error);
+          }
+        }
       })
       .finally(() => {
         if (!cancelled) setTracksLoading(false);
