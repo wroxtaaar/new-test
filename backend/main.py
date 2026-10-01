@@ -5899,27 +5899,37 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise HTTPException(500, "Feedback repository is not configured correctly")
 
-    label = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug"}[feedback_type]
+    label = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug report"}[feedback_type]
     title_prefix = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug report"}[feedback_type]
     title_text = message.replace("\\n", " ").strip()
-    title_text = re.sub(r"\\s+", " ", title_text)[:90] or "New feedback"
-    title = f"[{title_prefix}] {title_text}"
+    title_text = re.sub(r"\\s+", " ", title_text)[:70] or "New feedback"
+
+    if feedback_type == "review" and rating is not None:
+        stars = "⭐" * rating
+        title = f"{stars} {rating}/5 Review"
+    else:
+        title = title_prefix
+
+    if name:
+        title += f" — {name}"
 
     submitted_at = datetime.now(timezone.utc).isoformat()
     forwarded_for = str(request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+
     body_lines = [
-        "## Torrent Studio Feedback",
+        "# Torrent Studio Feedback",
         "",
         f"**Type:** {label}",
     ]
     if rating is not None:
-        body_lines.append(f"**Rating:** {rating}/5")
+        body_lines.append(f"**Rating:** {'⭐' * rating} ({rating}/5)")
     if name:
         body_lines.append(f"**Name:** {name}")
     body_lines.extend([
         f"**Submitted:** {submitted_at}",
         "",
-        "### Message",
+        "## Feedback",
+        "",
         message,
         "",
         "---",
