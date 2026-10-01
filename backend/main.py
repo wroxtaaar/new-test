@@ -5307,19 +5307,17 @@ async def seedr_audio_media_route(
         "-map", f"0:a:{track}",
     ]
 
-    # Always emit a streaming WebM/Opus audio resource for the fallback.
-    # Chromium handles fragmented WebM/Opus reliably even when the original
-    # MKV track is E-AC-3, AC-3, DTS, TrueHD, PCM, etc. Using one browser-native
-    # output format also avoids MP4 muxing/canplay stalls on a non-seekable pipe.
+    # Emit a plain MP3 stream for the hidden browser audio element.
+    # MP3 is broadly supported by Chrome/Edge/Android and does not require the
+    # fragmented MP4/WebM demuxers that can stall on a non-seekable pipe.
     command += [
         "-vn",
         "-sn",
         "-dn",
-        "-c:a", "libopus",
-        "-b:a", "160k",
-        "-vbr", "on",
-        "-application", "audio",
-        "-f", "webm",
+        "-ac", "2",
+        "-c:a", "libmp3lame",
+        "-b:a", "192k",
+        "-f", "mp3",
         "pipe:1",
     ]
 
@@ -5352,7 +5350,7 @@ async def seedr_audio_media_route(
 
     return StreamingResponse(
         body(),
-        media_type="audio/webm",
+        media_type="audio/mpeg",
         headers={
             "Accept-Ranges": "bytes",
             "Cache-Control": "no-store",
