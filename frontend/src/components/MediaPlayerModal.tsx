@@ -19,7 +19,10 @@ import {
   X,
   Minimize2,
   Maximize2,
-  Loader2
+  Loader2,
+  Timer,
+  Minus,
+  Plus
 } from 'lucide-react';
 import Hls from 'hls.js';
 import { api, API_BASE } from '../api/client.ts';
@@ -67,6 +70,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const [trackNotice, setTrackNotice] = useState('');
   const [subtitleSearchError, setSubtitleSearchError] = useState('');
   const [tracksLoading, setTracksLoading] = useState(false);
+  const [subtitleSyncOpen, setSubtitleSyncOpen] = useState(false);
+  const [subtitleOffset, setSubtitleOffset] = useState(0);
+  const subtitleCueOriginalsRef = useRef<Map<string, Array<{ cue: any; start: number; end: number }>>>(new Map());
 
   const resumeTimeRef = useRef(0);
   const resumePlayingRef = useRef(false);
@@ -100,6 +106,9 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setHlsSubtitleTracks([]);
     setSelectedSubtitleIndex(undefined);
     setSelectedHlsSubtitleIndex(undefined);
+    setSubtitleSyncOpen(false);
+    setSubtitleOffset(0);
+    subtitleCueOriginalsRef.current.clear();
     alternateAudioIndexRef.current = undefined;
     primaryAudioIndexRef.current = undefined;
     alternateAudioRequestRef.current += 1;
@@ -363,6 +372,50 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     const track = subtitleTrackRef.current?.track;
     if (track) track.mode = selectedSubtitleIndex === undefined ? 'disabled' : 'showing';
   }, [selectedSubtitleIndex, subtitleTracks]);
+
+  // Subtitle sync is entirely client-side. We adjust the loaded WebVTT cue
+  // timestamps in memory, so changing the offset never sends another request
+  // to Render or reprocesses the subtitle on the backend.
+  useEffect(() => {
+    const track = subtitleTrackRef.current?.track;
+    if (!track || selectedSubtitleIndex === undefined) return;
+
+    const url = subtitleTracks.find(item => item.index === selectedSubtitleIndex)?.url;
+    if (!url) return;
+
+    const applyOffset = () => {
+      const cues = Array.from(track.cues || []) as any[];
+      if (!cues.length) return;
+
+      let originals = subtitleCueOriginalsRef.current.get(url);
+      if (!originals) {
+        originals = cues.map(cue => ({
+          cue,
+          start: Number(cue.startTime),
+          end: Number(cue.endTime),
+        }));
+        subtitleCueOriginalsRef.current.set(url, originals);
+      }
+
+      const originalByCue = new Map(originals.map(item => [item.cue, item]));
+      cues.forEach(cue => {
+        const original = originalByCue.get(cue);
+        if (!original) return;
+        cue.startTime = Math.max(0, original.start + subtitleOffset);
+        cue.endTime = Math.max(cue.startTime, original.end + subtitleOffset);
+      });
+    };
+
+    // The cue list may not exist until the browser finishes parsing WebVTT.
+    applyOffset();
+    const timer = window.setTimeout(applyOffset, 50);
+    const laterTimer = window.setTimeout(applyOffset, 250);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearTimeout(laterTimer);
+    };
+  }, [selectedSubtitleIndex, subtitleOffset, subtitleTracks]);
+
 
   useEffect(() => {
     const hls = hlsRef.current;
@@ -1189,6 +1242,24 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                     Array.from(media.textTracks || []).forEach(track => {
                       track.mode = track === selectedTextTrack ? 'showing' : 'disabled';
                     });
+                    const cues = Array.from(selectedTextTrack.cues || []) as any[];
+                    const url = subtitleTracks.find(track => track.index === selectedSubtitleIndex)?.url;
+                    if (url && cues.length) {
+                      subtitleCueOriginalsRef.current.set(url, cues.map(cue => ({
+                        cue,
+                        start: Number(cue.startTime),
+                        end: Number(cue.endTime),
+                      })));
+                    }
+                    window.setTimeout(() => {
+                      const currentUrl = subtitleTracks.find(track => track.index === selectedSubtitleIndex)?.url;
+                      const originals = currentUrl ? subtitleCueOriginalsRef.current.get(currentUrl) : undefined;
+                      if (!originals) return;
+                      originals.forEach(({ cue, start, end }) => {
+                        cue.startTime = Math.max(0, start + subtitleOffset);
+                        cue.endTime = Math.max(cue.startTime, end + subtitleOffset);
+                      });
+                    }, 0);
                   }}
                   onError={() => {
                     console.error('[MEDIA] Subtitle track failed to load:', {
@@ -1366,6 +1437,58 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                     ))}
                   </select>
                 </label>
+
+                {subtitleTracks.length > 0 && selectedSubtitleIndex !== undefined && (
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setSubtitleSyncOpen(prev => !prev)}
+                      className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-semibold transition ${subtitleOffset !== 0 ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-300' : 'border-slate-700/80 bg-slate-800/90 text-slate-300 hover:text-white'}`}
+                      title="Adjust subtitle timing"
+                    >
+                      <Timer className="h-4 w-4" />
+                      <span className="hidden sm:inline">Sync</span>
+                      {subtitleOffset !== 0 && <span>{subtitleOffset > 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s</span>}
+                    </button>
+
+                    {subtitleSyncOpen && (
+                      <div className="absolute bottom-full right-0 z-50 mb-2 w-64 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl">
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-xs font-semibold text-slate-200">Subtitle Sync</span>
+                          <button
+                            type="button"
+                            onClick={() => { setSubtitleOffset(0); setSubtitleSyncOpen(false); }}
+                            className="text-[11px] font-medium text-slate-400 hover:text-white"
+                          >
+                            Reset
+                          </button>
+                        </div>
+                        <div className="mb-3 text-center text-sm font-bold text-cyan-300">
+                          {subtitleOffset > 0 ? '+' : ''}{subtitleOffset.toFixed(1)}s
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setSubtitleOffset(prev => Math.max(-30, Number((prev - 0.1).toFixed(1))))}
+                            className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-slate-800 px-2 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                            title="Subtitles earlier"
+                          >
+                            <Minus className="h-3.5 w-3.5" /> 0.1s
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSubtitleOffset(prev => Math.min(30, Number((prev + 0.1).toFixed(1))))}
+                            className="flex flex-1 items-center justify-center gap-1 rounded-lg bg-slate-800 px-2 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                            title="Subtitles later"
+                          >
+                            <Plus className="h-3.5 w-3.5" /> 0.1s
+                          </button>
+                        </div>
+                        <div className="mt-2 text-center text-[10px] text-slate-500">−30s to +30s</div>
+                      </div>
+                    )}
+                  </div>
+                )}
               )}
 
               {/* Playback Speed selector */}
