@@ -2181,18 +2181,21 @@ export default function App() {
 
   const findSeedrSubtitleTracks = useCallback((
     file: { id: string; name: string; folderId: string; folderPath: string },
-    apiOrigin: string
+    apiOrigin: string,
+    siblingFiles?: Array<{ id: string; name: string; folderId?: string }>
   ): StorageFile['subtitleTracks'] => {
-    const extension = (name: string) => name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() || '';
+    const extension = (name: string) => name.match(/\\.([^.]+)$/)?.[1]?.toLowerCase() || '';
     const videoExt = extension(file.name);
     if (!/^(mkv|mp4|m4v|webm|mov|avi|ts)$/.test(videoExt)) return [];
 
     const videoBase = file.name.slice(0, -(videoExt.length + 1)).trim().toLowerCase();
-    const cachedSiblings = file.folderId
-      ? (seedrFolderContentsCache[file.folderId] || [])
-      : seedrAllPrefetchedFiles.filter(item =>
-          item.folderPath === file.folderPath || item.folderId === file.folderId
-        );
+    const cachedSiblings = siblingFiles?.length
+      ? siblingFiles
+      : file.folderId
+        ? (seedrFolderContentsCache[file.folderId] || [])
+        : seedrAllPrefetchedFiles.filter(item =>
+            item.folderPath === file.folderPath || item.folderId === file.folderId
+          );
 
     const languageNames: Record<string, string> = {
       en: 'English', eng: 'English', hi: 'Hindi', hin: 'Hindi',
@@ -2204,14 +2207,24 @@ export default function App() {
       zh: 'Chinese', zho: 'Chinese'
     };
 
-    return cachedSiblings
-      .filter(item => item.id !== file.id && /\.(srt|vtt)$/i.test(item.name))
+    const subtitleFiles = cachedSiblings
+      .filter(item => item.id !== file.id && /\\.(srt|vtt)$/i.test(item.name));
+    const videoFiles = cachedSiblings
+      .filter(item => /\\.(mkv|mp4|m4v|webm|mov|avi|ts)$/i.test(item.name));
+    const hasMultipleVideos = videoFiles.length > 1;
+
+    return subtitleFiles
       .filter(item => {
         const subtitleExt = extension(item.name);
         const subtitleBase = item.name.slice(0, -(subtitleExt.length + 1)).trim().toLowerCase();
-        return subtitleBase === videoBase ||
+        const exactMatch = subtitleBase === videoBase ||
           subtitleBase.startsWith(videoBase + '.') ||
           subtitleBase.startsWith(videoBase + ' ');
+        // If this folder contains only one video, any SRT/VTT beside it is a
+        // valid sidecar subtitle even when the subtitle has a generic name
+        // such as "English.srt" or "Subs.srt". With multiple videos, require
+        // a filename match so subtitles cannot be attached to the wrong video.
+        return exactMatch || !hasMultipleVideos;
       })
       .map((item, index) => {
         const subtitleExt = extension(item.name);
@@ -2222,7 +2235,7 @@ export default function App() {
         return {
           index,
           language,
-          title: languageNames[languageKey] || suffix || 'Subtitles',
+          title: languageNames[languageKey] || suffix || subtitleBase || 'Subtitles',
           codec: subtitleExt.toUpperCase(),
           url: apiOrigin + '/api/seedr/files/' + encodeURIComponent(item.id) +
             '/subtitle?filename=' + encodeURIComponent(item.name)
