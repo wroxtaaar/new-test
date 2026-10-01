@@ -3503,31 +3503,6 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
-                  <p className="text-sm font-bold text-slate-100">Don’t have a Seedr account?</p>
-                  <p className="mt-1 text-xs leading-5 text-slate-400">
-                    Create a free Seedr account first, then generate a token and paste it above.
-                  </p>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                    <a
-                      href="https://www.seedr.cc/"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-xs font-bold text-slate-100 transition hover:bg-slate-700"
-                    >
-                      Create Seedr Account <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                    <a
-                      href="https://www.seedr.cc/api/v0.1/console/tokens"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400"
-                    >
-                      Generate Token <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                  </div>
-                </div>
-
                 <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
                   <div className="flex items-center gap-2">
                     <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-500/10 text-xs font-black text-cyan-300">?</div>
