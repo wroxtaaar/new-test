@@ -3511,20 +3511,19 @@ export default function App() {
 
                   <ol className="mt-3 space-y-2.5 pl-5 text-xs leading-5 text-slate-300 list-decimal">
                     <li>
-                      Click <span className="font-semibold text-slate-100">“Google Login”</span>.
-                    </li>
-                    <li>
-                      The{' '}
+                      Open the{' '}
                       <a
                         href="https://www.seedr.cc/api/v0.1/console/tokens"
                         target="_blank"
                         rel="noreferrer"
                         className="font-semibold text-emerald-300 underline decoration-emerald-500/40 underline-offset-2 hover:text-emerald-200"
                       >
-                        token page
+                        Seedr tokens
                       </a>{' '}
-                      opens.
+                      page.
                     </li>
+                    <li>Click <span className="font-semibold text-slate-100">“Google Login”</span>.</li>
+                    <li>The token page opens.</li>
                     <li>Token Name = <span className="font-semibold text-slate-100">Any name</span>.</li>
                     <li><span className="font-semibold text-slate-100">Expiration</span> = <span className="font-semibold text-slate-100">Never</span>.</li>
                     <li>Scopes = click <span className="font-semibold text-slate-100">Full Account Access</span>.</li>
