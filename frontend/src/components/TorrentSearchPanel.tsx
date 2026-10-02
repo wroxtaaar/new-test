@@ -5,6 +5,8 @@ import {
   Loader2,
   Download,
   Play,
+  Copy,
+  Check,
   ExternalLink,
   Users,
   Database,
@@ -61,6 +63,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [preparingTorrentKey, setPreparingTorrentKey] = useState<string | null>(null);
   const [playingTorrentKey, setPlayingTorrentKey] = useState<string | null>(null);
+  const [copiedTorrentKey, setCopiedTorrentKey] = useState<string | null>(null);
   const [prepareWaitTitle, setPrepareWaitTitle] = useState('');
   const [prepareWaitOpen, setPrepareWaitOpen] = useState(false);
   const [prepareError, setPrepareError] = useState('');
@@ -613,6 +616,40 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                 : <Play className="w-3.5 h-3.5" />}
                               <span className="hidden sm:inline">{isPlaying ? 'Loading…' : 'Play'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => api.openSeedrFileDownload(primaryFile.id, primaryFile.name)}
+                              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
+                              title="Download file"
+                              aria-label="Download file"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={copiedTorrentKey === torrentKey}
+                              onClick={async () => {
+                                try {
+                                  const data = await api.getSeedrFileDownload(primaryFile.id);
+                                  await navigator.clipboard.writeText(data.url);
+                                  setCopiedTorrentKey(torrentKey);
+                                  window.setTimeout(() => {
+                                    setCopiedTorrentKey(current => current === torrentKey ? null : current);
+                                  }, 2000);
+                                } catch {
+                                  setPrepareError('Could not copy the download link.');
+                                }
+                              }}
+                              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-400 transition disabled:opacity-60"
+                              title="Copy download link"
+                              aria-label="Copy download link"
+                            >
+                              {copiedTorrentKey === torrentKey
+                                ? <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                : <Copy className="w-3.5 h-3.5" />}
                             </button>
                           </div>
                         );
