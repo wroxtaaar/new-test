@@ -26,16 +26,6 @@
                           setIsPlayerMinimized(false);
                         }}
                         streamLoading={file.ownerId === 'seedr' && seedrStreamLoadingId === file.id}
-                        onCopyDownloadLink={file.ownerId === 'seedr'
-                          ? async (f) => {
-                              const result = await api.getSeedrFileDownload(f.id);
-                              const directUrl = String(result?.url || '').trim();
-                              if (!directUrl) {
-                                throw new Error('Seedr did not return a download URL.');
-                              }
-                              await navigator.clipboard.writeText(directUrl);
-                            }
-                          : undefined}
                         onRename={(f) => setRenameItem({ id: f.id, name: f.name, isFolder: false })}
                         onMove={(f) => setMoveFile(f)}
                         onSeedrDelete={file.ownerId === 'seedr'
