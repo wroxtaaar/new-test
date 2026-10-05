@@ -31,7 +31,6 @@ interface FileCardProps {
   canDelete?: boolean;
   streamLoading?: boolean;
   onSeedrDelete?: (file: StorageFile) => void | Promise<void>;
-  onCopyDownloadLink?: (file: StorageFile) => void | Promise<void>;
 }
 
 export const FileCard: React.FC<FileCardProps> = ({
@@ -44,7 +43,6 @@ export const FileCard: React.FC<FileCardProps> = ({
   canDelete = true,
   streamLoading = false,
   onSeedrDelete,
-  onCopyDownloadLink,
   apiBase = ''
 }) => {
   const [copied, setCopied] = useState(false);
@@ -52,19 +50,15 @@ export const FileCard: React.FC<FileCardProps> = ({
 
   const copyLink = async () => {
     try {
-      if (onCopyDownloadLink) {
-        await onCopyDownloadLink(file);
-      } else {
-        const relativeUrl = String(file.downloadUrl || '').trim();
-        const directUrl = /^https?:\\/\\//i.test(relativeUrl)
-          ? relativeUrl
-          : (apiBase || window.location.origin) + (relativeUrl.startsWith('/') ? relativeUrl : `/${relativeUrl}`);
-        await navigator.clipboard.writeText(directUrl);
-      }
+      const relativeUrl = String(file.downloadUrl || '').trim();
+      const directUrl = /^https?:\/\//i.test(relativeUrl)
+        ? relativeUrl
+        : (apiBase || window.location.origin) + (relativeUrl.startsWith('/') ? relativeUrl : `/${relativeUrl}`);
+      await navigator.clipboard.writeText(directUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (error) {
-      console.error('Failed to copy download link:', error);
+    } catch {
+      // Clipboard access may be unavailable in restricted browser contexts.
     }
   };
 
