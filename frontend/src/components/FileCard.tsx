@@ -22,6 +22,7 @@ import { formatBytes, formatTimeAgo } from '../utils/formatters.ts';
 
 interface FileCardProps {
   file: StorageFile;
+  apiBase?: string;
   onPlay: (file: StorageFile) => void;
   onDelete: (id: string) => void;
   onRename: (file: StorageFile) => void;
@@ -41,14 +42,18 @@ export const FileCard: React.FC<FileCardProps> = ({
   canEdit = true,
   canDelete = true,
   streamLoading = false,
-  onSeedrDelete
+  onSeedrDelete,
+  apiBase = ''
 }) => {
   const [copied, setCopied] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
 
   const copyLink = async () => {
     try {
-      const directUrl = window.location.origin + file.downloadUrl;
+      const relativeUrl = String(file.downloadUrl || '').trim();
+      const directUrl = /^https?:\/\//i.test(relativeUrl)
+        ? relativeUrl
+        : (apiBase || window.location.origin) + (relativeUrl.startsWith('/') ? relativeUrl : `/${relativeUrl}`);
       await navigator.clipboard.writeText(directUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -124,7 +129,12 @@ export const FileCard: React.FC<FileCardProps> = ({
 
         {/* Download and copy link are available for both local and Seedr files. */}
         <a
-          href={file.downloadUrl}
+          href={(() => {
+            const relativeUrl = String(file.downloadUrl || '').trim();
+            return /^https?:\/\//i.test(relativeUrl)
+              ? relativeUrl
+              : (apiBase || window.location.origin) + (relativeUrl.startsWith('/') ? relativeUrl : `/${relativeUrl}`);
+          })()}
           download={file.name}
           className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition tap-target flex items-center justify-center"
           title="Direct Download Link"
