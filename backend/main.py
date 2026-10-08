@@ -68,8 +68,8 @@ SEARCH_TOTAL_TIMEOUT_SECONDS = float(os.getenv("SEARCH_TOTAL_TIMEOUT_SECONDS", "
 SEARCH_GRACE_SECONDS = float(os.getenv("SEARCH_GRACE_SECONDS", "0.2"))
 SEARCH_CACHE_SECONDS = float(os.getenv("SEARCH_CACHE_SECONDS", "60"))
 SEARCH_CACHE_STALE_SECONDS = float(os.getenv("SEARCH_CACHE_STALE_SECONDS", "600"))
-SEARCH_EMPTY_CACHE_SECONDS = float(os.getenv("SEARCH_EMPTY_CACHE_SECONDS", "15"))
 SEARCH_CACHE_MAX_ENTRIES = int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "75"))
+SEARCH_CACHE_MIN_RESULTS = int(os.getenv("SEARCH_CACHE_MIN_RESULTS", "8"))
 FAST_SEARCH_TRACKERS = (
     "http://tracker.dler.org:6969/announce",
     "http://tracker2.dler.org:80/announce",
@@ -2845,8 +2845,25 @@ def _constraint_matches_title(title: str, query: str) -> bool:
         if year not in title_years:
             return False
 
+    language_aliases = {
+        "hindi": (r"(?<![a-z])hindi(?![a-z])", r"(?<![a-z])hin(?![a-z])"),
+        "tamil": (r"(?<![a-z])tamil(?![a-z])", r"(?<![a-z])tam(?![a-z])"),
+        "telugu": (r"(?<![a-z])telugu(?![a-z])", r"(?<![a-z])tel(?![a-z])"),
+        "malayalam": (r"(?<![a-z])malayalam(?![a-z])", r"(?<![a-z])mal(?![a-z])"),
+        "kannada": (r"(?<![a-z])kannada(?![a-z])", r"(?<![a-z])kan(?![a-z])"),
+        "bengali": (r"(?<![a-z])bengali(?![a-z])", r"(?<![a-z])ben(?![a-z])"),
+        "marathi": (r"(?<![a-z])marathi(?![a-z])", r"(?<![a-z])mar(?![a-z])"),
+        "punjabi": (r"(?<![a-z])punjabi(?![a-z])", r"(?<![a-z])pun(?![a-z])"),
+        "gujarati": (r"(?<![a-z])gujarati(?![a-z])", r"(?<![a-z])guj(?![a-z])"),
+        "urdu": (r"(?<![a-z])urdu(?![a-z])", r"(?<![a-z])urd(?![a-z])"),
+    }
+
     for language in languages:
-        if language not in lower and language.replace(" ", "") not in normalized.replace(" ", ""):
+        patterns = language_aliases.get(language)
+        if patterns:
+            if not any(re.search(pattern, lower, re.I) for pattern in patterns):
+                return False
+        elif language not in lower and language.replace(" ", "") not in normalized.replace(" ", ""):
             return False
 
     return True
@@ -2926,10 +2943,32 @@ def _media_provider_queries(value: str) -> list[str]:
     raw_title = re.sub(r"\s+", " ", raw_title).strip()
 
     canonical = _media_provider_query(value)
+    language_terms = [
+        language for language in languages
+        if language in {
+            "hindi", "tamil", "telugu", "malayalam", "kannada",
+            "bengali", "marathi", "punjabi", "gujarati", "urdu",
+        }
+    ]
+    language_suffix = " ".join(language_terms)
+    canonical_with_language = re.sub(
+        r"\s+",
+        " ",
+        f"{canonical} {language_suffix}".strip(),
+    )
+
     variants: list[str] = []
-    for candidate in (canonical, raw_title):
+    seen: set[str] = set()
+    for candidate in (
+        canonical_with_language,
+        canonical,
+        raw_title,
+        f"{raw_title} {language_suffix}".strip(),
+    ):
         candidate = re.sub(r"\s+", " ", candidate or "").strip()
-        if candidate and candidate.lower() not in {x.lower() for x in variants}:
+        lowered = candidate.lower()
+        if candidate and lowered not in seen:
+            seen.add(lowered)
             variants.append(candidate)
 
     tokens = _search_tokens(raw_title)
@@ -3117,10 +3156,14 @@ async def search_1337x(
     now = time.monotonic()
 
     cached = _search_cache.get(cache_key)
+    if cached and len(cached[1]) < SEARCH_CACHE_MIN_RESULTS:
+        _search_cache.pop(cache_key, None)
+        cached = None
+
     if cached:
         cached_at, cached_results = cached
         age = max(0.0, now - cached_at)
-        ttl = SEARCH_EMPTY_CACHE_SECONDS if not cached_results else SEARCH_CACHE_SECONDS
+        ttl = SEARCH_CACHE_SECONDS
 
         if age < ttl:
             return cached_results[:limit]
@@ -3146,8 +3189,9 @@ async def search_1337x(
                     except Exception as exc:
                         logger.info("Background search refresh failed for '%s': %s", query, exc)
                         return
-                    _search_cache[key] = (time.monotonic(), refreshed)
-                    _trim_search_cache()
+                    if len(refreshed) >= SEARCH_CACHE_MIN_RESULTS:
+                        _search_cache[key] = (time.monotonic(), refreshed)
+                        _trim_search_cache()
 
                 refresh.add_done_callback(_finish_refresh)
             return cached_results[:limit]
@@ -3182,8 +3226,9 @@ async def search_1337x(
     if _search_inflight.get(cache_key) is task:
         _search_inflight.pop(cache_key, None)
 
-    _search_cache[cache_key] = (time.monotonic(), results)
-    _trim_search_cache()
+    if len(results) >= SEARCH_CACHE_MIN_RESULTS:
+        _search_cache[cache_key] = (time.monotonic(), results)
+        _trim_search_cache()
     return results[:limit]
 
 def parse_size(value: str) -> int:
