@@ -2697,7 +2697,12 @@ def _title_relevance(title: str, query: str) -> tuple[int, int]:
 
 
 async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool = True) -> list[dict[str, Any]]:
-    """Fast media-only search with 1337x as the primary source."""
+    """Fast media-only search.
+
+    1337x is still tried first, but it is no longer allowed to block or make
+    the whole search fail. Knaben runs concurrently as the fast aggregator
+    path, then YTS/EZTV are used only when the combined result set is small.
+    """
     query = re.sub(r"\s+", " ", query.strip())
     if not query:
         return []
@@ -2709,42 +2714,67 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
         return cached[1]
 
     kind = _search_media_kind(query)
-    try:
-        primary = await asyncio.wait_for(
-            search_1337x_direct(
-                query,
-                limit=min(limit, 20),
-                pages=2,
-                category="TV" if kind == "tv" else None,
-            ),
-            timeout=max(3.0, SEARCH_TOTAL_TIMEOUT_SECONDS + 1.0),
-        )
-    except Exception as exc:
-        logger.info("1337x primary failed for '%s': %s", query, exc)
-        primary = []
 
-    results = [item for item in primary if _search_quality_filter(item, query)]
+    async def run_1337x():
+        try:
+            return await asyncio.wait_for(
+                search_1337x_direct(
+                    query,
+                    limit=min(limit, 20),
+                    pages=2,
+                    category="TV" if kind == "tv" else None,
+                ),
+                timeout=max(3.0, SEARCH_TOTAL_TIMEOUT_SECONDS + 1.0),
+            )
+        except Exception as exc:
+            logger.info("1337x primary failed for '%s': %s", query, exc)
+            return []
 
+    async def run_knaben():
+        try:
+            return await search_knaben(query, min(max(limit, 20), 50))
+        except Exception as exc:
+            logger.info("Knaben fast search failed for '%s': %s", query, exc)
+            return []
+
+    # Do not serialize the two network paths. 1337x can be slow/unavailable
+    # while Knaben can still return a useful seed-sorted media list quickly.
+    primary_1337x, primary_knaben = await asyncio.gather(
+        run_1337x(),
+        run_knaben(),
+        return_exceptions=False,
+    )
+
+    results: list[dict[str, Any]] = []
+    for item in [*primary_1337x, *primary_knaben]:
+        if _search_quality_filter(item, query):
+            results.append(item)
+
+    # Specialist providers are only used when the combined fast path has
+    # fewer than 8 good results. This keeps normal searches quick and avoids
+    # flooding the UI with weak/duplicate results.
     if allow_series_fallback and len(results) < min(8, limit):
         fallback_tasks = []
         if kind in {"tv", "both"}:
             fallback_tasks.append(asyncio.create_task(search_tv_eztv(query, min(limit, 20))))
         if kind == "both":
             fallback_tasks.append(asyncio.create_task(search_yts_movies(query, min(limit, 20))))
+
         if fallback_tasks:
             values = await asyncio.gather(*fallback_tasks, return_exceptions=True)
             for value in values:
-                if isinstance(value, list):
-                    for item in value:
-                        if not _search_quality_filter(item, query):
+                if not isinstance(value, list):
+                    continue
+                for item in value:
+                    if not _search_quality_filter(item, query):
+                        continue
+                    # YTS is a movie specialist. Require an exact or prefix
+                    # title match so a query such as "Lanterns" cannot turn
+                    # into unrelated movies whose titles merely contain it.
+                    if str(item.get("indexer") or "").lower() == "yts.mx":
+                        if _title_relevance(str(item.get("title") or ""), query)[0] < 2:
                             continue
-                        # YTS is a movie specialist, so only accept strong
-                        # title matches. This prevents a query such as
-                        # "Lanterns" from returning "Jack vs Lanterns".
-                        if str(item.get("indexer") or "").lower() == "yts.mx":
-                            if _title_relevance(str(item.get("title") or ""), query)[0] < 2:
-                                continue
-                        results.append(item)
+                    results.append(item)
 
     merged: dict[str, dict[str, Any]] = {}
     for item in results:
@@ -2777,8 +2807,12 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
             _search_cache.pop(oldest, None)
 
     logger.info(
-        "Media search '%s': %d results (primary=1337x, kind=%s)",
-        query, len(results), kind,
+        "Media search '%s': %d results (1337x=%d, knaben=%d, kind=%s)",
+        query,
+        len(results),
+        len(primary_1337x),
+        len(primary_knaben),
+        kind,
     )
     return results
 
