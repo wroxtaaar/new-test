@@ -2735,10 +2735,16 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
             values = await asyncio.gather(*fallback_tasks, return_exceptions=True)
             for value in values:
                 if isinstance(value, list):
-                    results.extend(
-                        item for item in value
-                        if _search_quality_filter(item, query)
-                    )
+                    for item in value:
+                        if not _search_quality_filter(item, query):
+                            continue
+                        # YTS is a movie specialist, so only accept strong
+                        # title matches. This prevents a query such as
+                        # "Lanterns" from returning "Jack vs Lanterns".
+                        if str(item.get("indexer") or "").lower() == "yts.mx":
+                            if _title_relevance(str(item.get("title") or ""), query)[0] < 2:
+                                continue
+                        results.append(item)
 
     merged: dict[str, dict[str, Any]] = {}
     for item in results:
