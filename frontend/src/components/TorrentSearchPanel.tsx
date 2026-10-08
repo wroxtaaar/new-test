@@ -230,6 +230,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       setIsSearching(true);
       setShowRecentSearches(false);
       setError('');
+      setResults([]);
+      setSearched(false);
       saveRecentSearch(trimmed);
 
       // The backend owns low-result TV/season fallback. Keeping that logic
@@ -453,7 +455,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             className="w-10 sm:w-auto px-2 sm:px-4 py-2 rounded-lg sm:rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 text-xs font-bold flex items-center justify-center gap-2 transition"
           >
             {isSearching ? (
-              <Search className="w-4 h-4 opacity-70" />
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="hidden sm:inline">Searching...</span>
+              </>
             ) : (
               <>
                 <Search className="w-4 h-4" />
@@ -465,6 +470,14 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
 
       </div>
+
+      {isSearching && (
+        <div className="p-5 sm:p-7 rounded-xl sm:rounded-2xl bg-slate-900 border border-slate-800 flex flex-col items-center justify-center gap-3">
+          <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+          <div className="text-sm font-semibold text-slate-200">Searching torrents...</div>
+          <div className="text-xs text-slate-500 text-center">Checking the fastest media sources and waiting for results.</div>
+        </div>
+      )}
 
       {prepareError && (
         <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center justify-between gap-2">
