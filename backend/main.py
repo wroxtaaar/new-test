@@ -2126,6 +2126,9 @@ async def search_1337x_direct(
     q, season, episode = _media_search_parts(query)
     if not q:
         return []
+    q = _media_provider_query(query)
+    if not q:
+        return []
     encoded = quote(q, safe="").replace("%20", "+")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
     minimum_size, maximum_size = 100 * 1024 * 1024, 2 * 1024 * 1024 * 1024
@@ -2241,14 +2244,7 @@ async def search_1337x_direct(
 
 async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]:
     """Search YTS directly so movie searches are not lost in aggregate ranking."""
-    movie_query, _season, _episode = _media_search_parts(query)
-    movie_query = re.sub(
-        r"\b(?:hindi|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|dual\s+audio|multi\s+audio|dubbed|dub)\b",
-        " ",
-        movie_query,
-        flags=re.I,
-    )
-    movie_query = re.sub(r"\s+", " ", movie_query).strip()
+    movie_query = _media_provider_query(query)
     if not movie_query:
         return []
 
@@ -2444,6 +2440,7 @@ async def search_tv_eztv(query: str, limit: int = 30) -> list[dict[str, Any]]:
 async def search_knaben(query: str, limit: int = 100) -> list[dict[str, Any]]:
     """Search Knaben with the same broad media query used by the former Vercel search route."""
     title_query, season, episode = _media_search_parts(query)
+    title_query = _media_provider_query(query)
     if not title_query:
         return []
 
@@ -2659,6 +2656,20 @@ def _search_media_kind(query: str) -> str:
     if re.search(r"\b(?:S\d{1,2}(?:E\d{1,3})?|season\s*\d+|episode\s*\d+)\b", q, re.I):
         return "tv"
     return "both"
+
+
+def _media_provider_query(value: str) -> str:
+    """Return the title portion used for provider searches, excluding qualifiers."""
+    title, _season, _episode = _media_search_parts(value)
+    _year, languages = _search_query_constraints(value)
+    for language in sorted(languages, key=len, reverse=True):
+        title = re.sub(
+            rf"(?<![a-z]){re.escape(language)}(?![a-z])",
+            " ",
+            title,
+            flags=re.I,
+        )
+    return re.sub(r"\s+", " ", title).strip()
 
 
 def _search_query_constraints(value: str) -> tuple[int | None, list[str]]:
