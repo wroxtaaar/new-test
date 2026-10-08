@@ -70,6 +70,29 @@ SEARCH_CACHE_SECONDS = float(os.getenv("SEARCH_CACHE_SECONDS", "60"))
 SEARCH_CACHE_STALE_SECONDS = float(os.getenv("SEARCH_CACHE_STALE_SECONDS", "600"))
 SEARCH_CACHE_MAX_ENTRIES = int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "75"))
 SEARCH_CACHE_MIN_RESULTS = int(os.getenv("SEARCH_CACHE_MIN_RESULTS", "8"))
+# new-test keeps the 100 MB–2 GB search window.
+MAX_SEARCH_RESULT_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+SEARCH_COMPOUND_ALIASES = {
+    "antman": "ant man",
+    "spiderman": "spider man",
+    "ironman": "iron man",
+    "blackpanther": "black panther",
+    "doctorstrange": "doctor strange",
+    "captainamerica": "captain america",
+    "guardiansofthegalaxy": "guardians of the galaxy",
+}
+# Match the movie app's mirror strategy. YTS availability varies by ISP/domain,
+# so keep multiple API mirrors and allow an environment override for ordering.
+# YTS domains are inconsistent across networks. The accelerator API is a
+# keyless YTS-compatible mirror, followed by the public YTS domains.
+YTS_API_HOSTS = tuple(
+    host.strip()
+    for host in os.getenv(
+        "YTS_API_HOSTS",
+        "movies-api.accel.li,yts.bz,yts.mx,yts.am,yts.lt,yts.rs",
+    ).split(",")
+    if host.strip()
+)
 FAST_SEARCH_TRACKERS = (
     "http://tracker.dler.org:6969/announce",
     "http://tracker2.dler.org:80/announce",
@@ -2451,7 +2474,7 @@ async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]
 
     payload = None
     async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
-        for host in ("yts.mx", "yts.am", "yts.rs"):
+        for host in YTS_API_HOSTS:
             try:
                 response = await client.get(
                     f"https://{host}/api/v2/list_movies.json",
@@ -2512,6 +2535,12 @@ async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]
             results.append({
                 "guid": f"yts-{h}",
                 "title": display_title,
+                "mediaTitle": title,
+                "year": int(movie.get("year") or 0) or None,
+                "rating": float(movie.get("rating") or 0) or None,
+                "genres": [str(g).strip() for g in (movie.get("genres") or []) if str(g).strip()],
+                "posterUrl": f"/api/poster?title={quote(title, safe='')}&year={quote(str(movie.get('year') or ''), safe='')}",
+                "quality": suffix,
                 "size": int(float(torrent.get("size_bytes") or 0)),
                 "seeders": int(torrent.get("seeds") or 0),
                 "leechers": int(torrent.get("peers") or 0),
@@ -2867,6 +2896,18 @@ def _search_media_kind(query: str) -> str:
     return "both"
 
 
+def _expand_compound_search_title(value: str) -> str:
+    title = str(value or "")
+    for compact, canonical in SEARCH_COMPOUND_ALIASES.items():
+        title = re.sub(
+            rf"(?<![a-z]){re.escape(compact)}(?![a-z])",
+            canonical,
+            title,
+            flags=re.I,
+        )
+    return title
+
+
 def _media_provider_query(value: str) -> str:
     """Return the title portion used for provider searches, excluding qualifiers."""
     title, _season, _episode = _media_search_parts(value)
@@ -2878,6 +2919,7 @@ def _media_provider_query(value: str) -> str:
             title,
             flags=re.I,
         )
+    title = _expand_compound_search_title(title)
     title = re.sub(r"\bspider[- ]?man\b", "spider man", title, flags=re.I)
     title = re.sub(r"\bant[- ]?man\b", "ant man", title, flags=re.I)
     return re.sub(r"\s+", " ", title).strip()
@@ -2970,7 +3012,7 @@ def _search_quality_filter(item: dict[str, Any], query: str) -> bool:
         return False
 
     size = int(item.get("size") or 0)
-    return 100 * 1024 * 1024 <= size <= 2 * 1024 * 1024 * 1024
+    return 100 * 1024 * 1024 <= size <= MAX_SEARCH_RESULT_SIZE_BYTES
 
 
 def _title_relevance(title: str, query: str) -> tuple[int, int]:
@@ -3102,11 +3144,29 @@ async def _search_1337x_uncached(
             logger.info("Knaben search failed for '%s' using '%s': %s", query, provider_query, exc)
             return []
 
+    yts_task = (
+        asyncio.create_task(
+            asyncio.wait_for(
+                search_yts_movies(query, min(limit, 20)),
+                timeout=SEARCH_SOURCE_TIMEOUT_SECONDS + 0.75,
+            )
+        )
+        if kind == "both"
+        else None
+    )
+
     primary_1337x, primary_knaben = await asyncio.gather(
         run_1337x(primary_provider_query),
         run_knaben(primary_provider_query),
         return_exceptions=False,
     )
+
+    yts_primary: list[dict[str, Any]] = []
+    if yts_task is not None:
+        try:
+            yts_primary = await yts_task
+        except Exception as exc:
+            logger.info("YTS primary search failed for '%s': %s", query, exc)
 
     results: list[dict[str, Any]] = []
 
@@ -3119,6 +3179,37 @@ async def _search_1337x_uncached(
 
     add_filtered(primary_1337x)
     add_filtered(primary_knaben)
+    add_filtered(yts_primary)
+
+    yts_metadata: dict[str, dict[str, Any]] = {}
+    for item in yts_primary:
+        media_title = _normalize_title(str(item.get("mediaTitle") or ""))
+        if media_title:
+            yts_metadata.setdefault(media_title, item)
+
+    def enrich_movie_metadata(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            provider_title = str(item.get("mediaTitle") or item.get("title") or "")
+            media_title = _normalize_title(_media_provider_query(provider_title))
+            if not media_title:
+                continue
+            metadata = yts_metadata.get(media_title)
+            if not metadata:
+                compact = media_title.replace(" ", "")
+                metadata = next(
+                    (
+                        candidate for key, candidate in yts_metadata.items()
+                        if compact and key.replace(" ", "") == compact
+                    ),
+                    None,
+                )
+            if metadata:
+                for field in ("mediaTitle", "year", "rating", "genres", "posterUrl"):
+                    value = metadata.get(field)
+                    if value not in (None, "", []):
+                        item[field] = value
+
+    enrich_movie_metadata(results)
 
     # When the primary title spelling cannot get enough usable hits, retry
     # with the alternate spelling and a short anchor in parallel. This is the
@@ -3180,6 +3271,8 @@ async def _search_1337x_uncached(
             elif isinstance(value, dict):
                 add_filtered(value.get("results", []))
 
+        enrich_movie_metadata(results)
+
     merged: dict[str, dict[str, Any]] = {}
     for item in results:
         key = str(
@@ -3193,6 +3286,18 @@ async def _search_1337x_uncached(
             merged.setdefault(key, item)
 
     results = list(merged.values())
+    enrich_movie_metadata(results)
+
+    # Poster artwork is resolved lazily by /api/poster so search latency is
+    # unaffected. Every normal movie result gets a cleaned poster URL,
+    # regardless of whether it came from YTS, Knaben, 1337x, or another source.
+    if kind == "both":
+        for item in results:
+            if not str(item.get("posterUrl") or "").strip():
+                poster_url = _poster_url_for_release(str(item.get("title") or ""))
+                if poster_url:
+                    item["posterUrl"] = poster_url
+
     results.sort(
         key=lambda item: (
             _title_relevance(str(item.get("title") or ""), query)[0],
@@ -3304,6 +3409,135 @@ def parse_size(value: str) -> int:
     n = float(m.group(1))
     units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
     return int(n * units[m.group(2).upper()])
+
+_POSTER_CACHE_SECONDS = 6 * 60 * 60
+_poster_cache: dict[str, tuple[float, str | None]] = {}
+
+def _poster_normalize_title(value: str) -> str:
+    normalized = " ".join(re.findall(r"[a-z0-9]+", str(value or "").lower())).strip()
+    return re.sub(r"^(?:the|a|an)\\s+", "", normalized)
+
+
+def _poster_title_parts(raw_title: str) -> tuple[str, str]:
+    """Extract a clean movie title/year from a torrent release name."""
+    value = str(raw_title or "").replace(".", " ").replace("_", " ")
+    year_match = re.search(r"\b((?:19|20)\d{2})\b", value)
+    year = year_match.group(1) if year_match else ""
+
+    if year_match:
+        value = value[:year_match.start()]
+    else:
+        value = re.split(
+            r"\b(?:2160p|1440p|1080p|720p|576p|480p|4k|8k|"
+            r"web[- ]?dl|web[- ]?rip|webrip|bluray|brrip|hdrip|"
+            r"dvdrip|cam|hdcam|x264|x265|h264|h265|hevc)\b",
+            value,
+            maxsplit=1,
+            flags=re.I,
+        )[0]
+
+    value = re.sub(r"[\[\(].*?[\]\)]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" -._")
+    return value, year
+
+
+def _poster_url_for_release(raw_title: str) -> str:
+    title, year = _poster_title_parts(raw_title)
+    if not title:
+        return ""
+    return f"/api/poster?{urlencode({'title': title, 'year': year})}"
+
+
+async def _poster_lookup(title: str, year: str = "") -> str | None:
+    clean_title = str(title or "").strip()
+    clean_year = str(year or "").strip()
+    if not clean_title:
+        return None
+
+    cache_key = f"{_poster_normalize_title(clean_title)}|{clean_year}"
+    now = time.time()
+    cached = _poster_cache.get(cache_key)
+    cache_ttl = _POSTER_CACHE_SECONDS if cached and cached[1] else 10 * 60
+    if cached and now - cached[0] < cache_ttl:
+        return cached[1]
+
+    poster = None
+    try:
+        query = quote((clean_title + " " + clean_year).strip(), safe="")
+        async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
+            response = await client.get(
+                f"https://v3.sg.media-imdb.com/suggestion/titles/x/{query}.json?includeVideos=0",
+                headers={"Accept": "application/json"},
+            )
+            if response.status_code == 200:
+                data = response.json()
+                wanted = _poster_normalize_title(clean_title)
+                wanted_year = clean_year
+                candidates: list[tuple[int, str]] = []
+                for row in data.get("d") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    image = str((row.get("i") or {}).get("imageUrl") or "").strip()
+                    candidate = _poster_normalize_title(str(row.get("l") or ""))
+                    candidate_year = str(row.get("y") or "")
+                    if not image or candidate != wanted:
+                        continue
+                    if wanted_year and candidate_year and candidate_year != wanted_year:
+                        continue
+                    score = 100
+                    if wanted_year and candidate_year == wanted_year:
+                        score += 100
+                    if str(row.get("qid") or "") == "movie":
+                        score += 10
+                    score += max(0, 20 - int(row.get("rank") or 20))
+                    candidates.append((score, image))
+                if candidates:
+                    candidates.sort(key=lambda pair: pair[0], reverse=True)
+                    poster = candidates[0][1]
+    except Exception:
+        pass
+
+    if not poster:
+        try:
+            async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://itunes.apple.com/search",
+                    params={"term": (clean_title + " " + clean_year).strip(), "limit": "25"},
+                    headers={"Accept": "application/json"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    wanted = _poster_normalize_title(clean_title)
+                    wanted_year = clean_year
+                    candidates: list[tuple[int, str]] = []
+                    for row in data.get("results") or []:
+                        if str(row.get("kind") or "") != "feature-movie" or not row.get("artworkUrl100"):
+                            continue
+                        candidate = _poster_normalize_title(str(row.get("trackName") or row.get("collectionName") or ""))
+                        candidate_year = str(row.get("releaseDate") or "")[:4]
+                        if candidate != wanted:
+                            continue
+                        if wanted_year and candidate_year and candidate_year != wanted_year:
+                            continue
+                        score = 100
+                        if wanted_year and candidate_year == wanted_year:
+                            score += 100
+                        candidates.append((score, str(row["artworkUrl100"]).replace("100x100bb", "600x600bb")))
+                    if candidates:
+                        candidates.sort(key=lambda pair: pair[0], reverse=True)
+                        poster = candidates[0][1]
+        except Exception:
+            pass
+
+    _poster_cache[cache_key] = (now, poster)
+    return poster
+
+@app.get("/api/poster")
+async def api_poster(title: str = Query(..., min_length=1), year: str = Query("")):
+    poster = await _poster_lookup(title, year)
+    if not poster:
+        raise HTTPException(404, "Poster not found")
+    return RedirectResponse(poster, status_code=302)
 
 @app.get("/")
 async def root():
