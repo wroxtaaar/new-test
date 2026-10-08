@@ -2122,235 +2122,121 @@ async def search_1337x_direct(
     pages: int = 2,
     category: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Primary 1337x search: native Movies/TV category + seeders sorting.
-
-    Listing pages are cheap; only the highest-value rows are resolved to magnets.
-    """
+    """Primary 1337x search using native media categories."""
     q, season, episode = _media_search_parts(query)
     if not q:
         return []
-
     encoded = quote(q, safe="").replace("%20", "+")
-    user_agent = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    )
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    minimum_size = 100 * 1024 * 1024
-    maximum_size = 2 * 1024 * 1024 * 1024
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    minimum_size, maximum_size = 100 * 1024 * 1024, 2 * 1024 * 1024 * 1024
+    categories = [category] if category in {"Movies", "TV"} else (["TV"] if season is not None or episode is not None else ["Movies", "TV"])
 
-    # Explicit Sxx/SxxExx/season queries are TV. Everything else is searched
-    # against both native media categories so we never have to guess whether a
-    # title is a movie or a show.
-    categories = [category] if category in {"Movies", "TV"} else (
-        ["TV"] if season is not None or episode is not None else ["Movies", "TV"]
-    )
-
-    async with httpx.AsyncClient(
-        timeout=min(SEARCH_SOURCE_TIMEOUT_SECONDS + 0.5, 2.75),
-        follow_redirects=True,
-        headers=headers,
-    ) as client:
-        base = ""
-        first_pages: dict[str, str] = {}
-
-        # Find a working mirror using the cheapest category request. The same
-        # mirror is then reused for all requested categories/pages.
+    async with httpx.AsyncClient(timeout=min(SEARCH_SOURCE_TIMEOUT_SECONDS + 0.75, 3.0), follow_redirects=True, headers=headers) as client:
+        base, first_pages = "", {}
         for host in X1337_HOSTS:
-            try:
-                probe_category = categories[0]
-                probe_url = f"https://{host}/sort-category-search/{encoded}/{probe_category}/seeders/desc/1/"
-                response = await client.get(probe_url)
-                if response.status_code < 400 and _x1337_rows(response.text):
-                    base = f"https://{host}"
-                    first_pages[probe_category] = response.text
-                    logger.info(
-                        "1337x primary selected host %s for '%s' (%s)",
-                        host, query, probe_category,
-                    )
+            for probe_category in categories:
+                for probe_path in (
+                    f"/category-search/{encoded}/{probe_category}/1/",
+                    f"/sort-category-search/{encoded}/{probe_category}/seeders/desc/1/",
+                ):
+                    try:
+                        response = await client.get(f"https://{host}{probe_path}")
+                        if response.status_code < 400 and _x1337_rows(response.text):
+                            base = f"https://{host}"
+                            first_pages[probe_category] = response.text
+                            break
+                    except httpx.HTTPError:
+                        continue
+                if base:
                     break
-            except httpx.HTTPError:
-                continue
-
+            if base:
+                break
         if not base:
             return []
 
         async def fetch_listing(category_name: str, page: int) -> str:
             if page == 1 and category_name in first_pages:
                 return first_pages[category_name]
-            path = (
-                f"/sort-category-search/{encoded}/{category_name}/"
-                f"seeders/desc/{page}/"
+            paths = (
+                f"/category-search/{encoded}/{category_name}/{page}/",
+                f"/sort-category-search/{encoded}/{category_name}/seeders/desc/{page}/",
+                f"/search/{encoded}/{page}/",
             )
-            try:
-                response = await client.get(base + path)
-                if response.status_code < 400 and _x1337_rows(response.text):
-                    return response.text
-            except httpx.HTTPError:
-                pass
+            for path in paths:
+                try:
+                    response = await client.get(base + path)
+                    if response.status_code < 400 and _x1337_rows(response.text):
+                        return response.text
+                except httpx.HTTPError:
+                    continue
             return ""
 
-        # Fetch category page 1 concurrently. If the first page is thin, page 2
-        # is fetched later rather than making every search wait for it.
-        first_results = await asyncio.gather(
-            *(fetch_listing(category_name, 1) for category_name in categories),
-            return_exceptions=True,
-        )
-        for category_name, html_text in zip(categories, first_results):
-            if isinstance(html_text, str) and html_text:
-                first_pages[category_name] = html_text
+        first_results = await asyncio.gather(*(fetch_listing(name, 1) for name in categories), return_exceptions=True)
+        listing_pages = {
+            name: ([value] if isinstance(value, str) and value else [])
+            for name, value in zip(categories, first_results)
+        }
 
-        async def parse_candidates(
-            category_name: str,
-            listing_pages: list[str],
-        ) -> list[dict[str, str]]:
+        async def parse_candidates(category_name: str, html_pages: list[str]) -> list[dict[str, str]]:
             tokens = _search_tokens(q)
-            candidates: list[dict[str, str]] = []
-            seen_paths: set[str] = set()
-
-            for html_text in listing_pages:
+            compact_query = "".join(tokens)
+            candidates, seen_paths = [], set()
+            for html_text in html_pages:
                 for row in _x1337_rows(html_text):
                     path = row.get("path") or ""
                     if not path or path in seen_paths:
                         continue
                     seen_paths.add(path)
-
                     normalized = _normalize_title(row["title"])
-                    if tokens and not all(token in normalized for token in tokens):
+                    compact_normalized = normalized.replace(" ", "")
+                    if tokens and not (all(token in normalized for token in tokens) or (compact_query and compact_query in compact_normalized)):
                         continue
                     if not _season_episode_match(row["title"], season, episode):
                         continue
-
-                    size_match = re.match(
-                        r"([\d.]+)\s*([KMGT]i?B)",
-                        row.get("size", ""),
-                        re.IGNORECASE,
-                    )
+                    size_match = re.match(r"([\d.]+)\s*([KMGT]i?B)", row.get("size", ""), re.IGNORECASE)
                     if not size_match:
                         continue
-                    units = {
-                        "KB": 1024, "KIB": 1024, "MB": 1024**2, "MIB": 1024**2,
-                        "GB": 1024**3, "GIB": 1024**3, "TB": 1024**4, "TIB": 1024**4,
-                    }
+                    units = {"KB":1024,"KIB":1024,"MB":1024**2,"MIB":1024**2,"GB":1024**3,"GIB":1024**3,"TB":1024**4,"TIB":1024**4}
                     size = int(float(size_match.group(1)) * units[size_match.group(2).upper()])
                     if not minimum_size <= size <= maximum_size:
                         continue
-
-                    row["size_bytes"] = str(size)
-                    row["media_category"] = category_name
+                    row["size_bytes"], row["media_category"] = str(size), category_name
                     candidates.append(row)
-
-            # 1337x already sorted by seeders. Keep that advantage, while
-            # preferring an exact title prefix over unrelated token matches.
-            target = _normalize_title(q)
-            candidates.sort(
-                key=lambda row: (
-                    1 if _normalize_title(row["title"]).startswith(target) else 0,
-                    int(row.get("seeders") or 0),
-                    int(row.get("leechers") or 0),
-                ),
-                reverse=True,
-            )
+            candidates.sort(key=lambda row:(1 if _normalize_title(row["title"]).startswith(_normalize_title(q)) else 0,int(row.get("seeders") or 0),int(row.get("leechers") or 0)),reverse=True)
             return candidates
 
-        candidates_by_category: dict[str, list[dict[str, str]]] = {}
-        for category_name in categories:
-            html_text = first_pages.get(category_name, "")
-            candidates_by_category[category_name] = await parse_candidates(
-                category_name,
-                [html_text] if html_text else [],
-            )
+        by_category = {name: await parse_candidates(name, listing_pages.get(name, [])) for name in categories}
+        if sum(len(v) for v in by_category.values()) < max(12, min(limit, 20)) and pages > 1:
+            extra = await asyncio.gather(*(fetch_listing(name, 2) for name in categories), return_exceptions=True)
+            for name, value in zip(categories, extra):
+                if isinstance(value, str) and value:
+                    by_category[name] = await parse_candidates(name, listing_pages.get(name, []) + [value])
 
-        # Only pay for page 2 when page 1 does not provide enough usable
-        # candidates. This is the main latency guard.
-        need_more = sum(len(items) for items in candidates_by_category.values()) < max(12, min(limit, 20))
-        if need_more and pages > 1:
-            extra_pages = await asyncio.gather(
-                *(fetch_listing(category_name, 2) for category_name in categories),
-                return_exceptions=True,
-            )
-            for category_name, html_text in zip(categories, extra_pages):
-                if isinstance(html_text, str) and html_text:
-                    existing = first_pages.get(category_name, "")
-                    candidates_by_category[category_name] = await parse_candidates(
-                        category_name,
-                        [p for p in (existing, html_text) if p],
-                    )
-
-        candidates: list[dict[str, str]] = []
-        for items in candidates_by_category.values():
-            candidates.extend(items)
-
-        # De-duplicate before detail-page resolution.
-        unique: dict[str, dict[str, str]] = {}
+        candidates = [row for values in by_category.values() for row in values]
+        unique = {}
         for row in candidates:
-            key = row.get("path") or _normalize_title(row.get("title", ""))
-            unique.setdefault(key, row)
-
+            unique.setdefault(row.get("path") or _normalize_title(row.get("title","")), row)
         candidates = list(unique.values())
-        candidates.sort(
-            key=lambda row: (
-                1 if _normalize_title(row["title"]).startswith(_normalize_title(q)) else 0,
-                int(row.get("seeders") or 0),
-                int(row.get("leechers") or 0),
-            ),
-            reverse=True,
-        )
+        candidates.sort(key=lambda row:(1 if _normalize_title(row["title"]).startswith(_normalize_title(q)) else 0,int(row.get("seeders") or 0),int(row.get("leechers") or 0)),reverse=True)
+        candidates = candidates[:min(max(limit,1),20)]
 
-        # Resolving every row is what made the old fallback expensive. Resolve
-        # only the best candidates; fallbacks can fill the remainder.
-        candidates = candidates[:min(max(limit, 1), 18)]
-
-        async def fetch_detail(row: dict[str, str]) -> dict[str, Any] | None:
+        async def fetch_detail(row):
             try:
                 response = await client.get(base + row["path"])
                 response.raise_for_status()
             except httpx.HTTPError:
                 return None
-
-            match = re.search(
-                r"""(?:href|data-href)=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']""",
-                response.text,
-                re.IGNORECASE,
-            )
+            match = re.search(r"""(?:href|data-href)=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']""", response.text, re.IGNORECASE)
             if match:
                 magnet = unescape(match.group(1))
             else:
-                match = re.search(
-                    r"magnet:\?xt=urn:btih:[^\"'<>\s]+",
-                    response.text,
-                    re.IGNORECASE,
-                )
+                match = re.search(r"magnet:\?xt=urn:btih:[^\"'<>\s]+", response.text, re.IGNORECASE)
                 if not match:
                     return None
                 magnet = unescape(match.group(0))
+            return {"guid":f"1337x-{info_hash(magnet) or row['path']}","title":row["title"],"size":int(row["size_bytes"]),"seeders":int(row["seeders"] or 0),"leechers":int(row["leechers"] or 0),"indexer":"1337x","protocol":"torrent","publishDate":"","magnetUrl":magnet,"infoHash":info_hash(magnet),"downloadUrl":magnet,"infoUrl":base+row["path"],"sourceUrl":base+row["path"],"category":row.get("media_category") or "Video"}
 
-            return {
-                "guid": f"1337x-{info_hash(magnet) or row['path']}",
-                "title": row["title"],
-                "size": int(row["size_bytes"]),
-                "seeders": int(row["seeders"] or 0),
-                "leechers": int(row["leechers"] or 0),
-                "indexer": "1337x",
-                "protocol": "torrent",
-                "publishDate": "",
-                "magnetUrl": magnet,
-                "infoHash": info_hash(magnet),
-                "downloadUrl": magnet,
-                "infoUrl": base + row["path"],
-                "sourceUrl": base + row["path"],
-                "category": row.get("media_category") or "Video",
-            }
-
-        fetched = await asyncio.gather(
-            *(fetch_detail(row) for row in candidates),
-            return_exceptions=True,
-        )
-
+        fetched = await asyncio.gather(*(fetch_detail(row) for row in candidates), return_exceptions=True)
     return [item for item in fetched if isinstance(item, dict)]
 
 async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -2772,91 +2658,88 @@ def _search_media_kind(query: str) -> str:
 
 
 def _search_quality_filter(item: dict[str, Any], query: str) -> bool:
-    """Final hard gate shared by primary and fallback results."""
+    """Hard media/size gate plus strong title relevance."""
     title = str(item.get("title") or "").strip()
     if not title:
         return False
-
     normalized = _normalize_title(title)
+    compact = normalized.replace(" ", "")
     query_title, season, episode = _media_search_parts(query)
     target_tokens = _search_tokens(query_title)
-    if target_tokens and not all(token in normalized for token in target_tokens):
+    compact_target = "".join(target_tokens)
+    if target_tokens and not (
+        all(token in normalized for token in target_tokens)
+        or (compact_target and compact_target in compact)
+    ):
         return False
     if season is not None and not _season_episode_match(title, season, episode):
         return False
-
     category = str(item.get("category") or "").lower()
-    blocked = ("game", "software", "application", "music", "audio", "book", "ebook", "porn", "xxx", "adult")
+    blocked = ("game", "software", "application", "music", "audio", "book", "ebook", "porn", "xxx", "adult", "anime")
     if any(word in category for word in blocked):
         return False
-
     size = int(item.get("size") or 0)
     return 100 * 1024 * 1024 <= size <= 2 * 1024 * 1024 * 1024
 
 
-async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool = True) -> list[dict[str, Any]]:
-    """Fast media-only search.
+def _title_relevance(title: str, query: str) -> tuple[int, int]:
+    normalized = _normalize_title(title)
+    target = _normalize_title(_media_search_parts(query)[0])
+    if not target:
+        return (0, 0)
+    if normalized == target:
+        return (3, len(normalized))
+    if normalized.startswith(target + " "):
+        return (2, len(normalized))
+    if target.replace(" ", "") in normalized.replace(" ", ""):
+        return (1, len(normalized))
+    return (0, 0)
 
-    1337x is the primary source and is queried through its native Movies/TV
-    category + seeders sorting paths. Generic torrent indexes are never used
-    unless the strict 1337x search cannot supply enough usable results.
-    """
+
+async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool = True) -> list[dict[str, Any]]:
+    """Fast media-only search with 1337x as the primary source."""
     query = re.sub(r"\s+", " ", query.strip())
     if not query:
         return []
-
     limit = min(max(int(limit or 50), 1), 50)
-    cache_key = (re.sub(r"\s+", " ", query).lower(), limit)
+    cache_key = (query.lower(), limit)
     now = time.monotonic()
     cached = _search_cache.get(cache_key)
     if cached and now - cached[0] < SEARCH_CACHE_SECONDS:
         return cached[1]
 
     kind = _search_media_kind(query)
-    categories = ["TV"] if kind == "tv" else ["Movies", "TV"]
-
     try:
         primary = await asyncio.wait_for(
             search_1337x_direct(
                 query,
-                limit=min(limit, 18),
+                limit=min(limit, 20),
                 pages=2,
-                category=categories[0] if len(categories) == 1 else None,
+                category="TV" if kind == "tv" else None,
             ),
-            timeout=max(2.5, SEARCH_TOTAL_TIMEOUT_SECONDS),
+            timeout=max(3.0, SEARCH_TOTAL_TIMEOUT_SECONDS + 1.0),
         )
-    except asyncio.TimeoutError:
-        logger.info("1337x primary timed out for '%s'", query)
-        primary = []
     except Exception as exc:
         logger.info("1337x primary failed for '%s': %s", query, exc)
         primary = []
 
-    results: list[dict[str, Any]] = [
-        item for item in primary if _search_quality_filter(item, query)
-    ]
+    results = [item for item in primary if _search_quality_filter(item, query)]
 
-    # If the query is ambiguous and the first category produced fewer than
-    # enough useful results, explicitly search the other native category.
-    # This happens only after the first request, not for every fallback source.
-    if kind == "both" and len(results) < min(12, limit):
-        try:
-            tv_or_movie = await asyncio.wait_for(
-                search_1337x_direct(
-                    query,
-                    limit=min(limit, 18),
-                    pages=1,
-                    category="TV" if results and all(
-                        str(item.get("category") or "").lower() != "movies" for item in results
-                    ) else "Movies",
-                ),
-                timeout=2.25,
-            )
-        except Exception:
-            tv_or_movie = []
-        results.extend(item for item in tv_or_movie if _search_quality_filter(item, query))
+    if allow_series_fallback and len(results) < min(8, limit):
+        fallback_tasks = []
+        if kind in {"tv", "both"}:
+            fallback_tasks.append(asyncio.create_task(search_tv_eztv(query, min(limit, 20))))
+        if kind == "both":
+            fallback_tasks.append(asyncio.create_task(search_yts_movies(query, min(limit, 20))))
+        if fallback_tasks:
+            values = await asyncio.gather(*fallback_tasks, return_exceptions=True)
+            for value in values:
+                if isinstance(value, list):
+                    results.extend(
+                        item for item in value
+                        if _search_quality_filter(item, query)
+                    )
 
-    # De-duplicate by hash/path/title.
     merged: dict[str, dict[str, Any]] = {}
     for item in results:
         key = str(
@@ -2870,56 +2753,12 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
             merged.setdefault(key, item)
 
     results = list(merged.values())
-
-    # Relevance first, then seeders. This mirrors the useful part of the 1337x
-    # experience: the query match stays at the top instead of a vaguely related
-    # high-seed torrent winning solely because it has more peers.
-    target = _normalize_title(_media_search_parts(query)[0])
     results.sort(
         key=lambda item: (
-            1 if _normalize_title(str(item.get("title") or "")).startswith(target) else 0,
+            _title_relevance(str(item.get("title") or ""), query)[0],
             int(item.get("seeders") or 0),
             int(item.get("leechers") or 0),
-        ),
-        reverse=True,
-    )
-    results = results[:limit]
-
-    # Strict specialist fallbacks only. They are never queried before 1337x,
-    # and generic CSV/APIBay/Knaben results are intentionally excluded here to
-    # prevent unrelated categories from leaking into the UI.
-    if allow_series_fallback and len(results) < min(8, limit):
-        fallback_tasks = []
-        if kind in {"tv", "both"}:
-            fallback_tasks.append(asyncio.create_task(search_tv_eztv(query, min(limit, 20))))
-        if kind == "both":
-            fallback_tasks.append(asyncio.create_task(search_yts_movies(query, min(limit, 20))))
-        elif kind == "movie":
-            fallback_tasks.append(asyncio.create_task(search_yts_movies(query, min(limit, 20))))
-
-        if fallback_tasks:
-            fallback_values = await asyncio.gather(*fallback_tasks, return_exceptions=True)
-            for value in fallback_values:
-                if isinstance(value, list):
-                    results.extend(item for item in value if _search_quality_filter(item, query))
-
-    merged = {}
-    for item in results:
-        key = str(
-            item.get("infoHash")
-            or item.get("magnetUrl")
-            or item.get("title")
-            or ""
-        ).strip().lower()
-        if key:
-            merged.setdefault(key, item)
-
-    results = list(merged.values())
-    results.sort(
-        key=lambda item: (
-            1 if _normalize_title(str(item.get("title") or "")).startswith(target) else 0,
-            int(item.get("seeders") or 0),
-            int(item.get("leechers") or 0),
+            _title_relevance(str(item.get("title") or ""), query)[1],
         ),
         reverse=True,
     )
@@ -2936,6 +2775,7 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
         query, len(results), kind,
     )
     return results
+
 def parse_size(value: str) -> int:
     m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB|TB)", value or "", re.I)
     if not m:
