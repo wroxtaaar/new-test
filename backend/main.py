@@ -2450,7 +2450,7 @@ async def search_knaben(query: str, limit: int = 100) -> list[dict[str, Any]]:
     target_tokens = _search_tokens(title_query)
     # Keep the full Knaben candidate pool. The previous working Vercel
     # implementation requested 300 before applying local filtering.
-    request_size = 300
+    request_size = 500
 
     body = {
         "search_type": "100%",
@@ -2669,6 +2669,8 @@ def _media_provider_query(value: str) -> str:
             title,
             flags=re.I,
         )
+    title = re.sub(r"\bspider[- ]?man\b", "spider man", title, flags=re.I)
+    title = re.sub(r"\bant[- ]?man\b", "ant man", title, flags=re.I)
     return re.sub(r"\s+", " ", title).strip()
 
 
@@ -2817,7 +2819,10 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
     # fewer than 8 good results. This keeps normal searches quick and avoids
     # flooding the UI with weak/duplicate results.
     if allow_series_fallback and len(results) < min(8, limit):
-        fallback_tasks = []
+        fallback_tasks = [
+            asyncio.create_task(search_torrents_csv(query, min(limit, 50))),
+            asyncio.create_task(search_apibay(query, min(limit, 50))),
+        ]
         if kind in {"tv", "both"}:
             fallback_tasks.append(asyncio.create_task(search_tv_eztv(query, min(limit, 20))))
         if kind == "both":
@@ -2826,6 +2831,8 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
         if fallback_tasks:
             values = await asyncio.gather(*fallback_tasks, return_exceptions=True)
             for value in values:
+                if isinstance(value, dict):
+                    value = value.get("results", [])
                 if not isinstance(value, list):
                     continue
                 for item in value:
