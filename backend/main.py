@@ -2382,7 +2382,7 @@ async def search_1337x_direct(
         # Detail pages are the expensive part. Keep lookup fan-out bounded
         # on Render Free while letting DVD/HD/HEVC/dual-audio/h.264 and other
         # valid 1337x release types compete.
-        candidates = candidates[:min(max(limit, 1), 15)]
+        candidates = candidates[:min(max(limit, 1), 20)]
 
         async def fetch_detail(row):
             try:
