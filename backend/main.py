@@ -2067,6 +2067,12 @@ X1337_HOSTS = [
     "x1337x.cc",
 ]
 
+# 1337x subcategory IDs represented by the icon at the left of each result.
+# The icon describes the release type; it is not a quality filter.
+X1337_MOVIE_SUBCATEGORIES = {"1","2","3","4","42","54","55","66","70","73","76"}
+X1337_TV_SUBCATEGORIES = {"5","6","7","9","41","71","74","75"}
+X1337_MEDIA_SUBCATEGORIES = X1337_MOVIE_SUBCATEGORIES | X1337_TV_SUBCATEGORIES
+
 
 def _x1337_rows(html_text: str) -> list[dict[str, str]]:
     """Parse 1337x search rows across mirror HTML variations."""
@@ -2111,12 +2117,24 @@ def _x1337_rows(html_text: str) -> list[dict[str, str]]:
         if leechers == "0" and len(numeric_cells) >= 1:
             leechers = numeric_cells[-1] or "0"
         seen_paths.add(href)
+        sub_href = ""
+        sub_id = ""
+        if cells:
+            sub_link = cells[0].find("a", href=re.compile(r"^/sub/"))
+            if sub_link is not None:
+                sub_href = str(sub_link.get("href") or "").strip()
+                sub_match = re.search(r"^/sub/(\d+)/", sub_href)
+                if sub_match:
+                    sub_id = sub_match.group(1)
+
         rows.append({
             "title": title,
             "path": href,
             "size": size or "0 B",
             "seeders": seeders,
             "leechers": leechers,
+            "subcategory_path": sub_href,
+            "subcategory_id": sub_id,
         })
     return rows
 
@@ -2177,6 +2195,34 @@ async def search_1337x_direct(
             return_exceptions=False,
         )
 
+        # Generic search is also queried because language searches can surface
+        # Hindi/dual-audio releases there that are not near the top of a
+        # category search. Every generic row is classified through /sub/<id>/
+        # so non-media categories cannot leak into the app.
+        generic_base = next((base for base, _ in category_pages if base), "")
+        generic_pages: list[str] = []
+        if generic_base:
+            generic_urls = [f"{generic_base}/search/{encoded}/1/"]
+            if pages > 1:
+                generic_urls.append(f"{generic_base}/search/{encoded}/2/")
+
+            async def fetch_generic(url: str) -> str:
+                try:
+                    response = await client.get(url)
+                    if response.status_code < 400 and _x1337_rows(response.text):
+                        return response.text
+                except httpx.HTTPError:
+                    pass
+                return ""
+
+            generic_pages = [
+                value for value in await asyncio.gather(
+                    *(fetch_generic(url) for url in generic_urls),
+                    return_exceptions=False,
+                )
+                if value
+            ]
+
         async def fetch_category(
             category_name: str,
             base: str,
@@ -2226,9 +2272,12 @@ async def search_1337x_direct(
             return_exceptions=False,
         )
 
+        kind_hint = "tv" if (season is not None or episode is not None) else "both"
+
         async def parse_candidates(
             category_name: str,
             html_pages: list[str],
+            generic_search: bool = False,
         ) -> list[dict[str, str]]:
             target = _media_provider_query(query)
             tokens = _search_tokens(target)
@@ -2251,6 +2300,13 @@ async def search_1337x_direct(
                         continue
                     if not _season_episode_match(row["title"], season, episode):
                         continue
+
+                    if generic_search:
+                        sub_id = str(row.get("subcategory_id") or "")
+                        if sub_id not in X1337_MEDIA_SUBCATEGORIES:
+                            continue
+                        if kind_hint == "tv" and sub_id not in X1337_TV_SUBCATEGORIES:
+                            continue
 
                     size_match = re.match(
                         r"([\d.]+)\s*([KMGT]i?B)",
@@ -2300,6 +2356,15 @@ async def search_1337x_direct(
             for row in values
         ]
 
+        if generic_pages:
+            candidates.extend(
+                await parse_candidates(
+                    "TV" if kind_hint == "tv" else "Movies",
+                    generic_pages,
+                    generic_search=True,
+                )
+            )
+
         unique: dict[str, dict[str, str]] = {}
         for row in candidates:
             key = row.get("path") or _normalize_title(row.get("title", ""))
@@ -2314,9 +2379,10 @@ async def search_1337x_direct(
             ),
             reverse=True,
         )
-        # Detail pages are the expensive part. Knaben/other indexers already
-        # carry magnets, so cap 1337x detail lookups on Render Free.
-        candidates = candidates[:min(max(limit, 1), 10)]
+        # Detail pages are the expensive part. Keep lookup fan-out bounded
+        # on Render Free while letting DVD/HD/HEVC/dual-audio/h.264 and other
+        # valid 1337x release types compete.
+        candidates = candidates[:min(max(limit, 1), 15)]
 
         async def fetch_detail(row):
             try:
