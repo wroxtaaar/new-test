@@ -67,6 +67,9 @@ SEARCH_SOURCE_TIMEOUT_SECONDS = float(os.getenv("SEARCH_SOURCE_TIMEOUT_SECONDS",
 SEARCH_TOTAL_TIMEOUT_SECONDS = float(os.getenv("SEARCH_TOTAL_TIMEOUT_SECONDS", "3.5"))
 SEARCH_GRACE_SECONDS = float(os.getenv("SEARCH_GRACE_SECONDS", "0.2"))
 SEARCH_CACHE_SECONDS = float(os.getenv("SEARCH_CACHE_SECONDS", "60"))
+SEARCH_CACHE_STALE_SECONDS = float(os.getenv("SEARCH_CACHE_STALE_SECONDS", "600"))
+SEARCH_EMPTY_CACHE_SECONDS = float(os.getenv("SEARCH_EMPTY_CACHE_SECONDS", "15"))
+SEARCH_CACHE_MAX_ENTRIES = int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "75"))
 FAST_SEARCH_TRACKERS = (
     "http://tracker.dler.org:6969/announce",
     "http://tracker2.dler.org:80/announce",
@@ -79,7 +82,8 @@ TORRENT_METADATA_ITORRENTS_TIMEOUT_SECONDS = float(os.getenv("TORRENT_METADATA_I
 TORRENT_METADATA_BACKGROUND_TTL_SECONDS = float(os.getenv("TORRENT_METADATA_BACKGROUND_TTL_SECONDS", str(6 * 60 * 60)))
 TORRENT_METADATA_BACKGROUND_RETRY_SECONDS = float(os.getenv("TORRENT_METADATA_BACKGROUND_RETRY_SECONDS", "30"))
 TORRENT_METADATA_JOB_RETENTION_SECONDS = float(os.getenv("TORRENT_METADATA_JOB_RETENTION_SECONDS", str(60 * 60)))
-_search_cache: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+_search_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_search_inflight: dict[str, asyncio.Task[list[dict[str, Any]]]] = {}
 
 # Rolling server-side byte counters for browser media streams. This is more
 # reliable than Resource Timing for long-lived media responses, which browsers
@@ -2121,125 +2125,256 @@ async def search_1337x_direct(
     limit: int = 50,
     pages: int = 2,
     category: str | None = None,
+    provider_query: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Primary 1337x search using native media categories."""
+    """Primary 1337x search using media categories and cheap listing-page scraping.
+
+    The unsorted category route is the reliable base path. The server-side
+    seeders-sorted route is fetched as an optional second listing because 1337x
+    integrations document that sorted keyword searches can fail under load.
+    """
     q, season, episode = _media_search_parts(query)
     if not q:
         return []
-    q = _media_provider_query(query)
+    q = re.sub(r"\s+", " ", provider_query or _media_provider_query(query)).strip()
     if not q:
         return []
+
     encoded = quote(q, safe="").replace("%20", "+")
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
     minimum_size, maximum_size = 100 * 1024 * 1024, 2 * 1024 * 1024 * 1024
-    categories = [category] if category in {"Movies", "TV"} else (["TV"] if season is not None or episode is not None else ["Movies", "TV"])
+    categories = (
+        [category]
+        if category in {"Movies", "TV"}
+        else (["TV"] if season is not None or episode is not None else ["Movies", "TV"])
+    )
 
-    async with httpx.AsyncClient(timeout=min(SEARCH_SOURCE_TIMEOUT_SECONDS + 0.75, 3.0), follow_redirects=True, headers=headers) as client:
-        base, first_pages = "", {}
-        for host in X1337_HOSTS:
-            for probe_category in categories:
-                for probe_path in (
-                    f"/category-search/{encoded}/{probe_category}/1/",
-                    f"/sort-category-search/{encoded}/{probe_category}/seeders/desc/1/",
-                ):
-                    try:
-                        response = await client.get(f"https://{host}{probe_path}")
-                        if response.status_code < 400 and _x1337_rows(response.text):
-                            base = f"https://{host}"
-                            first_pages[probe_category] = response.text
-                            break
-                    except httpx.HTTPError:
-                        continue
-                if base:
-                    break
-            if base:
-                break
-        if not base:
-            return []
+    async with httpx.AsyncClient(
+        timeout=SEARCH_SOURCE_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers=headers,
+    ) as client:
 
-        async def fetch_listing(category_name: str, page: int) -> str:
-            if page == 1 and category_name in first_pages:
-                return first_pages[category_name]
-            paths = (
-                f"/category-search/{encoded}/{category_name}/{page}/",
-                f"/sort-category-search/{encoded}/{category_name}/seeders/desc/{page}/",
-                f"/search/{encoded}/{page}/",
-            )
-            for path in paths:
+        async def find_category_page(category_name: str) -> tuple[str, str]:
+            # Probe only the normal category-search route. One cheap route is
+            # enough to identify a usable mirror; do not serially probe both
+            # normal and sorted routes across every mirror.
+            path = f"/category-search/{encoded}/{category_name}/1/"
+            for host in X1337_HOSTS:
                 try:
-                    response = await client.get(base + path)
+                    response = await client.get(f"https://{host}{path}")
+                    if response.status_code < 400 and _x1337_rows(response.text):
+                        return f"https://{host}", response.text
+                except httpx.HTTPError:
+                    continue
+            return "", ""
+
+        category_pages = await asyncio.gather(
+            *(find_category_page(name) for name in categories),
+            return_exceptions=False,
+        )
+
+        async def fetch_category(
+            category_name: str,
+            base: str,
+            first_page: str,
+        ) -> list[dict[str, str]]:
+            if not base or not first_page:
+                return []
+
+            # Normal page 1 + sorted page 1 are fetched together. Sorted is
+            # treated as enrichment, never as a requirement.
+            paths = [
+                ("normal", first_page),
+                (
+                    "sorted",
+                    f"{base}/sort-category-search/{encoded}/{category_name}/seeders/desc/1/",
+                ),
+            ]
+            if pages > 1:
+                paths.append((
+                    "normal2",
+                    f"{base}/category-search/{encoded}/{category_name}/2/",
+                ))
+
+            async def fetch_one(kind: str, value: str):
+                if kind == "normal":
+                    return value
+                try:
+                    response = await client.get(value)
                     if response.status_code < 400 and _x1337_rows(response.text):
                         return response.text
                 except httpx.HTTPError:
-                    continue
-            return ""
+                    pass
+                return ""
 
-        first_results = await asyncio.gather(*(fetch_listing(name, 1) for name in categories), return_exceptions=True)
-        listing_pages = {
-            name: ([value] if isinstance(value, str) and value else [])
-            for name, value in zip(categories, first_results)
-        }
+            fetched = await asyncio.gather(
+                *(fetch_one(kind, value) for kind, value in paths),
+                return_exceptions=False,
+            )
+            pages_html = [text for text in fetched if isinstance(text, str) and text]
+            return pages_html
 
-        async def parse_candidates(category_name: str, html_pages: list[str]) -> list[dict[str, str]]:
-            tokens = _search_tokens(q)
+        fetched_by_category = await asyncio.gather(
+            *(
+                fetch_category(name, base, first_page)
+                for name, (base, first_page) in zip(categories, category_pages)
+            ),
+            return_exceptions=False,
+        )
+
+        async def parse_candidates(
+            category_name: str,
+            html_pages: list[str],
+        ) -> list[dict[str, str]]:
+            target = _media_provider_query(query)
+            tokens = _search_tokens(target)
             compact_query = "".join(tokens)
             candidates, seen_paths = [], set()
+
             for html_text in html_pages:
                 for row in _x1337_rows(html_text):
                     path = row.get("path") or ""
                     if not path or path in seen_paths:
                         continue
                     seen_paths.add(path)
+
                     normalized = _normalize_title(row["title"])
                     compact_normalized = normalized.replace(" ", "")
-                    if tokens and not (all(token in normalized for token in tokens) or (compact_query and compact_query in compact_normalized)):
+                    if tokens and not (
+                        all(token in normalized for token in tokens)
+                        or (compact_query and compact_query in compact_normalized)
+                    ):
                         continue
                     if not _season_episode_match(row["title"], season, episode):
                         continue
-                    size_match = re.match(r"([\d.]+)\s*([KMGT]i?B)", row.get("size", ""), re.IGNORECASE)
+
+                    size_match = re.match(
+                        r"([\d.]+)\s*([KMGT]i?B)",
+                        row.get("size", ""),
+                        re.IGNORECASE,
+                    )
                     if not size_match:
                         continue
-                    units = {"KB":1024,"KIB":1024,"MB":1024**2,"MIB":1024**2,"GB":1024**3,"GIB":1024**3,"TB":1024**4,"TIB":1024**4}
-                    size = int(float(size_match.group(1)) * units[size_match.group(2).upper()])
+                    units = {
+                        "KB": 1024, "KIB": 1024,
+                        "MB": 1024**2, "MIB": 1024**2,
+                        "GB": 1024**3, "GIB": 1024**3,
+                        "TB": 1024**4, "TIB": 1024**4,
+                    }
+                    size = int(
+                        float(size_match.group(1))
+                        * units[size_match.group(2).upper()]
+                    )
                     if not minimum_size <= size <= maximum_size:
                         continue
-                    row["size_bytes"], row["media_category"] = str(size), category_name
+
+                    row["size_bytes"] = str(size)
+                    row["media_category"] = category_name
                     candidates.append(row)
-            candidates.sort(key=lambda row:(1 if _normalize_title(row["title"]).startswith(_normalize_title(q)) else 0,int(row.get("seeders") or 0),int(row.get("leechers") or 0)),reverse=True)
+
+            candidates.sort(
+                key=lambda row: (
+                    _title_relevance(row["title"], query)[0],
+                    int(row.get("seeders") or 0),
+                    int(row.get("leechers") or 0),
+                ),
+                reverse=True,
+            )
             return candidates
 
-        by_category = {name: await parse_candidates(name, listing_pages.get(name, [])) for name in categories}
-        if sum(len(v) for v in by_category.values()) < max(12, min(limit, 20)) and pages > 1:
-            extra = await asyncio.gather(*(fetch_listing(name, 2) for name in categories), return_exceptions=True)
-            for name, value in zip(categories, extra):
-                if isinstance(value, str) and value:
-                    by_category[name] = await parse_candidates(name, listing_pages.get(name, []) + [value])
+        candidate_lists = await asyncio.gather(
+            *(
+                parse_candidates(name, html_pages)
+                for name, html_pages in zip(categories, fetched_by_category)
+            ),
+            return_exceptions=False,
+        )
 
-        candidates = [row for values in by_category.values() for row in values]
-        unique = {}
+        candidates = [
+            row
+            for values in candidate_lists
+            for row in values
+        ]
+
+        unique: dict[str, dict[str, str]] = {}
         for row in candidates:
-            unique.setdefault(row.get("path") or _normalize_title(row.get("title","")), row)
+            key = row.get("path") or _normalize_title(row.get("title", ""))
+            unique.setdefault(key, row)
+
         candidates = list(unique.values())
-        candidates.sort(key=lambda row:(1 if _normalize_title(row["title"]).startswith(_normalize_title(q)) else 0,int(row.get("seeders") or 0),int(row.get("leechers") or 0)),reverse=True)
-        candidates = candidates[:min(max(limit,1),20)]
+        candidates.sort(
+            key=lambda row: (
+                _title_relevance(row["title"], query)[0],
+                int(row.get("seeders") or 0),
+                int(row.get("leechers") or 0),
+            ),
+            reverse=True,
+        )
+        # Detail pages are the expensive part. Knaben/other indexers already
+        # carry magnets, so cap 1337x detail lookups on Render Free.
+        candidates = candidates[:min(max(limit, 1), 10)]
 
         async def fetch_detail(row):
             try:
-                response = await client.get(base + row["path"])
+                response = await client.get(base_for_row(row) + row["path"])
                 response.raise_for_status()
-            except httpx.HTTPError:
+            except (httpx.HTTPError, ValueError):
                 return None
-            match = re.search(r"""(?:href|data-href)=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']""", response.text, re.IGNORECASE)
+
+            match = re.search(
+                r"""(?:href|data-href)=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']""",
+                response.text,
+                re.IGNORECASE,
+            )
             if match:
                 magnet = unescape(match.group(1))
             else:
-                match = re.search(r"magnet:\?xt=urn:btih:[^\"'<>\s]+", response.text, re.IGNORECASE)
+                match = re.search(
+                    r"magnet:\?xt=urn:btih:[^\"'< >\s]+".replace(" ", ""),
+                    response.text,
+                    re.IGNORECASE,
+                )
                 if not match:
                     return None
                 magnet = unescape(match.group(0))
-            return {"guid":f"1337x-{info_hash(magnet) or row['path']}","title":row["title"],"size":int(row["size_bytes"]),"seeders":int(row["seeders"] or 0),"leechers":int(row["leechers"] or 0),"indexer":"1337x","protocol":"torrent","publishDate":"","magnetUrl":magnet,"infoHash":info_hash(magnet),"downloadUrl":magnet,"infoUrl":base+row["path"],"sourceUrl":base+row["path"],"category":row.get("media_category") or "Video"}
 
-        fetched = await asyncio.gather(*(fetch_detail(row) for row in candidates), return_exceptions=True)
+            h = info_hash(magnet)
+            return {
+                "guid": f"1337x-{h or row['path']}",
+                "title": row["title"],
+                "size": int(row["size_bytes"]),
+                "seeders": int(row["seeders"] or 0),
+                "leechers": int(row["leechers"] or 0),
+                "indexer": "1337x",
+                "protocol": "torrent",
+                "publishDate": "",
+                "magnetUrl": magnet,
+                "infoHash": h,
+                "downloadUrl": magnet,
+                "infoUrl": base_for_row(row) + row["path"],
+                "sourceUrl": base_for_row(row) + row["path"],
+                "category": row.get("media_category") or "Video",
+            }
+
+        # Preserve the base URL selected for each category without doing a
+        # second mirror probe before opening detail pages.
+        row_bases: dict[str, str] = {}
+        for category_name, (base, _) in zip(categories, category_pages):
+            if base:
+                for row in candidate_lists[categories.index(category_name)]:
+                    row_bases[row["path"]] = base
+
+        def base_for_row(row: dict[str, str]) -> str:
+            return row_bases.get(row["path"], category_pages[0][0] if category_pages else "")
+
+        fetched = await asyncio.gather(
+            *(fetch_detail(row) for row in candidates),
+            return_exceptions=True,
+        )
     return [item for item in fetched if isinstance(item, dict)]
 
 async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -2437,10 +2572,14 @@ async def search_tv_eztv(query: str, limit: int = 30) -> list[dict[str, Any]]:
     return results[:limit]
 
 
-async def search_knaben(query: str, limit: int = 100) -> list[dict[str, Any]]:
-    """Search Knaben with the same broad media query used by the former Vercel search route."""
+async def search_knaben(
+    query: str,
+    limit: int = 100,
+    provider_query: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search Knaben with a title-only provider query and strict local filtering."""
     title_query, season, episode = _media_search_parts(query)
-    title_query = _media_provider_query(query)
+    title_query = re.sub(r"\s+", " ", provider_query or _media_provider_query(query)).strip()
     if not title_query:
         return []
 
@@ -2559,7 +2698,11 @@ async def search_torrents_csv(query: str, limit: int) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=SEARCH_SOURCE_TIMEOUT_SECONDS, follow_redirects=True) as client:
             response = await client.get(
                 "https://torrents-csv.com/service/search",
-                params={"q": query, "size": min(limit, 50), "type": "torrent"},
+                params={
+                    "q": _media_provider_query(query),
+                    "size": min(limit, 50),
+                    "type": "torrent",
+                },
                 headers={"Accept": "application/json", "User-Agent": "TorrentStudio/1.0"},
             )
             response.raise_for_status()
@@ -2611,7 +2754,7 @@ async def search_apibay(query: str, limit: int) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=SEARCH_SOURCE_TIMEOUT_SECONDS, follow_redirects=True) as client:
             response = await client.get(
                 "https://apibay.org/q.php",
-                params={"q": query, "cat": "0"},
+                params={"q": _media_provider_query(query), "cat": "0"},
                 headers={"Accept": "application/json", "User-Agent": "TorrentStudio/1.0"},
             )
             response.raise_for_status()
@@ -2761,90 +2904,176 @@ def _title_relevance(title: str, query: str) -> tuple[int, int]:
     return (0, 0)
 
 
-async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool = True) -> list[dict[str, Any]]:
-    """Fast media-only search.
+def _media_provider_queries(value: str) -> list[str]:
+    """Build a tiny title-variant set without exploding provider traffic.
 
-    1337x is still tried first, but it is no longer allowed to block or make
-    the whole search fail. Knaben runs concurrently as the fast aggregator
-    path, then YTS/EZTV are used only when the combined result set is small.
+    The first query is canonicalized (e.g. Spider-Man -> Spider Man). A second
+    spelling is used only when the fast path returns too few usable results.
+    For long titles, a third short anchor can recover indexers that struggle
+    with punctuation while local filtering still requires the full user query.
     """
-    query = re.sub(r"\s+", " ", query.strip())
-    if not query:
-        return []
-    limit = min(max(int(limit or 50), 1), 50)
-    cache_key = (query.lower(), limit)
-    now = time.monotonic()
-    cached = _search_cache.get(cache_key)
-    if cached and now - cached[0] < SEARCH_CACHE_SECONDS:
-        return cached[1]
+    title, _season, _episode = _media_search_parts(value)
+    _year, languages = _search_query_constraints(value)
 
+    raw_title = title
+    for language in sorted(languages, key=len, reverse=True):
+        raw_title = re.sub(
+            rf"(?<![a-z]){re.escape(language)}(?![a-z])",
+            " ",
+            raw_title,
+            flags=re.I,
+        )
+    raw_title = re.sub(r"\s+", " ", raw_title).strip()
+
+    canonical = _media_provider_query(value)
+    variants: list[str] = []
+    for candidate in (canonical, raw_title):
+        candidate = re.sub(r"\s+", " ", candidate or "").strip()
+        if candidate and candidate.lower() not in {x.lower() for x in variants}:
+            variants.append(candidate)
+
+    tokens = _search_tokens(raw_title)
+    if len(tokens) >= 4:
+        anchor = " ".join(tokens[:3])
+        if anchor and anchor.lower() not in {x.lower() for x in variants}:
+            variants.append(anchor)
+
+    return variants[:3]
+
+
+def _search_cache_key(query: str) -> str:
+    return re.sub(r"\s+", " ", query.strip()).lower()
+
+
+def _trim_search_cache() -> None:
+    while len(_search_cache) > max(10, SEARCH_CACHE_MAX_ENTRIES):
+        oldest_key = min(
+            _search_cache.items(),
+            key=lambda pair: pair[1][0],
+        )[0]
+        _search_cache.pop(oldest_key, None)
+
+
+async def _search_1337x_uncached(
+    query: str,
+    allow_series_fallback: bool = True,
+) -> list[dict[str, Any]]:
+    """Perform one bounded live media search.
+
+    This is intentionally conservative for Render Free: only the primary
+    1337x/Knaben pair runs on the first pass. More expensive alternate queries
+    and specialist providers are activated only when fewer than 8 usable
+    results survive the hard media and 100 MB-2 GB gates.
+    """
+    limit = 50
     kind = _search_media_kind(query)
+    variants = _media_provider_queries(query)
+    primary_provider_query = variants[0] if variants else _media_provider_query(query)
 
-    async def run_1337x():
+    async def run_1337x(provider_query: str):
         try:
             return await asyncio.wait_for(
                 search_1337x_direct(
                     query,
-                    limit=min(limit, 20),
+                    limit=20,
                     pages=2,
                     category="TV" if kind == "tv" else None,
+                    provider_query=provider_query,
                 ),
-                timeout=max(3.0, SEARCH_TOTAL_TIMEOUT_SECONDS + 1.0),
+                timeout=max(2.5, SEARCH_TOTAL_TIMEOUT_SECONDS),
             )
         except Exception as exc:
-            logger.info("1337x primary failed for '%s': %s", query, exc)
+            logger.info("1337x search failed for '%s' using '%s': %s", query, provider_query, exc)
             return []
 
-    async def run_knaben():
+    async def run_knaben(provider_query: str):
         try:
-            return await search_knaben(query, min(max(limit, 20), 50))
+            return await search_knaben(
+                query,
+                50,
+                provider_query=provider_query,
+            )
         except Exception as exc:
-            logger.info("Knaben fast search failed for '%s': %s", query, exc)
+            logger.info("Knaben search failed for '%s' using '%s': %s", query, provider_query, exc)
             return []
 
-    # Do not serialize the two network paths. 1337x can be slow/unavailable
-    # while Knaben can still return a useful seed-sorted media list quickly.
     primary_1337x, primary_knaben = await asyncio.gather(
-        run_1337x(),
-        run_knaben(),
+        run_1337x(primary_provider_query),
+        run_knaben(primary_provider_query),
         return_exceptions=False,
     )
 
     results: list[dict[str, Any]] = []
-    for item in [*primary_1337x, *primary_knaben]:
-        if _search_quality_filter(item, query):
-            results.append(item)
 
-    # Specialist providers are only used when the combined fast path has
-    # fewer than 8 good results. This keeps normal searches quick and avoids
-    # flooding the UI with weak/duplicate results.
+    def add_filtered(items: Any) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if _search_quality_filter(item, query):
+                results.append(item)
+
+    add_filtered(primary_1337x)
+    add_filtered(primary_knaben)
+
+    # When the primary title spelling cannot get enough usable hits, retry
+    # with the alternate spelling and a short anchor in parallel. This is the
+    # cheap way to handle Spider-Man/Spiderman-style provider differences
+    # without always doubling Render traffic.
     if allow_series_fallback and len(results) < min(8, limit):
-        fallback_tasks = [
-            asyncio.create_task(search_torrents_csv(query, min(limit, 50))),
-            asyncio.create_task(search_apibay(query, min(limit, 50))),
-        ]
-        if kind in {"tv", "both"}:
-            fallback_tasks.append(asyncio.create_task(search_tv_eztv(query, min(limit, 20))))
-        if kind == "both":
-            fallback_tasks.append(asyncio.create_task(search_yts_movies(query, min(limit, 20))))
+        secondary_queries = variants[1:3]
 
-        if fallback_tasks:
-            values = await asyncio.gather(*fallback_tasks, return_exceptions=True)
-            for value in values:
-                if isinstance(value, dict):
-                    value = value.get("results", [])
-                if not isinstance(value, list):
-                    continue
-                for item in value:
-                    if not _search_quality_filter(item, query):
-                        continue
-                    # YTS is a movie specialist. Require an exact or prefix
-                    # title match so a query such as "Lanterns" cannot turn
-                    # into unrelated movies whose titles merely contain it.
-                    if str(item.get("indexer") or "").lower() == "yts.mx":
-                        if _title_relevance(str(item.get("title") or ""), query)[0] < 2:
-                            continue
-                    results.append(item)
+        variant_tasks = [
+            asyncio.create_task(run_1337x(provider_query))
+            for provider_query in secondary_queries
+        ]
+        variant_tasks.extend(
+            asyncio.create_task(run_knaben(provider_query))
+            for provider_query in secondary_queries
+        )
+
+        fallback_tasks: list[asyncio.Task] = [
+            asyncio.create_task(
+                search_torrents_csv(
+                    query,
+                    min(limit, 50),
+                )
+            ),
+            asyncio.create_task(
+                search_apibay(
+                    query,
+                    min(limit, 50),
+                )
+            ),
+        ]
+
+        if kind in {"tv", "both"}:
+            fallback_tasks.append(
+                asyncio.create_task(
+                    asyncio.wait_for(
+                        search_tv_eztv(query, min(limit, 20)),
+                        timeout=SEARCH_SOURCE_TIMEOUT_SECONDS + 0.5,
+                    )
+                )
+            )
+        if kind == "both":
+            fallback_tasks.append(
+                asyncio.create_task(
+                    asyncio.wait_for(
+                        search_yts_movies(query, min(limit, 20)),
+                        timeout=SEARCH_SOURCE_TIMEOUT_SECONDS + 0.5,
+                    )
+                )
+            )
+
+        values = await asyncio.gather(
+            *(variant_tasks + fallback_tasks),
+            return_exceptions=True,
+        )
+        for value in values:
+            if isinstance(value, list):
+                add_filtered(value)
+            elif isinstance(value, dict):
+                add_filtered(value.get("results", []))
 
     merged: dict[str, dict[str, Any]] = {}
     for item in results:
@@ -2862,29 +3091,100 @@ async def search_1337x(query: str, limit: int = 50, allow_series_fallback: bool 
     results.sort(
         key=lambda item: (
             _title_relevance(str(item.get("title") or ""), query)[0],
+            1 if int(item.get("seeders") or 0) > 0 else 0,
             int(item.get("seeders") or 0),
             int(item.get("leechers") or 0),
-            _title_relevance(str(item.get("title") or ""), query)[1],
+            str(item.get("publishDate") or ""),
         ),
         reverse=True,
     )
-    results = results[:limit]
 
-    if results:
-        _search_cache[cache_key] = (now, results)
-        if len(_search_cache) > 100:
-            oldest = min(_search_cache.items(), key=lambda pair: pair[1][0])[0]
-            _search_cache.pop(oldest, None)
+    return results[:limit]
 
-    logger.info(
-        "Media search '%s': %d results (1337x=%d, knaben=%d, kind=%s)",
-        query,
-        len(results),
-        len(primary_1337x),
-        len(primary_knaben),
-        kind,
-    )
-    return results
+
+async def search_1337x(
+    query: str,
+    limit: int = 50,
+    allow_series_fallback: bool = True,
+) -> list[dict[str, Any]]:
+    """Fast media-only search with stale cache and in-flight request sharing."""
+    query = re.sub(r"\s+", " ", query.strip())
+    if not query:
+        return []
+
+    limit = min(max(int(limit or 50), 1), 50)
+    cache_key = _search_cache_key(query)
+    now = time.monotonic()
+
+    cached = _search_cache.get(cache_key)
+    if cached:
+        cached_at, cached_results = cached
+        age = max(0.0, now - cached_at)
+        ttl = SEARCH_EMPTY_CACHE_SECONDS if not cached_results else SEARCH_CACHE_SECONDS
+
+        if age < ttl:
+            return cached_results[:limit]
+
+        if age < SEARCH_CACHE_STALE_SECONDS:
+            # Serve stale results immediately and refresh only once per query.
+            existing = _search_inflight.get(cache_key)
+            if existing is None or existing.done():
+                refresh = asyncio.create_task(
+                    _search_1337x_uncached(
+                        query,
+                        allow_series_fallback=allow_series_fallback,
+                    )
+                )
+                _search_inflight[cache_key] = refresh
+
+                def _finish_refresh(task: asyncio.Task, key: str = cache_key):
+                    _search_inflight.pop(key, None)
+                    if task.cancelled():
+                        return
+                    try:
+                        refreshed = task.result()
+                    except Exception as exc:
+                        logger.info("Background search refresh failed for '%s': %s", query, exc)
+                        return
+                    _search_cache[key] = (time.monotonic(), refreshed)
+                    _trim_search_cache()
+
+                refresh.add_done_callback(_finish_refresh)
+            return cached_results[:limit]
+
+    # Share the same live request among concurrent users. This is particularly
+    # useful on Render Free where multiple browser tabs/devices can otherwise
+    # fan out identical provider requests.
+    task = _search_inflight.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _search_1337x_uncached(
+                query,
+                allow_series_fallback=allow_series_fallback,
+            )
+        )
+        _search_inflight[cache_key] = task
+
+    try:
+        results = await task
+    except asyncio.CancelledError:
+        # The provider task may still be useful to other callers; do not leave
+        # a dead task in the inflight map.
+        if _search_inflight.get(cache_key) is task:
+            _search_inflight.pop(cache_key, None)
+        raise
+    except Exception as exc:
+        if _search_inflight.get(cache_key) is task:
+            _search_inflight.pop(cache_key, None)
+        logger.warning("Media search failed for '%s': %s", query, exc)
+        return cached[1][:limit] if cached else []
+
+    if _search_inflight.get(cache_key) is task:
+        _search_inflight.pop(cache_key, None)
+
+    _search_cache[cache_key] = (time.monotonic(), results)
+    _trim_search_cache()
+    return results[:limit]
 
 def parse_size(value: str) -> int:
     m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB|TB)", value or "", re.I)
