@@ -2241,10 +2241,11 @@ async def search_1337x_direct(
 
 async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]:
     """Search YTS directly so movie searches are not lost in aggregate ranking."""
+    movie_query, _season, _episode = _media_search_parts(query)
     movie_query = re.sub(
-        r"\b(?:19|20)\d{2}\b|\b(?:2160p|1440p|1080p|720p|480p|4k|8k)\b|\b(?:webrip|web-dl|bluray|brrip|x264|x265|h264|h265|hevc|hdr)\b",
+        r"\b(?:hindi|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|dual\s+audio|multi\s+audio|dubbed|dub)\b",
         " ",
-        query,
+        movie_query,
         flags=re.I,
     )
     movie_query = re.sub(r"\s+", " ", movie_query).strip()
@@ -2446,6 +2447,9 @@ async def search_knaben(query: str, limit: int = 100) -> list[dict[str, Any]]:
     if not title_query:
         return []
 
+    # Search the provider by the actual title only. Qualifiers such as year
+    # and language are applied locally so "Spider-Man 2026" does not get
+    # reduced to an unqualified search that can return old movies.
     target_tokens = _search_tokens(title_query)
     # Keep the full Knaben candidate pool. The previous working Vercel
     # implementation requested 300 before applying local filtering.
@@ -2657,27 +2661,75 @@ def _search_media_kind(query: str) -> str:
     return "both"
 
 
+def _search_query_constraints(value: str) -> tuple[int | None, list[str]]:
+    """Extract constraints that should affect matching but not title search."""
+    years = re.findall(r"\b((?:19|20)\d{2})\b", value)
+    year = int(years[-1]) if years else None
+
+    language_aliases = (
+        "hindi", "tamil", "telugu", "malayalam", "kannada",
+        "bengali", "marathi", "punjabi", "gujarati", "urdu",
+        "dual audio", "multi audio", "dubbed", "dub",
+    )
+    lower = value.lower()
+    languages = [term for term in language_aliases if re.search(
+        rf"(?<![a-z]){re.escape(term)}(?![a-z])", lower
+    )]
+    return year, languages
+
+
+def _constraint_matches_title(title: str, query: str) -> bool:
+    """Match year/language qualifiers without making normal title search brittle."""
+    year, languages = _search_query_constraints(query)
+    normalized = _normalize_title(title)
+    lower = title.lower()
+
+    if year is not None:
+        title_years = {int(value) for value in re.findall(r"\b((?:19|20)\d{2})\b", title)}
+        if year not in title_years:
+            return False
+
+    for language in languages:
+        if language not in lower and language.replace(" ", "") not in normalized.replace(" ", ""):
+            return False
+
+    return True
+
+
 def _search_quality_filter(item: dict[str, Any], query: str) -> bool:
-    """Hard media/size gate plus strong title relevance."""
+    """Hard media/size gate plus title and qualifier relevance."""
     title = str(item.get("title") or "").strip()
     if not title:
         return False
+
     normalized = _normalize_title(title)
     compact = normalized.replace(" ", "")
     query_title, season, episode = _media_search_parts(query)
     target_tokens = _search_tokens(query_title)
     compact_target = "".join(target_tokens)
+
+    # Punctuation and spacing are intentionally ignored, so both
+    # "Spiderman" and "Spider Man" match "Spider-Man".
     if target_tokens and not (
         all(token in normalized for token in target_tokens)
         or (compact_target and compact_target in compact)
     ):
         return False
+
+    if not _constraint_matches_title(title, query):
+        return False
+
     if season is not None and not _season_episode_match(title, season, episode):
         return False
+
     category = str(item.get("category") or "").lower()
-    blocked = ("game", "software", "application", "music", "audio", "book", "ebook", "porn", "xxx", "adult", "anime")
+    blocked = (
+        "game", "software", "application", "music", "audio",
+        "book", "ebook", "porn", "xxx", "adult", "anime",
+    )
     if any(word in category for word in blocked):
         return False
+
     size = int(item.get("size") or 0)
     return 100 * 1024 * 1024 <= size <= 2 * 1024 * 1024 * 1024
 
