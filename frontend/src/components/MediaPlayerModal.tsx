@@ -540,19 +540,17 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     const media = mediaRef.current;
     if (
       media &&
-      file?.externalStreamUrl &&
-      file.externalStreamUrl !== file.streamUrl &&
+      file?.streamUrl &&
+      file.externalStreamUrl &&
+      file.streamUrl !== file.externalStreamUrl &&
       !usingDirectFallback
     ) {
-      // The backend proxy is the preferred browser path, but Seedr's
-      // presentation URL is known to be directly playable by Chrome for
-      // some files. If the proxy response is rejected by the browser,
-      // immediately retry the exact Seedr presentation URL rather than
-      // showing a fatal error.
+      // The direct Seedr URL is attempted first to avoid routing video bytes
+      // through Render. If the browser cannot play it, retry the app stream.
       setUsingDirectFallback(true);
       setMediaError('');
-      setTrackNotice('Trying direct Seedr stream…');
-      media.src = file.externalStreamUrl;
+      setTrackNotice('Direct stream unavailable; trying app stream…');
+      media.src = file.streamUrl;
       media.load();
       return;
     }
