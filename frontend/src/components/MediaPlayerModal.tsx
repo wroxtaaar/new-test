@@ -93,6 +93,11 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const isVideo = file?.type === 'video';
   const mediaRef = isVideo ? videoRef : audioRef;
 
+  const rawStreamUrl = String(file?.streamUrl || '').trim();
+  const externalStreamUrl = String(file?.externalStreamUrl || '').trim();
+  const downloadUrl = String(file?.downloadUrl || '').trim();
+  const streamUrl = externalStreamUrl || rawStreamUrl || downloadUrl;
+
   useEffect(() => {
     setCurrentTime(0);
     setDuration(0);
@@ -137,10 +142,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     // Prefer Seedr's direct file URL when available. The browser then fetches
     // media bytes from Seedr instead of proxying the whole video through Render.
     // Keep the app/backend stream as a fallback for browser-incompatible sources.
-    const rawStreamUrl = String(file.streamUrl || '').trim();
-    const externalStreamUrl = String(file.externalStreamUrl || '').trim();
-    const downloadUrl = String(file.downloadUrl || '').trim();
-    const streamUrl = externalStreamUrl || rawStreamUrl || downloadUrl;
 
     // HLS audio tracks are switched through HLS.js. Do not append an audio query parameter.
     const fallbackStreamUrl = rawStreamUrl && rawStreamUrl !== streamUrl
