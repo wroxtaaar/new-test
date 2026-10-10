@@ -134,21 +134,19 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setMediaError('');
     setTrackNotice('Preparing browser stream…');
 
-    // Always have a concrete browser source. Prefer the resolved backend
-    // stream, then the direct Seedr presentation URL, then the download
-    // endpoint as the final browser-playback fallback.
+    // Prefer Seedr's direct file URL when available. The browser then fetches
+    // media bytes from Seedr instead of proxying the whole video through Render.
+    // Keep the app/backend stream as a fallback for browser-incompatible sources.
     const rawStreamUrl = String(file.streamUrl || '').trim();
-    const directBaseUrl = rawStreamUrl.includes('/api/torrents/stream/')
-      ? rawStreamUrl.replace('/api/torrents/stream/', '/api/torrents/direct-stream/')
-      : rawStreamUrl;
-    const streamUrl = rawStreamUrl || String(file.externalStreamUrl || '').trim() || String(file.downloadUrl || '').trim();
+    const externalStreamUrl = String(file.externalStreamUrl || '').trim();
+    const downloadUrl = String(file.downloadUrl || '').trim();
+    const streamUrl = externalStreamUrl || rawStreamUrl || downloadUrl;
 
     // HLS audio tracks are switched through HLS.js. Do not append an audio query parameter.
-    const fallbackStreamUrl = String(file.externalStreamUrl || '').trim() &&
-      String(file.externalStreamUrl || '').trim() !== streamUrl
-      ? String(file.externalStreamUrl || '').trim()
-      : String(file.downloadUrl || '').trim() !== streamUrl
-        ? String(file.downloadUrl || '').trim()
+    const fallbackStreamUrl = rawStreamUrl && rawStreamUrl !== streamUrl
+      ? rawStreamUrl
+      : downloadUrl && downloadUrl !== streamUrl
+        ? downloadUrl
         : '';
 
     const restoreTime = resumeTimeRef.current;
