@@ -96,6 +96,8 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const externalStreamUrl = String(file?.externalStreamUrl || '').trim();
   const downloadUrl = String(file?.downloadUrl || '').trim();
   const streamUrl = externalStreamUrl || rawStreamUrl || downloadUrl;
+  // Direct Seedr playback must never use the backend to inspect/extract embedded media tracks.
+  const isDirectSeedrStream = /^https?:\/\/(?:[^/]+\.)?seedr\.cc\//i.test(streamUrl);
 
   useEffect(() => {
     setCurrentTime(0);
@@ -296,6 +298,17 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     // hidden just because a folder also contains an .srt/.vtt file.
     const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
 
+    // In direct Seedr mode, do not ask the backend to probe the media container.
+    // That can make the VPS fetch media bytes even though playback itself is direct.
+    if (isDirectSeedrStream) {
+      setAudioTracks([]);
+      setSelectedAudioIndex(undefined);
+      setSubtitleTracks(sidecarSubtitles.map((track: any, index: number) => ({ ...track, index })));
+      setHlsSubtitleTracks([]);
+      setTracksLoading(false);
+      return () => { cancelled = true; controller.abort(); };
+    }
+
     api.getSeedrMediaInfo(fileId)
       .then(data => {
         if (cancelled || !data) return;
@@ -349,7 +362,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
       cancelled = true;
       controller.abort();
     };
-  }, [file?.id, file?.streamId, isVideo]);
+  }, [file?.id, file?.streamId, file?.streamUrl, file?.externalStreamUrl, isVideo, isDirectSeedrStream]);
 
   useEffect(() => {
     const track = subtitleTrackRef.current?.track;
@@ -695,6 +708,13 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   };
 
   const handleAudioTrackChange = (value: string) => {
+    // The direct Seedr URL already carries its own default audio. Never call
+    // /api/seedr/media/audio here: that endpoint relays extracted audio via VPS.
+    if (isDirectSeedrStream) {
+      setTrackNotice('Direct Seedr mode uses the source file’s default audio track.');
+      return;
+    }
+
     const next = Number(value);
     if (!Number.isInteger(next)) return;
 
@@ -1312,7 +1332,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
                 </div>
               )}
 
-              {audioTracks.length > 1 && !/^https?:\/\/[^/]*seedr\.cc\//i.test(streamUrl) && (
+              {audioTracks.length > 1 && !isDirectSeedrStream(
                 <label className="flex min-w-0 max-w-full items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-800/90 px-2.5 py-1.5 shadow-sm">
                   <Languages className="h-4 w-4 shrink-0 text-cyan-400" />
                   <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:inline">Audio</span>
