@@ -1023,7 +1023,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           <video
             ref={videoRef}
             crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
-            src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
+            src={usingDirectFallback ? (file.streamUrl || file.downloadUrl) : streamUrl}
             className="w-full h-32 object-contain bg-black rounded-lg"
             onTimeUpdate={onTimeUpdate}
             onSeeking={onSeeking}
@@ -1040,7 +1040,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           <audio
             ref={audioRef}
             autoPlay
-            src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
+            src={usingDirectFallback ? (file.streamUrl || file.downloadUrl) : streamUrl}
             onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onLoadedMetadata}
             onEnded={() => setIsPlaying(false)}
