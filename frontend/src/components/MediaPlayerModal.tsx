@@ -195,7 +195,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
     if (isHlsStream && isVideo && Hls.isSupported()) {
       hlsActiveRef.current = true;
-      let triedFallback = false;
 
       const startHls = (sourceUrl: string) => {
         hls?.destroy();
