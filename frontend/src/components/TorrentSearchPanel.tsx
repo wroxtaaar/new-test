@@ -128,7 +128,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
   const preparedByKeyRef = useRef(new Map<string, { files: SeedrSearchFile[] }>());
   const apiFetchRecent = (input: RequestInfo | URL, init?: RequestInit) => {
-    const base = (String(import.meta.env.VITE_API_URL || '').trim() || 'https://torrent-studio-vercel-render-seedr-26fd.onrender.com').replace(/\/+$/, '');
+    const base = API_BASE;
     const value = String(input);
     return fetch(value.startsWith('/') ? base + value : value, init);
   };
