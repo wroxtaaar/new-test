@@ -1280,7 +1280,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
               <audio
                 ref={audioRef}
-                src={file.streamUrl}
+                src={file.externalStreamUrl || file.streamUrl || file.downloadUrl}
                 onTimeUpdate={onTimeUpdate}
                 onLoadedMetadata={onLoadedMetadata}
                 onEnded={() => setIsPlaying(false)}
