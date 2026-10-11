@@ -77,7 +77,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const resumeTimeRef = useRef(0);
   const resumePlayingRef = useRef(false);
   const subtitleTrackRef = useRef<HTMLTrackElement>(null);
-  const [usingDirectFallback, setUsingDirectFallback] = useState(false);
   const hlsActiveRef = useRef(false);
   const hlsRef = useRef<Hls | null>(null);
 
@@ -99,7 +98,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setIsPlaying(true);
     setMediaError('');
     setIsSeeking(false);
-    setUsingDirectFallback(false);
     hlsActiveRef.current = false;
     const initialSubtitles = file?.subtitleTracks || [];
     setSubtitleTracks(initialSubtitles);
