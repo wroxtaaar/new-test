@@ -303,6 +303,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     // can fetch media bytes through the server even when playback is direct.
     const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
     const selectedStreamUrl = String(file.externalStreamUrl || file.streamUrl || file.downloadUrl || '').trim();
+    const isDirectSeedrStream = /^https?:\/\/(?:[^/]+\.)?seedr\.cc\//i.test(selectedStreamUrl);
     if (isDirectSeedrStream) {
       setAudioTracks([]);
       setSelectedAudioIndex(undefined);
