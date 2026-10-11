@@ -140,7 +140,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     const externalStreamUrl = String(file.externalStreamUrl || '').trim();
     const downloadUrl = String(file.downloadUrl || '').trim();
     const streamUrl = externalStreamUrl || rawStreamUrl || downloadUrl;
-    const isDirectSeedrStream = /^https?:\/\/(?:[^/]+\.)?seedr\.cc\//i.test(streamUrl);
     const fallbackStreamUrl = '';
 
     const restoreTime = resumeTimeRef.current;
@@ -304,7 +303,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     // can fetch media bytes through the server even when playback is direct.
     const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
     const selectedStreamUrl = String(file.externalStreamUrl || file.streamUrl || file.downloadUrl || '').trim();
-    const isDirectSeedrStream = /^https?:\/\/(?:[^/]+\.)?seedr\.cc\//i.test(selectedStreamUrl);
     if (isDirectSeedrStream) {
       setAudioTracks([]);
       setSelectedAudioIndex(undefined);
@@ -542,7 +540,6 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
     const media = mediaRef.current;
     const selectedStreamUrl = String(file?.externalStreamUrl || file?.streamUrl || file?.downloadUrl || '').trim();
-    const isDirectSeedrStream = /^https?:\/\/(?:[^/]+\.)?seedr\.cc\//i.test(selectedStreamUrl);
     // Never fall back to the backend proxy for a failed direct stream.
     const code = media && 'error' in media ? media.error?.code : undefined;
     setMediaError(
