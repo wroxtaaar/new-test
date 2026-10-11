@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { api, API_BASE, MovieCatalogueItem, MovieCatalogueKey, MovieCataloguePage, MovieOttAvailability, MovieOttProvider, TorrentSearchResult } from '../api/client.ts';
 import { formatBytes } from '../utils/formatters.ts';
+import searchLimits from '../../../search_limits.json';
 
 type MovieOttCardState = MovieOttAvailability | { status: 'loading' | 'error'; message?: string };
 
@@ -1010,7 +1011,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // Prefer active swarms, but don't let missing seeder metadata hide every
       // release. The regular search can display results from indexers that do
       // not report seed counts reliably.
-      const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
+      const maxSeedrFriendlySize = searchLimits.maxSizeGb * 1024 * 1024 * 1024;
       const lowQualityRelease = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
       // Indexers often return loose keyword matches. Keep a result only when the
       // actual release title contains the selected movie title as a phrase, so a
@@ -1032,7 +1033,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             String(result.downloadUrl || '').trim() ||
             String(result.sourceUrl || '').trim()
           );
-          if (!hasSource || size < 100 * 1024 * 1024 || size > maxSeedrFriendlySize) return false;
+          if (!hasSource || size < searchLimits.minSizeMb * 1024 * 1024 || size > maxSeedrFriendlySize) return false;
           if (requireActiveSeeders && (!Number.isFinite(seeders) || seeders <= 0)) return false;
           return !lowQualityRelease.test(String(result.title || '') + ' ' + String(result.quality || ''));
         });
@@ -1247,8 +1248,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   };
 
   const sortedResults = useMemo(() => {
-    // Keep only Seedr-friendly results between 100 MB and 2 GB.
-    const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
+    // Keep results within the shared configured size range.
+    const maxSeedrFriendlySize = searchLimits.maxSizeGb * 1024 * 1024 * 1024;
     // Exclude theatrical/unfinished releases regardless of provider. Keep the
     // tokens bounded so words such as "timestamp" are not mistaken for TS.
     const lowQualityRelease = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
@@ -1256,7 +1257,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       const size = Number(result.size) || 0;
       const seeders = Number(result.seeders);
       if (!Number.isFinite(seeders) || seeders <= 0) return false;
-      if (size < 100 * 1024 * 1024 || size > maxSeedrFriendlySize) return false;
+      if (size < searchLimits.minSizeMb * 1024 * 1024 || size > maxSeedrFriendlySize) return false;
       const releaseText = `${String(result.title || '')} ${String(result.quality || '')}`;
       if (lowQualityRelease.test(releaseText)) return false;
       if (resolutionFilter) {
