@@ -29,6 +29,35 @@ from pydantic import BaseModel
 
 APP_NAME = "Torrent Studio API"
 logger = logging.getLogger("torrent-studio")
+
+# TMDB provides dynamic, paginated movie discovery. Credentials stay server-side;
+# use a free developer key for non-commercial use or the API Read Access Token.
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
+TMDB_READ_ACCESS_TOKEN = (
+    os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()
+    or os.getenv("TMDB_BEARER_TOKEN", "").strip()
+)
+TMDB_API_BASE = "https://api.themoviedb.org/3"
+WATCHMODE_API_KEY = os.getenv("WATCHMODE_API_KEY", "").strip()
+WATCHMODE_API_BASE = "https://api.watchmode.com/v1"
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+# If TMDB API connections are reset before TLS completes, pause new API attempts
+# briefly so catalogue requests fail fast and can fall back to persistent caches.
+TMDB_API_CONNECT_FAILURE_COOLDOWN_SECONDS = max(15, int(os.getenv("TMDB_API_CONNECT_FAILURE_COOLDOWN_SECONDS", "60")))
+_tmdb_api_connect_failure_until = 0.0
+TMDB_CATALOGUE_CACHE_SECONDS = max(300, int(os.getenv("TMDB_CATALOGUE_CACHE_SECONDS", str(6 * 60 * 60))))
+TMDB_COMPANY_CACHE_SECONDS = max(3600, int(os.getenv("TMDB_COMPANY_CACHE_SECONDS", str(24 * 60 * 60))))
+TMDB_CATALOGUE_CACHE_FILE = Path(os.getenv("TMDB_CATALOGUE_CACHE_FILE", "/app/data/tmdb_movie_catalogue_cache.json"))
+TMDB_OTT_CACHE_SECONDS = max(3600, int(os.getenv("TMDB_OTT_CACHE_SECONDS", str(24 * 60 * 60))))
+TMDB_OTT_CACHE_FILE = Path(os.getenv("TMDB_OTT_CACHE_FILE", "/app/data/tmdb_ott_availability_cache.json"))
+_tmdb_ott_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_tmdb_ott_inflight: dict[tuple[int, str], asyncio.Task[dict[str, Any]]] = {}
+_tmdb_movie_catalogue_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_tmdb_movie_catalogue_inflight: dict[tuple[str, int], asyncio.Task[dict[str, Any]]] = {}
+_tmdb_company_id_cache: dict[str, tuple[float, list[str]]] = {}
+_tmdb_company_inflight: dict[str, asyncio.Task[list[str]]] = {}
+_tmdb_cache_clear_last_at = 0.0
+
 GITHUB_FEEDBACK_TOKEN = os.getenv("GITHUB_FEEDBACK_TOKEN", "").strip()
 GITHUB_FEEDBACK_REPO = os.getenv("GITHUB_FEEDBACK_REPO", "wroxtaaar/new-test").strip()
 SEEDR_BASE = "https://www.seedr.cc/api/v0.1/p"
@@ -60,7 +89,7 @@ _seedr_request_token: contextvars.ContextVar[str] = contextvars.ContextVar("seed
 _seedr_request_session_id: contextvars.ContextVar[str] = contextvars.ContextVar("seedr_request_session_id", default="")
 SEARCH_STOPWORDS = {"the", "a", "an", "movie", "film", "series", "season", "episode", "web", "show", "tv"}
 TORRENT_SEARCH_API_URL = os.getenv("TORRENT_SEARCH_API_URL", "https://torrent-search-api-ujfa.onrender.com").rstrip("/")
-KNABEN_API_URL = os.getenv("KNABEN_API_URL", "https://api.knaben.org/v1").rstrip("/")
+KNABEN_API_URL = os.getenv("KNABEN_API_URL", "https://api.knaben.org/v2/search").rstrip("/")
 TORRENT_METADATA_API_URL = os.getenv("TORRENT_METADATA_API_URL", "https://torrentmeta.fly.dev").rstrip("/")
 FAST_SEARCH_TEST_URL = os.getenv("FAST_SEARCH_TEST_URL", "https://torrent-search-test.onrender.com").rstrip("/")
 SEARCH_SOURCE_TIMEOUT_SECONDS = float(os.getenv("SEARCH_SOURCE_TIMEOUT_SECONDS", "2.25"))
@@ -70,7 +99,12 @@ SEARCH_CACHE_SECONDS = float(os.getenv("SEARCH_CACHE_SECONDS", "60"))
 SEARCH_CACHE_STALE_SECONDS = float(os.getenv("SEARCH_CACHE_STALE_SECONDS", "600"))
 SEARCH_CACHE_MAX_ENTRIES = int(os.getenv("SEARCH_CACHE_MAX_ENTRIES", "75"))
 SEARCH_CACHE_MIN_RESULTS = int(os.getenv("SEARCH_CACHE_MIN_RESULTS", "8"))
-# new-test keeps the 100 MB–2 GB search window.
+# Catalogue warm-ups query many titles at once. Keep outbound provider requests bounded.
+_X1337_REQUEST_SEMAPHORE = asyncio.Semaphore(2)
+_LIMETORRENTS_REQUEST_SEMAPHORE = asyncio.Semaphore(2)
+_KNABEN_REQUEST_SEMAPHORE = asyncio.Semaphore(1)
+_YTS_REQUEST_SEMAPHORE = asyncio.Semaphore(2)
+# Search results are restricted to the Seedr-friendly 100 MB–2 GB window.
 MAX_SEARCH_RESULT_SIZE_BYTES = 2 * 1024 * 1024 * 1024
 SEARCH_COMPOUND_ALIASES = {
     "antman": "ant man",
@@ -1087,7 +1121,7 @@ async def legacy_seedr_request(
         "access_token": access_token,
         "func": str(func),
     }
-    async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0), follow_redirects=True) as client:
         response = await client.request(
             method,
             url,
@@ -1180,7 +1214,7 @@ async def legacy_seedr_list_contents(folder_id: str = "0") -> Any:
         "content_type": "folder",
         "content_id": str(folder_id),
     }
-    async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0), follow_redirects=True) as client:
         response = await client.post(
             url,
             params=params,
@@ -1235,7 +1269,7 @@ async def seedr_root_request() -> Any:
     headers = {"Accept": "application/json"}
     params = {"access_token": seedr_access_token()}
 
-    async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0), follow_redirects=True) as client:
         response = await client.get(url, headers=headers, params=params)
 
     raw = response.text
@@ -1344,7 +1378,7 @@ async def seedr_request(path: str, method: str = "GET", body: Any = None, form: 
     else:
         headers_base = {}
 
-    async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0), follow_redirects=True) as client:
         tried_tokens: list[str] = []
         # Never fall back from one browser session to another Seedr credential.
         candidates = [token]
@@ -1515,11 +1549,11 @@ def magnet_display_name(value: Any) -> str:
 
 
 def task_complete(task: dict[str, Any]) -> bool:
-    """Return True when Seedr reports a task as finished."""
+    """Return True only when Seedr reports a task as finished."""
     if not isinstance(task, dict):
         return False
 
-    # Seedr/API variants use different completion fields across versions.
+    # Explicit completion flags are authoritative.
     for key in ("completed", "complete", "finished", "done", "is_completed", "isComplete"):
         value = task.get(key)
         if isinstance(value, bool) and value:
@@ -1532,20 +1566,38 @@ def task_complete(task: dict[str, Any]) -> bool:
         or task.get("status")
         or task.get("phase")
         or ""
-    ).strip().lower()
-    if state in {"complete", "completed", "finished", "done", "success", "seeding"}:
+    ).strip().lower().replace("-", "_")
+
+    try:
+        progress = float(task.get("progress") or 0)
+    except (TypeError, ValueError):
+        progress = 0.0
+
+    # A new Prepare must be able to replace stuck, queued, paused, or
+    # metadata/seed-discovery tasks, even if the provider calls them "seeding".
+    # Keep these as unfinished unless Seedr's explicit completion flags above
+    # confirm completion. This avoids treating "Collecting Seeds" as completed.
+    active_states = {
+        "paused", "paused_dl", "pauseddl", "paused_download",
+        "queued", "queued_dl", "queueddl", "queued_download",
+        "downloading", "download", "collecting_seeds", "collecting seeds",
+        "waiting", "metadata", "fetching_metadata", "checking",
+    }
+    if state in active_states:
+        return False
+
+    completed_states = {"complete", "completed", "finished", "done", "success"}
+    if state in completed_states:
         return True
+
+    # "seeding" normally means the payload is complete, but some Seedr task
+    # variants use it for a stalled seed-discovery state without progress.
+    if state == "seeding":
+        return progress >= 100
 
     # A numeric 100% is authoritative even when the state field is absent or
     # uses a provider-specific value.
-    try:
-        if float(task.get("progress") or 0) >= 100:
-            return True
-    except (TypeError, ValueError):
-        pass
-
-    return False
-
+    return progress >= 100
 
 def seedr_task_name(task: dict[str, Any]) -> str:
     nested_torrent = task.get("torrent") if isinstance(task.get("torrent"), dict) else {}
@@ -2186,7 +2238,8 @@ async def search_1337x_direct(
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    minimum_size, maximum_size = 100 * 1024 * 1024, 2 * 1024 * 1024 * 1024
+    # Enforce the shared 100 MB–2 GB search window.
+    minimum_size, maximum_size = 100 * 1024 * 1024, MAX_SEARCH_RESULT_SIZE_BYTES
     categories = (
         [category]
         if category in {"Movies", "TV"}
@@ -2206,7 +2259,8 @@ async def search_1337x_direct(
             path = f"/category-search/{encoded}/{category_name}/1/"
             for host in X1337_HOSTS:
                 try:
-                    response = await client.get(f"https://{host}{path}")
+                    async with _X1337_REQUEST_SEMAPHORE:
+                        response = await client.get(f"https://{host}{path}")
                     if response.status_code < 400 and _x1337_rows(response.text):
                         return f"https://{host}", response.text
                 except httpx.HTTPError:
@@ -2231,7 +2285,8 @@ async def search_1337x_direct(
 
             async def fetch_generic(url: str) -> str:
                 try:
-                    response = await client.get(url)
+                    async with _X1337_REQUEST_SEMAPHORE:
+                        response = await client.get(url)
                     if response.status_code < 400 and _x1337_rows(response.text):
                         return response.text
                 except httpx.HTTPError:
@@ -2273,7 +2328,8 @@ async def search_1337x_direct(
                 if kind == "normal":
                     return value
                 try:
-                    response = await client.get(value)
+                    async with _X1337_REQUEST_SEMAPHORE:
+                        response = await client.get(value)
                     if response.status_code < 400 and _x1337_rows(response.text):
                         return response.text
                 except httpx.HTTPError:
@@ -2408,44 +2464,25 @@ async def search_1337x_direct(
         candidates = candidates[:min(max(limit, 1), 20)]
 
         async def fetch_detail(row):
-            try:
-                response = await client.get(base_for_row(row) + row["path"])
-                response.raise_for_status()
-            except (httpx.HTTPError, ValueError):
-                return None
-
-            match = re.search(
-                r"""(?:href|data-href)=[\"'](magnet:\?xt=urn:btih:[^\"']+)[\"']""",
-                response.text,
-                re.IGNORECASE,
-            )
-            if match:
-                magnet = unescape(match.group(1))
-            else:
-                match = re.search(
-                    r"magnet:\?xt=urn:btih:[^\"'< >\s]+".replace(" ", ""),
-                    response.text,
-                    re.IGNORECASE,
-                )
-                if not match:
-                    return None
-                magnet = unescape(match.group(0))
-
-            h = info_hash(magnet)
+            # Keep useful listing results even when the provider's detail page
+            # is slow or blocks server-side requests. Magnets are resolved on
+            # demand by /api/search/resolve-magnet when a user clicks Prepare.
+            detail_url = base_for_row(row) + row["path"]
             return {
-                "guid": f"1337x-{h or row['path']}",
+                "guid": "1337x-" + hashlib.sha1(detail_url.encode("utf-8")).hexdigest()[:20],
                 "title": row["title"],
                 "size": int(row["size_bytes"]),
-                "seeders": int(row["seeders"] or 0),
-                "leechers": int(row["leechers"] or 0),
+                "seeders": int(row.get("seeders") or 0),
+                "leechers": int(row.get("leechers") or 0),
                 "indexer": "1337x",
                 "protocol": "torrent",
                 "publishDate": "",
-                "magnetUrl": magnet,
-                "infoHash": h,
-                "downloadUrl": magnet,
-                "infoUrl": base_for_row(row) + row["path"],
-                "sourceUrl": base_for_row(row) + row["path"],
+                "magnetUrl": None,
+                "infoHash": "",
+                "downloadUrl": None,
+                "infoUrl": detail_url,
+                "sourceUrl": detail_url,
+                "descriptorUrl": "",
                 "category": row.get("media_category") or "Video",
             }
 
@@ -2476,11 +2513,12 @@ async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]
     async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
         for host in YTS_API_HOSTS:
             try:
-                response = await client.get(
-                    f"https://{host}/api/v2/list_movies.json",
-                    params={"query_term": movie_query, "limit": "50"},
-                    headers={"Accept": "application/json"},
-                )
+                async with _YTS_REQUEST_SEMAPHORE:
+                    response = await client.get(
+                        f"https://{host}/api/v2/list_movies.json",
+                        params={"query_term": movie_query, "limit": "50"},
+                        headers={"Accept": "application/json"},
+                    )
                 response.raise_for_status()
                 parsed = response.json()
                 if isinstance(parsed, dict):
@@ -2667,66 +2705,333 @@ async def search_tv_eztv(query: str, limit: int = 30) -> list[dict[str, Any]]:
     return results[:limit]
 
 
+
+LIMETORRENTS_HOSTS = tuple(
+    host.strip()
+    for host in os.getenv(
+        "LIMETORRENTS_HOSTS",
+        "www.limetorrents.fun,www.limetorrents.lol,limetorrents.fun,limetorrents.lol",
+    ).split(",")
+    if host.strip()
+)
+
+
+def _limetorrents_rows(html_text: str, base_url: str) -> list[dict[str, str]]:
+    """Parse LimeTorrents rows using the current table structure."""
+    soup = BeautifulSoup(html_text or "", "html.parser")
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    # LimeTorrents result rows may be direct children of table.table2
+    # rather than tbody children, and may not carry a bgcolor attribute.
+    # Avoid relying on either HTML detail.
+    for row in soup.select("table.table2 tr"):
+        # Prefer the visible title link over the empty download-icon link.
+        title_anchor = row.select_one(".tt-name a[href*='-torrent-']")
+        if title_anchor is None:
+            title_anchor = next(
+                (
+                    anchor
+                    for anchor in row.select(".tt-name a[href]")
+                    if anchor.get_text(" ", strip=True)
+                    and str(anchor.get("href") or "").lower().endswith(".html")
+                ),
+                None,
+            )
+        if title_anchor is None:
+            continue
+
+        title = title_anchor.get_text(" ", strip=True)
+        detail_href = str(title_anchor.get("href") or "").strip()
+        if not title or not detail_href:
+            continue
+
+        # LimeTorrents exposes the BTIH hash on the small download-icon
+        # link in the listing row. Prefer this hash so Prepare can submit a
+        # real magnet to Seedr without relying only on a detail-page scrape.
+        download_anchor = (
+            row.select_one(".tt-name a.csprite_dl14[href]")
+            or row.select_one(".tt-name a[href*='/download/']")
+        )
+        download_href = str(download_anchor.get("href") or "").strip() if download_anchor else ""
+        hash_match = re.search(
+            r"(?i)(?<![0-9a-f])([0-9a-f]{40})(?![0-9a-f])",
+            download_href,
+        )
+        torrent_hash = hash_match.group(1).lower() if hash_match else ""
+        magnet_url = ""
+        if torrent_hash:
+            magnet_url = f"magnet:?xt=urn:btih:{torrent_hash}&dn={quote(title, safe='')}"
+            for tracker in (
+                "udp://tracker.opentrackr.org:1337/announce",
+                "udp://open.stealth.si:80/announce",
+            ):
+                magnet_url += "&tr=" + quote(tracker, safe="")
+
+        seed_cell = row.select_one(".tdseed")
+        leech_cell = row.select_one(".tdleech")
+        seeders = "0"
+        leechers = "0"
+        if seed_cell is not None:
+            match = re.search(r"\d[\d,]*", seed_cell.get_text(" ", strip=True))
+            if match:
+                seeders = match.group(0).replace(",", "")
+        if leech_cell is not None:
+            match = re.search(r"\d[\d,]*", leech_cell.get_text(" ", strip=True))
+            if match:
+                leechers = match.group(0).replace(",", "")
+
+        cells = row.find_all("td")
+        size = ""
+        if len(cells) >= 3:
+            match = re.search(r"([\d.]+\s*[KMGT]i?B)", cells[2].get_text(" ", strip=True), re.I)
+            if match:
+                size = match.group(1)
+        if not size:
+            match = re.search(r"([\d.]+\s*[KMGT]i?B)", row.get_text(" ", strip=True), re.I)
+            if match:
+                size = match.group(1)
+
+        source_url = urljoin(base_url.rstrip("/") + "/", detail_href.lstrip("/"))
+        key = source_url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        rows.append({
+            "title": title,
+            "detail_url": source_url,
+            "size": size,
+            "seeders": seeders,
+            "leechers": leechers,
+            "info_hash": torrent_hash,
+            "magnet_url": magnet_url,
+        })
+
+    return rows
+
+
+async def search_limetorrents(
+    query: str,
+    limit: int = 50,
+    pages: int = 2,
+) -> list[dict[str, Any]]:
+    """Search LimeTorrents concurrently across mirrors; resolve magnets on demand."""
+    _title_query, season, episode = _media_search_parts(query)
+    provider_query = _media_provider_query(query)
+
+    # Keep language terms in the provider query so "thor hindi" searches the
+    # Hindi result pool directly instead of searching only for "thor".
+    _, languages = _search_query_constraints(query)
+    language_terms = [
+        language
+        for language in languages
+        if language in {
+            "hindi", "tamil", "telugu", "malayalam", "kannada",
+            "bengali", "marathi", "punjabi", "gujarati", "urdu",
+        }
+    ]
+    provider_query = re.sub(
+        r"\s+",
+        " ",
+        f"{provider_query} {' '.join(language_terms)}".strip(),
+    )
+    if not provider_query:
+        return []
+
+    category = "tv" if season is not None or episode is not None else "movies"
+    encoded = quote(provider_query, safe="")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    async with httpx.AsyncClient(
+        timeout=SEARCH_SOURCE_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers=headers,
+    ) as client:
+        async def fetch_host(host: str) -> list[tuple[str, str]]:
+            base = f"https://{host}"
+            urls = [f"{base}/search/all/{encoded}/seeds/1/"]
+            if pages > 1:
+                urls.append(f"{base}/search/all/{encoded}/seeds/2/")
+
+            async def fetch_page(url: str) -> str:
+                try:
+                    async with _LIMETORRENTS_REQUEST_SEMAPHORE:
+                        response = await client.get(url)
+                    if response.status_code < 400 and response.text:
+                        return response.text
+                except httpx.HTTPError:
+                    pass
+                return ""
+
+            bodies = await asyncio.gather(
+                *(fetch_page(url) for url in urls),
+                return_exceptions=False,
+            )
+            return [(base, body) for body in bodies if body]
+
+        # Probe all mirrors together. Previously a dead first mirror could
+        # consume the timeout sequentially before a healthy mirror was tried.
+        mirror_pages = await asyncio.gather(
+            *(fetch_host(host) for host in LIMETORRENTS_HOSTS),
+            return_exceptions=True,
+        )
+        pages_html: list[tuple[str, str]] = []
+        for value in mirror_pages:
+            if isinstance(value, list):
+                pages_html.extend(value)
+
+        raw_rows: list[dict[str, str]] = []
+        for base, html_text in pages_html:
+            raw_rows.extend(_limetorrents_rows(html_text, base))
+
+        if not raw_rows:
+            logger.warning(
+                "LimeTorrents unavailable for '%s' (hosts=%s)",
+                query,
+                ",".join(LIMETORRENTS_HOSTS),
+            )
+            return []
+
+        units = {
+            "KB": 1024, "KIB": 1024,
+            "MB": 1024**2, "MIB": 1024**2,
+            "GB": 1024**3, "GIB": 1024**3,
+            "TB": 1024**4, "TIB": 1024**4,
+        }
+
+        # Merge repeated rows from mirror domains, retaining the highest
+        # reported seed/peer counts for each title and size.
+        unique_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in raw_rows:
+            size_match = re.match(r"([\d.]+)\s*([KMGT]i?B)", row.get("size", ""), re.I)
+            if not size_match:
+                continue
+            size = int(float(size_match.group(1)) * units[size_match.group(2).upper()])
+            key = (_normalize_title(str(row.get("title") or "")), str(size))
+            candidate = {**row, "size_bytes": size}
+            previous = unique_rows.get(key)
+            if previous is None or (
+                int(candidate.get("seeders") or 0), int(candidate.get("leechers") or 0)
+            ) > (
+                int(previous.get("seeders") or 0), int(previous.get("leechers") or 0)
+            ):
+                unique_rows[key] = candidate
+
+        parsed_rows = list(unique_rows.values())
+        parsed_rows.sort(
+            key=lambda row: (
+                int(row.get("seeders") or 0),
+                int(row.get("leechers") or 0),
+            ),
+            reverse=True,
+        )
+
+        results: list[dict[str, Any]] = []
+        for row in parsed_rows[:min(max(limit, 1), 30)]:
+            detail_url = str(row.get("detail_url") or "").strip()
+            if not detail_url:
+                continue
+            results.append({
+                "guid": "limetorrents-" + hashlib.sha1(detail_url.encode("utf-8")).hexdigest()[:20],
+                "title": str(row.get("title") or ""),
+                "size": int(row.get("size_bytes") or 0),
+                "seeders": int(row.get("seeders") or 0),
+                "leechers": int(row.get("leechers") or 0),
+                "indexer": "LimeTorrents",
+                "protocol": "torrent",
+                "publishDate": "",
+                "magnetUrl": str(row.get("magnet_url") or "").strip() or None,
+                "infoHash": str(row.get("info_hash") or "").strip(),
+                "downloadUrl": str(row.get("magnet_url") or "").strip() or None,
+                "infoUrl": detail_url,
+                "sourceUrl": detail_url,
+                "descriptorUrl": "",
+                "category": "TV" if category == "tv" else "Movies",
+            })
+
+    logger.warning(
+        "LimeTorrents listing '%s': %d results; top seeders=%s",
+        query,
+        len(results),
+        ",".join(str(item.get("seeders") or 0) for item in results[:5]),
+    )
+    return results[:limit]
+
+
 async def search_knaben(
     query: str,
     limit: int = 100,
     provider_query: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search Knaben with a title-only provider query and strict local filtering."""
+    """Search Knaben API v2 using its edge-cached GET interface."""
     title_query, season, episode = _media_search_parts(query)
     title_query = re.sub(r"\s+", " ", provider_query or _media_provider_query(query)).strip()
     if not title_query:
         return []
 
-    # Search the provider by the actual title only. Qualifiers such as year
-    # and language are applied locally so "Spider-Man 2026" does not get
-    # reduced to an unqualified search that can return old movies.
     target_tokens = _search_tokens(title_query)
-    # Keep the full Knaben candidate pool. The previous working Vercel
-    # implementation requested 300 before applying local filtering.
-    request_size = 500
+    # Knaben API v2 moved search to GET /v2/search and renamed the parameters.
+    # Accept an older /v1 environment override but transparently upgrade it.
+    endpoint = KNABEN_API_URL.rstrip("/")
+    if endpoint.endswith("/v1"):
+        endpoint = endpoint[:-3] + "/v2/search"
+    elif endpoint.endswith("/v2"):
+        endpoint += "/search"
+    elif endpoint in {"https://api.knaben.org", "http://api.knaben.org"}:
+        endpoint += "/v2/search"
 
-    body = {
-        "search_type": "100%",
-        "search_field": "title",
-        "query": title_query,
-        "order_by": "seeders",
-        "order_direction": "desc",
-        "from": 0,
-        "size": request_size,
-        "hide_unsafe": True,
-        "hide_xxx": True,
-        "seconds_since_last_seen": 604800,
+    params = {
+        "q": title_query,
+        "sf": "title",
+        "o": "seeders",
+        "d": "desc",
+        "s": min(max(int(limit or 100), 1), 150),
+        "f": 0,
+        "seen": 604800,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=SEARCH_SOURCE_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                KNABEN_API_URL,
-                json=body,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-            )
+        # v2 is edge-cached, but give it a little more than the old 2.25s v1
+        # budget: the latter was consistently timing out in Home's live logs.
+        timeout = httpx.Timeout(max(7.0, SEARCH_SOURCE_TIMEOUT_SECONDS), connect=6.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with _KNABEN_REQUEST_SEMAPHORE:
+                response = await client.get(
+                    endpoint,
+                    params=params,
+                    headers={"Accept": "application/json", "User-Agent": "HomeMovieSearch/1.0"},
+                )
             response.raise_for_status()
             payload = response.json()
+            raw_hits = payload if isinstance(payload, list) else (
+                payload.get("hits", []) if isinstance(payload, dict) else []
+            )
             logger.info(
-                "Knaben HTTP %s for '%s': %d hits",
+                "Knaben v2 HTTP %s for '%s': %d hits",
                 response.status_code,
                 query,
-                len(payload.get("hits", [])) if isinstance(payload, dict) and isinstance(payload.get("hits"), list) else 0,
+                len(raw_hits) if isinstance(raw_hits, list) else 0,
             )
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("Knaben search failed for '%s': %s", query, exc)
+        # Include the exception type because timeout exceptions often have an
+        # empty string, which made the previous production logs unhelpful.
+        logger.warning(
+            "Knaben v2 search failed for '%s': %s: %r",
+            query,
+            type(exc).__name__,
+            str(exc),
+        )
         return []
 
-    hits = payload.get("hits") if isinstance(payload, dict) else None
-    if not isinstance(hits, list):
+    if not isinstance(raw_hits, list):
         return []
 
     results: list[dict[str, Any]] = []
-    for hit in hits:
+    for hit in raw_hits:
         if not isinstance(hit, dict):
             continue
 
@@ -2751,38 +3056,57 @@ async def search_knaben(
         if season is not None and not _season_episode_match(title, season, episode):
             continue
 
-        magnet = str(hit.get("magnetUrl") or "").strip()
-        h = str(hit.get("hash") or "").strip().lower()
+        magnet = str(hit.get("magnetUrl") or hit.get("magnet_url") or "").strip()
+        h = str(hit.get("hash") or hit.get("infoHash") or hit.get("info_hash") or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{40}", h):
             h = info_hash(magnet)
+        if not magnet and re.fullmatch(r"[0-9a-f]{40}", h):
+            magnet = f"magnet:?xt=urn:btih:{h}&dn={quote(title, safe='')}"
+
+        try:
+            size = int(hit.get("bytes") or hit.get("size_bytes") or hit.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        try:
+            seeders = int(hit.get("seeders") or hit.get("seeds") or 0)
+        except (TypeError, ValueError):
+            seeders = 0
+        try:
+            leechers = int(hit.get("peers") or hit.get("leechers") or 0)
+        except (TypeError, ValueError):
+            leechers = 0
+
+        detail_url = str(hit.get("details") or hit.get("infoUrl") or "").strip()
+        descriptor_url = str(hit.get("link") or hit.get("descriptorUrl") or "").strip()
+        tracker = str(hit.get("cachedOrigin") or hit.get("tracker") or hit.get("trackerId") or "Knaben").strip()
+        published = str(hit.get("date") or hit.get("publishDate") or "").strip()
 
         results.append({
             "guid": f"knaben-{h or hit.get('id') or title}",
             "title": title,
-            "size": int(hit.get("bytes") or 0),
-            "seeders": int(hit.get("seeders") or 0),
-            "leechers": int(hit.get("peers") or 0),
-            "indexer": str(hit.get("cachedOrigin") or hit.get("tracker") or "Knaben").strip(),
+            "size": size,
+            "seeders": seeders,
+            "leechers": leechers,
+            "indexer": tracker,
             "protocol": "torrent",
-            "publishDate": str(hit.get("date") or ""),
+            "publishDate": published,
             "magnetUrl": magnet or None,
             "infoHash": h if re.fullmatch(r"[0-9a-f]{40}", h, re.I) else "",
             "downloadUrl": magnet or None,
-            "infoUrl": str(hit.get("details") or ""),
-            "sourceUrl": str(hit.get("details") or ""),
-            "descriptorUrl": str(hit.get("link") or ""),
+            "infoUrl": detail_url,
+            "sourceUrl": detail_url or descriptor_url,
+            "descriptorUrl": descriptor_url,
             "category": category,
         })
 
-    target_text = _normalize_title(title_query)
     results.sort(
         key=lambda row: (
-            1 if _normalize_title(str(row["title"])).startswith(target_text) else 0,
+            1 if _normalize_title(str(row["title"])).startswith(_normalize_title(title_query)) else 0,
             int(row.get("seeders") or 0),
         ),
         reverse=True,
     )
-    logger.info("Knaben search '%s': %d relevant results", query, len(results))
+    logger.info("Knaben v2 search '%s': %d relevant results after title/category filtering", query, len(results))
     return results[:limit]
 
 
@@ -2984,17 +3308,19 @@ def _search_quality_filter(item: dict[str, Any], query: str) -> bool:
         return False
 
     normalized = _normalize_title(title)
-    compact = normalized.replace(" ", "")
-    query_title, season, episode = _media_search_parts(query)
-    target_tokens = _search_tokens(query_title)
-    compact_target = "".join(target_tokens)
+    normalized_tokens = set(normalized.split())
+    _query_title, season, episode = _media_search_parts(query)
+    # Language/codec/year qualifiers are validated separately below. The title
+    # matcher should use only the actual media title, otherwise a release using
+    # "Hin"/"Dub" instead of the exact query word "Hindi" gets discarded even
+    # though the provider found it correctly.
+    provider_title = _media_provider_query(query)
+    target_tokens = _search_tokens(provider_title)
 
-    # Punctuation and spacing are intentionally ignored, so both
-    # "Spiderman" and "Spider Man" match "Spider-Man".
-    if target_tokens and not (
-        all(token in normalized for token in target_tokens)
-        or (compact_target and compact_target in compact)
-    ):
+    # Match whole normalized tokens, not arbitrary substrings. This keeps
+    # "thor" from matching "Thoroughbreds" while allowing punctuation variants
+    # such as "Spider-Man" / "Spider Man" after title normalization.
+    if target_tokens and not all(token in normalized_tokens for token in target_tokens):
         return False
 
     if not _constraint_matches_title(title, query):
@@ -3016,17 +3342,75 @@ def _search_quality_filter(item: dict[str, Any], query: str) -> bool:
 
 
 def _title_relevance(title: str, query: str) -> tuple[int, int]:
+    """Prefer titles that begin with the searched title, ignoring leading articles."""
     normalized = _normalize_title(title)
     target = _normalize_title(_media_search_parts(query)[0])
     if not target:
         return (0, 0)
-    if normalized == target:
-        return (3, len(normalized))
-    if normalized.startswith(target + " "):
-        return (2, len(normalized))
-    if target.replace(" ", "") in normalized.replace(" ", ""):
-        return (1, len(normalized))
+
+    # Indexers often add "The" before a movie title. Do not demote an otherwise
+    # direct match just because the article is present.
+    candidate = re.sub(r"^(?:the|a|an)\s+", "", normalized)
+    if candidate == target:
+        return (4, len(target))
+    if candidate.startswith(target + " "):
+        return (3, len(target))
+
+    candidate_tokens = candidate.split()
+    target_tokens = target.split()
+    if not target_tokens:
+        return (0, 0)
+
+    # Exact consecutive title tokens anywhere in the name are better than
+    # tokens that only happen to appear in a longer related title (e.g. LEGO).
+    for index in range(max(0, len(candidate_tokens) - len(target_tokens) + 1)):
+        if candidate_tokens[index:index + len(target_tokens)] == target_tokens:
+            return (2, len(target))
+    if all(token in candidate_tokens for token in target_tokens):
+        return (1, len(target))
     return (0, 0)
+
+
+def _release_quality_score(title: str) -> int:
+    """Estimate release quality from common filename tags; not a safety/trust score."""
+    lower = unescape(str(title or "")).lower()
+    score = 0
+
+    # Resolution is a strong, broadly available signal.
+    if re.search(r"\b(?:2160p|4k|uhd)\b", lower):
+        score += 8
+    elif re.search(r"\b1080p\b", lower):
+        score += 6
+    elif re.search(r"\b720p\b", lower):
+        score += 4
+    elif re.search(r"\b480p\b", lower):
+        score += 2
+
+    # Prefer modern digital/Blu-ray sources over older disc rips.
+    if re.search(r"\b(?:blu[ .-]?ray|bdrip|brrip|remux)\b", lower):
+        score += 4
+    elif re.search(r"\b(?:web[ .-]?dl|webdl|webrip)\b", lower):
+        score += 3
+    elif re.search(r"\bhdtv\b", lower):
+        score += 2
+    elif re.search(r"\b(?:dvdrip|dvd)\b", lower):
+        score += 1
+
+    if re.search(r"\b(?:x265|h265|hevc|av1)\b", lower):
+        score += 1
+    if re.search(r"\b(?:x264|h264)\b", lower):
+        score += 1
+    if re.search(r"\b(?:hdr10?|dolby[ .]?vision|10bit)\b", lower):
+        score += 1
+
+    # Strongly demote low-quality theatrical captures and screeners without
+    # removing them, so users can still find smaller/older releases if needed.
+    if re.search(r"\b(?:hdcam|camrip|cam|telesync|telecine|ts|dvdscr|screener)\b", lower):
+        score -= 8
+    elif re.search(r"\br5\b", lower):
+        score -= 2
+
+    return score
 
 
 def _media_provider_queries(value: str) -> list[str]:
@@ -3110,7 +3494,7 @@ async def _search_1337x_uncached(
     This is intentionally conservative for Render Free: only the primary
     1337x/Knaben pair runs on the first pass. More expensive alternate queries
     and specialist providers are activated only when fewer than 8 usable
-    results survive the hard media and 100 MB-2 GB gates.
+    results survive the hard media and 100 MB-5 GB gates.
     """
     limit = 50
     kind = _search_media_kind(query)
@@ -3127,18 +3511,43 @@ async def _search_1337x_uncached(
                     category="TV" if kind == "tv" else None,
                     provider_query=provider_query,
                 ),
-                timeout=max(2.5, SEARCH_TOTAL_TIMEOUT_SECONDS),
+                timeout=max(8.0, SEARCH_TOTAL_TIMEOUT_SECONDS + 4.0),
             )
         except Exception as exc:
-            logger.info("1337x search failed for '%s' using '%s': %s", query, provider_query, exc)
+            logger.warning("1337x search failed for '%s' using '%s': %s: %r", query, provider_query, type(exc).__name__, str(exc))
+            return []
+
+    async def run_lime(provider_query: str):
+        try:
+            lime_results = await asyncio.wait_for(
+                search_limetorrents(
+                    query,
+                    limit=20,
+                    pages=1,
+                ),
+                timeout=10.0,
+            )
+            logger.warning(
+                "LimeTorrents primary source '%s': %d results",
+                query,
+                len(lime_results),
+            )
+            return lime_results
+        except Exception as exc:
+            logger.warning(
+                "LimeTorrents search failed for '%s' using '%s': %s: %s",
+                query,
+                provider_query,
+                type(exc).__name__,
+                str(exc) or "<no message>",
+            )
             return []
 
     async def run_knaben(provider_query: str):
         try:
-            return await search_knaben(
-                query,
-                50,
-                provider_query=provider_query,
+            return await asyncio.wait_for(
+                search_knaben(query, 50, provider_query=provider_query),
+                timeout=8.0,
             )
         except Exception as exc:
             logger.info("Knaben search failed for '%s' using '%s': %s", query, provider_query, exc)
@@ -3155,8 +3564,9 @@ async def _search_1337x_uncached(
         else None
     )
 
-    primary_1337x, primary_knaben = await asyncio.gather(
+    primary_1337x, primary_lime, primary_knaben = await asyncio.gather(
         run_1337x(primary_provider_query),
+        run_lime(primary_provider_query),
         run_knaben(primary_provider_query),
         return_exceptions=False,
     )
@@ -3166,7 +3576,16 @@ async def _search_1337x_uncached(
         try:
             yts_primary = await yts_task
         except Exception as exc:
-            logger.info("YTS primary search failed for '%s': %s", query, exc)
+            logger.warning("YTS primary search failed for '%s': %s: %r", query, type(exc).__name__, str(exc))
+
+    logger.warning(
+        "Raw search source counts for '%s': 1337x=%d, LimeTorrents=%d, Knaben=%d, YTS=%d",
+        query,
+        len(primary_1337x),
+        len(primary_lime),
+        len(primary_knaben),
+        len(yts_primary),
+    )
 
     results: list[dict[str, Any]] = []
 
@@ -3178,6 +3597,7 @@ async def _search_1337x_uncached(
                 results.append(item)
 
     add_filtered(primary_1337x)
+    add_filtered(primary_lime)
     add_filtered(primary_knaben)
     add_filtered(yts_primary)
 
@@ -3275,18 +3695,46 @@ async def _search_1337x_uncached(
 
     merged: dict[str, dict[str, Any]] = {}
     for item in results:
-        key = str(
-            item.get("infoHash")
-            or item.get("magnetUrl")
-            or item.get("infoUrl")
-            or item.get("title")
-            or ""
-        ).strip().lower()
-        if key:
-            merged.setdefault(key, item)
+        digest = str(item.get("infoHash") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", digest):
+            digest = info_hash(str(item.get("magnetUrl") or ""))
+
+        if re.fullmatch(r"[0-9a-f]{40}", digest, re.I):
+            key = "hash:" + digest.lower()
+        else:
+            # Listing-page results now resolve magnets lazily, so use a
+            # normalized title + size to collapse the same release returned
+            # by more than one provider.
+            normalized_title = _normalize_title(str(item.get("title") or ""))
+            if not normalized_title:
+                continue
+            size = int(item.get("size") or 0)
+            key = f"title-size:{normalized_title}|{size}"
+
+        previous = merged.get(key)
+        if previous is None or (
+            int(item.get("seeders") or 0),
+            int(item.get("leechers") or 0),
+            1 if item.get("magnetUrl") else 0,
+        ) > (
+            int(previous.get("seeders") or 0),
+            int(previous.get("leechers") or 0),
+            1 if previous.get("magnetUrl") else 0,
+        ):
+            merged[key] = item
 
     results = list(merged.values())
     enrich_movie_metadata(results)
+
+    source_counts: dict[str, int] = {}
+    for item in results:
+        source_name = str(item.get("indexer") or "unknown").strip() or "unknown"
+        source_counts[source_name] = source_counts.get(source_name, 0) + 1
+    logger.warning(
+        "Search result sources for '%s': %s",
+        query,
+        ", ".join(f"{name}={count}" for name, count in sorted(source_counts.items())),
+    )
 
     # Poster artwork is resolved lazily by /api/poster so search latency is
     # unaffected. Every normal movie result gets a cleaned poster URL,
@@ -3298,11 +3746,14 @@ async def _search_1337x_uncached(
                 if poster_url:
                     item["posterUrl"] = poster_url
 
+    # Do not let questionable seed counts from one indexer dominate the list.
+    # Rank direct title matches first, then recognizable release quality, and
+    # use swarm size/date as secondary signals within comparable results.
     results.sort(
         key=lambda item: (
             _title_relevance(str(item.get("title") or ""), query)[0],
-            1 if int(item.get("seeders") or 0) > 0 else 0,
-            int(item.get("seeders") or 0),
+            _release_quality_score(str(item.get("title") or "")),
+            min(int(item.get("seeders") or 0), 5000),
             int(item.get("leechers") or 0),
             str(item.get("publishDate") or ""),
         ),
@@ -3411,33 +3862,157 @@ def parse_size(value: str) -> int:
     return int(n * units[m.group(2).upper()])
 
 _POSTER_CACHE_SECONDS = 6 * 60 * 60
+_POSTER_NEGATIVE_CACHE_SECONDS = 2 * 60
+_CINEMETA_BASE_URL = "https://v3-cinemeta.strem.io"
 _poster_cache: dict[str, tuple[float, str | None]] = {}
+_poster_inflight: dict[str, asyncio.Task[str | None]] = {}
+
 
 def _poster_normalize_title(value: str) -> str:
-    normalized = " ".join(re.findall(r"[a-z0-9]+", str(value or "").lower())).strip()
-    return re.sub(r"^(?:the|a|an)\\s+", "", normalized)
+    value = str(value or "").lower().replace("’", "'")
+    # Torrent sources frequently vary only in punctuation/spelling. Treat
+    # possessives as the same words and normalize common title variants.
+    value = value.replace("&", " and ")
+    value = value.replace("'", "")
+    tokens = re.findall(r"[a-z0-9]+", value)
+    token_aliases = {
+        "v": "vs",
+        "vs": "vs",
+        "carribean": "caribbean",
+    }
+    tokens = [token_aliases.get(token, token) for token in tokens]
+    normalized = " ".join(tokens).strip()
+    return re.sub(r"^(?:the|a|an)\s+", "", normalized)
 
+
+
+
+def _poster_title_matches(wanted: str, candidate: str) -> bool:
+    """Accept only exact normalized titles to avoid unrelated poster artwork."""
+    return bool(wanted and candidate and wanted == candidate)
+
+def _poster_prepare_lookup_title(title: str, year: str = "") -> str:
+    """Strip common release artifacts before querying poster providers."""
+    value = str(title or "").strip()
+    clean_year = str(year or "").strip()
+
+    # The frontend can send both "(YEAR)" inside title and year=YEAR.
+    if clean_year:
+        value = re.sub(
+            rf"\s*[\(\[\-:]?\s*{re.escape(clean_year)}\s*[\)\]]?\s*$",
+            "",
+            value,
+            flags=re.I,
+        )
+
+    # Frontend poster candidates can end with a lone opening delimiter after
+    # removing release information (e.g. "Batman Returns (").
+    value = value.rstrip(" ([{").strip(" -._")
+
+    # Strip season/episode information and everything after it. This lets a
+    # series release such as "Batman The Animated Series S03E05 Time Out of Joint"
+    # resolve to the series poster instead of treating the episode title as a movie.
+    value = re.sub(
+        r"\s+S\d{1,2}(?:E\d{1,3})?\b.*$",
+        "",
+        value,
+        flags=re.I,
+    ).strip(" -._([")
+
+    return value.strip()
+
+def _poster_title_aliases(title: str, year: str = "") -> list[str]:
+    """Return provider-friendly title aliases for common torrent shorthand."""
+    clean_title = str(title or "").strip()
+    clean_year = str(year or "").strip()
+    normalized = _poster_normalize_title(clean_title)
+    aliases = [clean_title] if clean_title else []
+
+    # Torrent sources often shorten sequel titles to a franchise number.
+    # Keep this deliberately narrow so numeric titles do not create broad false matches.
+    pirates_sequels = {
+        "1": "Pirates of the Caribbean: The Curse of the Black Pearl",
+        "2": "Pirates of the Caribbean: Dead Man's Chest",
+        "3": "Pirates of the Caribbean: At World's End",
+        "4": "Pirates of the Caribbean: On Stranger Tides",
+        "5": "Pirates of the Caribbean: Dead Men Tell No Tales",
+    }
+    match = re.fullmatch(r"pirates of the caribbean ([1-5])", normalized)
+    if match:
+        alias = pirates_sequels[match.group(1)]
+        if alias not in aliases:
+            aliases.append(alias)
+
+    # Common LimeTorrents naming variants differ from catalog titles. These
+    # explicit aliases preserve exact matching and do not reopen broad substring
+    # matches that previously returned unrelated artwork.
+    known_aliases = {
+        "avengers 2": ("Avengers: Age of Ultron", "2015"),
+        "marvels the avengers": ("The Avengers", "2012"),
+        "marvel s the avengers": ("The Avengers", "2012"),
+        "superman the movie": ("Superman", "1978"),
+        "superman movie": ("Superman", "1978"),
+    }
+    known = known_aliases.get(normalized)
+    if known:
+        alias, expected_year = known
+        if not clean_year or clean_year == expected_year:
+            if alias not in aliases:
+                aliases.append(alias)
+
+    # Cinemeta/IMDb listings may use the film's full subtitle instead of its
+    # marketed short title. These remain exact normalized-title matches.
+    if normalized == "birds of prey" and (not clean_year or clean_year == "2020"):
+        for alias in (
+            "Birds of Prey: And the Fantabulous Emancipation of One Harley Quinn",
+            "Birds of Prey (and the Fantabulous Emancipation of One Harley Quinn)",
+        ):
+            if alias not in aliases:
+                aliases.append(alias)
+
+    return aliases
 
 def _poster_title_parts(raw_title: str) -> tuple[str, str]:
-    """Extract a clean movie title/year from a torrent release name."""
+    """Extract the movie title/year while removing common release-name debris."""
     value = str(raw_title or "").replace(".", " ").replace("_", " ")
-    year_match = re.search(r"\b((?:19|20)\d{2})\b", value)
+    # Release helpers often append the real release year after the title
+    # (e.g. "Wonder Woman 1984 2020"). Prefer the last year token so a year
+    # that is part of the title is preserved.
+    year_matches = list(re.finditer(r"\b((?:19|20)\d{2})\b", value))
+    year_match = year_matches[-1] if year_matches else None
     year = year_match.group(1) if year_match else ""
 
     if year_match:
         value = value[:year_match.start()]
-    else:
+
+    # Clean bracketed tags before splitting on codec/quality markers. Doing
+    # this in the opposite order leaves a dangling "[" in titles such as
+    # "The Avengers 2 [1080p]", which then prevents an exact poster match.
+    value = re.sub(r"\[[^\]]*(?:\]|$)", " ", value)
+    value = re.sub(r"\([^)]*(?:\)|$)", " ", value)
+
+    if not year_match:
         value = re.split(
             r"\b(?:2160p|1440p|1080p|720p|576p|480p|4k|8k|"
             r"web[- ]?dl|web[- ]?rip|webrip|bluray|brrip|hdrip|"
-            r"dvdrip|cam|hdcam|x264|x265|h264|h265|hevc)\b",
+            r"dvdrip|dvd|cam|hdcam|telesync|telecine|scr|r5|r6|"
+            r"x264|x265|h264|h265|hevc|xvid|divx|dts|aac|ac3|ddp|"
+            r"eng|english|nlsub|proper|repack|remux|hdr10|hdr)\b",
             value,
             maxsplit=1,
             flags=re.I,
         )[0]
 
-    value = re.sub(r"[\[\(].*?[\]\)]", " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" -._")
+    # A few common LimeTorrents uploader tags don't have a preceding codec
+    # marker, so remove them if they remain as the final token/group.
+    value = re.sub(
+        r"\s+(?:BlueLady(?:RG)?|Jaybob|HAGGiS|Voltage|DTRG|DOCUMENT|ViSiON|"
+        r"SONiDO|SAiMORNY|LTT)$",
+        "",
+        value,
+        flags=re.I,
+    )
+    value = re.sub(r"\s+", " ", value).strip(" -._[](){}")
     return value, year
 
 
@@ -3448,42 +4023,228 @@ def _poster_url_for_release(raw_title: str) -> str:
     return f"/api/poster?{urlencode({'title': title, 'year': year})}"
 
 
-async def _poster_lookup(title: str, year: str = "") -> str | None:
+def _canonical_catalogue_poster_url(item: dict[str, Any]) -> str:
+    """Build a poster URL from canonical catalogue metadata, not a torrent filename."""
+    title = str(
+        item.get("marvelCatalogueTitle")
+        or item.get("catalogueTitle")
+        or item.get("mediaTitle")
+        or item.get("title")
+        or ""
+    ).strip()
+    if not title:
+        return ""
+    year = str(item.get("year") or "").strip()
+    params = {"title": title}
+    if year:
+        params["year"] = year
+    return "/api/poster?" + urlencode(params)
+
+
+async def _cinemeta_poster_lookup(title: str, year: str = "") -> str | None:
+    """Resolve title/year through Cinemeta's catalog, then use its stable ID metadata."""
     clean_title = str(title or "").strip()
     clean_year = str(year or "").strip()
     if not clean_title:
         return None
 
-    cache_key = f"{_poster_normalize_title(clean_title)}|{clean_year}"
-    now = time.time()
-    cached = _poster_cache.get(cache_key)
-    cache_ttl = _POSTER_CACHE_SECONDS if cached and cached[1] else 10 * 60
-    if cached and now - cached[0] < cache_ttl:
-        return cached[1]
+    title_aliases = _poster_title_aliases(clean_title, clean_year)
+    wanted_titles = [_poster_normalize_title(value) for value in title_aliases]
+    queries = []
+    for alias in title_aliases:
+        for query_value in (
+            f"{alias} {clean_year}".strip(),
+            alias,
+        ):
+            if query_value and query_value not in queries:
+                queries.append(query_value)
 
-    poster = None
     try:
-        query = quote((clean_title + " " + clean_year).strip(), safe="")
         async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
-            response = await client.get(
-                f"https://v3.sg.media-imdb.com/suggestion/titles/x/{query}.json?includeVideos=0",
-                headers={"Accept": "application/json"},
-            )
-            if response.status_code == 200:
+            for media_type in ("movie", "series"):
+                for query_value in queries:
+                    encoded = quote(query_value, safe="")
+                    response = await client.get(
+                        f"{_CINEMETA_BASE_URL}/catalog/{media_type}/top/search={encoded}.json",
+                        headers={"Accept": "application/json", "User-Agent": "TorrentStudio/1.0"},
+                    )
+                    if response.status_code != 200:
+                        continue
+
+                    data = response.json()
+                    metas = data.get("metas") if isinstance(data, dict) else None
+                    if not isinstance(metas, list):
+                        continue
+
+                    candidates: list[tuple[int, str, str]] = []
+                    for row in metas:
+                        if not isinstance(row, dict):
+                            continue
+                        name = str(row.get("name") or "").strip()
+                        candidate = _poster_normalize_title(name)
+                        poster = str(row.get("poster") or "").strip()
+                        imdb_id = str(row.get("id") or "").strip()
+                        if not name or not any(_poster_title_matches(wanted, candidate) for wanted in wanted_titles):
+                            continue
+
+                        candidate_year = str(
+                            row.get("releaseInfo")
+                            or row.get("year")
+                            or ""
+                        ).strip()
+
+                        # Once the torrent/search result gives us a year, do not
+                        # allow a different-year title just because its name is a
+                        # fuzzy/contained match (e.g. "Justice League" 2017 must
+                        # never satisfy "Justice League: War" 2014).
+                        if clean_year:
+                            candidate_year_value = candidate_year[:4]
+                            if not candidate_year_value or candidate_year_value != clean_year:
+                                continue
+
+                        score = 100
+                        if clean_year and candidate_year:
+                            if candidate_year == clean_year or candidate_year.startswith(clean_year):
+                                score += 120
+                            else:
+                                score -= 80
+                        if poster:
+                            score += 30
+                        if imdb_id.startswith("tt"):
+                            score += 10
+                        candidates.append((score, poster, imdb_id))
+
+                    if not candidates:
+                        continue
+
+                    candidates.sort(key=lambda item: item[0], reverse=True)
+                    _score, poster, imdb_id = candidates[0]
+                    if poster:
+                        return poster
+
+                    if imdb_id.startswith("tt"):
+                        meta_response = await client.get(
+                            f"{_CINEMETA_BASE_URL}/meta/{media_type}/{quote(imdb_id, safe='')}.json",
+                            headers={"Accept": "application/json", "User-Agent": "TorrentStudio/1.0"},
+                        )
+                        if meta_response.status_code == 200:
+                            meta_data = meta_response.json()
+                            meta = meta_data.get("meta") if isinstance(meta_data, dict) else None
+                            poster = str(meta.get("poster") or "").strip() if isinstance(meta, dict) else ""
+                            if poster:
+                                return poster
+    except Exception:
+        pass
+
+    return None
+
+
+async def _tmdb_poster_lookup(title: str, year: str = "") -> str | None:
+    """Resolve a movie poster from TMDB using an exact title and release-year match."""
+    if not TMDB_READ_ACCESS_TOKEN and not TMDB_API_KEY:
+        return None
+
+    clean_title = str(title or "").strip()
+    clean_year = str(year or "").strip()
+    if not clean_title:
+        return None
+
+    aliases = _poster_title_aliases(clean_title, clean_year)
+    wanted_titles = {_poster_normalize_title(alias) for alias in aliases if alias}
+    headers = {"Accept": "application/json"}
+    params_base: dict[str, Any] = {
+        "include_adult": "false",
+        "language": "en-US",
+        "page": 1,
+    }
+    if TMDB_READ_ACCESS_TOKEN:
+        headers["Authorization"] = "Bearer " + TMDB_READ_ACCESS_TOKEN
+    else:
+        params_base["api_key"] = TMDB_API_KEY
+    if clean_year.isdigit() and len(clean_year) == 4:
+        params_base["year"] = clean_year
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(4.5, connect=2.5), follow_redirects=True) as client:
+            for alias in aliases[:4]:
+                try:
+                    response = await client.get(
+                        f"{TMDB_API_BASE}/search/movie",
+                        params={**params_base, "query": alias},
+                        headers=headers,
+                    )
+                    if response.status_code != 200:
+                        continue
+                    data = response.json()
+                except (httpx.HTTPError, ValueError):
+                    continue
+
+                candidates: list[tuple[float, str]] = []
+                for row in data.get("results") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    name = str(row.get("title") or row.get("original_title") or "").strip()
+                    normalized = _poster_normalize_title(name)
+                    release_date = str(row.get("release_date") or "").strip()
+                    candidate_year = release_date[:4] if re.match(r"^\d{4}-\d{2}-\d{2}$", release_date) else ""
+                    poster_path = str(row.get("poster_path") or "").strip()
+                    if not name or not poster_path or normalized not in wanted_titles:
+                        continue
+                    if clean_year and candidate_year != clean_year:
+                        continue
+                    score = 100.0
+                    if clean_year and candidate_year == clean_year:
+                        score += 100
+                    score += float(row.get("vote_average") or 0)
+                    score += min(float(row.get("vote_count") or 0), 10000) / 1000
+                    candidates.append((score, poster_path))
+
+                if candidates:
+                    candidates.sort(key=lambda item: item[0], reverse=True)
+                    return TMDB_IMAGE_BASE + candidates[0][1]
+    except Exception as exc:
+        logger.debug("TMDB poster lookup failed for '%s (%s)': %s", clean_title, clean_year, exc)
+    return None
+
+
+async def _poster_lookup_uncached(clean_title: str, clean_year: str, cache_key: str) -> str | None:
+    now = time.time()
+    # Prefer TMDB's year-filtered movie results to prevent a similarly named
+    # title from supplying the wrong artwork. Other sources remain fallbacks.
+    poster = await _tmdb_poster_lookup(clean_title, clean_year)
+
+    try:
+        title_aliases = _poster_title_aliases(clean_title, clean_year)
+        wanted_titles = [_poster_normalize_title(value) for value in title_aliases]
+        wanted_year = clean_year
+        candidates: list[tuple[int, str]] = []
+        async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
+            for alias in title_aliases:
+                query = quote((alias + " " + clean_year).strip(), safe="")
+                response = await client.get(
+                    f"https://v3.sg.media-imdb.com/suggestion/titles/x/{query}.json?includeVideos=0",
+                    headers={"Accept": "application/json"},
+                )
+                if response.status_code != 200:
+                    continue
                 data = response.json()
-                wanted = _poster_normalize_title(clean_title)
-                wanted_year = clean_year
-                candidates: list[tuple[int, str]] = []
                 for row in data.get("d") or []:
                     if not isinstance(row, dict):
                         continue
                     image = str((row.get("i") or {}).get("imageUrl") or "").strip()
                     candidate = _poster_normalize_title(str(row.get("l") or ""))
                     candidate_year = str(row.get("y") or "")
-                    if not image or candidate != wanted:
+                    # Ignore episodes, shorts, games, and other unrelated title types.
+                    # Search suggestions can contain similarly named fan clips with
+                    # artwork that is not the poster for the requested movie/series.
+                    media_kind = str(row.get("qid") or "").lower()
+                    if media_kind not in {"movie", "tvseries", "tvminiseries", "tvmovie"}:
                         continue
-                    if wanted_year and candidate_year and candidate_year != wanted_year:
+                    if not image or not any(_poster_title_matches(wanted, candidate) for wanted in wanted_titles):
                         continue
+                    if wanted_year:
+                        if not candidate_year or candidate_year != wanted_year:
+                            continue
                     score = 100
                     if wanted_year and candidate_year == wanted_year:
                         score += 100
@@ -3491,7 +4252,7 @@ async def _poster_lookup(title: str, year: str = "") -> str | None:
                         score += 10
                     score += max(0, 20 - int(row.get("rank") or 20))
                     candidates.append((score, image))
-                if candidates:
+                if candidates and not poster:
                     candidates.sort(key=lambda pair: pair[0], reverse=True)
                     poster = candidates[0][1]
     except Exception:
@@ -3499,38 +4260,77 @@ async def _poster_lookup(title: str, year: str = "") -> str | None:
 
     if not poster:
         try:
+            title_aliases = _poster_title_aliases(clean_title, clean_year)
+            wanted_titles = [_poster_normalize_title(value) for value in title_aliases]
+            wanted_year = clean_year
+            candidates: list[tuple[int, str]] = []
             async with httpx.AsyncClient(timeout=4, follow_redirects=True) as client:
-                response = await client.get(
-                    "https://itunes.apple.com/search",
-                    params={"term": (clean_title + " " + clean_year).strip(), "limit": "25"},
-                    headers={"Accept": "application/json"},
-                )
-                if response.status_code == 200:
+                for alias in title_aliases:
+                    response = await client.get(
+                        "https://itunes.apple.com/search",
+                        params={"term": (alias + " " + clean_year).strip(), "limit": "25"},
+                        headers={"Accept": "application/json"},
+                    )
+                    if response.status_code != 200:
+                        continue
                     data = response.json()
-                    wanted = _poster_normalize_title(clean_title)
-                    wanted_year = clean_year
-                    candidates: list[tuple[int, str]] = []
                     for row in data.get("results") or []:
                         if str(row.get("kind") or "") != "feature-movie" or not row.get("artworkUrl100"):
                             continue
                         candidate = _poster_normalize_title(str(row.get("trackName") or row.get("collectionName") or ""))
                         candidate_year = str(row.get("releaseDate") or "")[:4]
-                        if candidate != wanted:
+                        if not any(_poster_title_matches(wanted, candidate) for wanted in wanted_titles):
                             continue
-                        if wanted_year and candidate_year and candidate_year != wanted_year:
-                            continue
+                        if wanted_year:
+                            if not candidate_year or candidate_year != wanted_year:
+                                continue
                         score = 100
                         if wanted_year and candidate_year == wanted_year:
                             score += 100
                         candidates.append((score, str(row["artworkUrl100"]).replace("100x100bb", "600x600bb")))
-                    if candidates:
-                        candidates.sort(key=lambda pair: pair[0], reverse=True)
-                        poster = candidates[0][1]
+                if candidates:
+                    candidates.sort(key=lambda pair: pair[0], reverse=True)
+                    poster = candidates[0][1]
         except Exception:
             pass
 
+    # Cinemeta is intentionally last: it is a metadata/identity fallback and
+    # never sits on the torrent-search critical path.
+    if not poster:
+        poster = await _cinemeta_poster_lookup(clean_title, clean_year)
+
     _poster_cache[cache_key] = (now, poster)
     return poster
+
+
+async def _poster_lookup(title: str, year: str = "") -> str | None:
+    clean_year = str(year or "").strip()
+    clean_title = _poster_prepare_lookup_title(title, clean_year)
+    if not clean_title:
+        return None
+
+    cache_key = f"{_poster_normalize_title(clean_title)}|{clean_year}"
+    now = time.time()
+    cached = _poster_cache.get(cache_key)
+    cache_ttl = _POSTER_CACHE_SECONDS if cached and cached[1] else _POSTER_NEGATIVE_CACHE_SECONDS
+    if cached and now - cached[0] < cache_ttl:
+        return cached[1]
+
+    existing = _poster_inflight.get(cache_key)
+    if existing is not None and not existing.done():
+        try:
+            return await asyncio.shield(existing)
+        except Exception:
+            return None
+
+    task = asyncio.create_task(_poster_lookup_uncached(clean_title, clean_year, cache_key))
+    _poster_inflight[cache_key] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _poster_inflight.get(cache_key) is task:
+            _poster_inflight.pop(cache_key, None)
+
 
 @app.get("/api/poster")
 async def api_poster(title: str = Query(..., min_length=1), year: str = Query("")):
@@ -3538,6 +4338,14 @@ async def api_poster(title: str = Query(..., min_length=1), year: str = Query(""
     if not poster:
         raise HTTPException(404, "Poster not found")
     return RedirectResponse(poster, status_code=302)
+
+
+@app.get("/api/poster/resolve")
+async def api_poster_resolve(title: str = Query(..., min_length=1), year: str = Query("")):
+    poster = await _poster_lookup(title, year)
+    if not poster:
+        raise HTTPException(404, "Poster not found")
+    return {"url": poster}
 
 @app.get("/")
 async def root():
@@ -3555,6 +4363,2029 @@ async def start_seedr_cleanup_worker():
 async def health():
     return {"status": "ok", "seedrConfigured": bool(current_seedr_token()), "torrentSearchApi": TORRENT_SEARCH_API_URL}
 
+@app.post("/api/search/resolve-magnet")
+async def resolve_search_magnet(body: dict[str, Any]):
+    """Resolve a provider detail page to a magnet only when the user prepares it."""
+    info_url = str(body.get("infoUrl") or body.get("info_url") or "").strip()
+    if not info_url:
+        raise HTTPException(400, "A provider detail URL is required.")
+
+    parsed = urlsplit(info_url)
+    allowed_hosts = {
+        str(host).lower().removeprefix("www.")
+        for host in (*X1337_HOSTS, *LIMETORRENTS_HOSTS)
+    }
+    hostname = str(parsed.hostname or "").lower().removeprefix("www.")
+    if parsed.scheme != "https" or hostname not in allowed_hosts:
+        raise HTTPException(400, "The provider URL is not allowed.")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, headers=headers) as client:
+            response = await client.get(info_url)
+            final_url = urlsplit(str(response.url))
+            final_host = str(final_url.hostname or "").lower().removeprefix("www.")
+            if final_url.scheme != "https" or final_host not in allowed_hosts:
+                raise HTTPException(400, "The provider redirected to an unapproved domain.")
+            response.raise_for_status()
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        logger.info("Lazy magnet resolution failed for provider URL %s: %s", info_url, exc)
+        raise HTTPException(502, "Could not reach the torrent provider. Please try another result.") from exc
+
+    # Prefer a real magnet anchor when the detail page includes one.
+    # Parsing hrefs handles HTML-escaped ampersands better than scanning the
+    # entire page for arbitrary strings.
+    page = BeautifulSoup(response.text or "", "html.parser")
+    magnet = ""
+    for anchor in page.select('a[href^="magnet:"]'):
+        candidate = unescape(str(anchor.get("href") or "")).strip()
+        if info_hash(candidate):
+            magnet = candidate
+            break
+
+    if not magnet:
+        match = re.search(
+            r"magnet:\?xt=urn:btih:[^\"<\s]+",
+            response.text,
+            re.IGNORECASE,
+        )
+        if match:
+            candidate = unescape(match.group(0))
+            if info_hash(candidate):
+                magnet = candidate
+
+    if not magnet:
+        # LimeTorrents also exposes a hash on its download-icon/.torrent URL.
+        # Recover a standard magnet when the detail page omits a magnet anchor.
+        download_anchor = (
+            page.select_one("a.csprite_dl14[href]")
+            or page.select_one("a[href*='/download/']")
+        )
+        download_href = str(download_anchor.get("href") or "").strip() if download_anchor else ""
+        hash_match = re.search(
+            r"(?i)(?<![0-9a-f])([0-9a-f]{40})(?![0-9a-f])",
+            download_href,
+        )
+        if hash_match:
+            digest = hash_match.group(1).lower()
+            title_node = page.select_one("#content h1, h1, .tt-name")
+            display_name = (
+                title_node.get_text(" ", strip=True)
+                if title_node is not None
+                else Path(parsed.path).stem.replace("-", " ")
+            )
+            magnet = f"magnet:?xt=urn:btih:{digest}&dn={quote(display_name, safe='')}"
+            for tracker in (
+                "udp://tracker.opentrackr.org:1337/announce",
+                "udp://open.stealth.si:80/announce",
+            ):
+                magnet += "&tr=" + quote(tracker, safe="")
+
+    digest = info_hash(magnet)
+    if not digest:
+        raise HTTPException(404, "The provider did not expose a usable magnet/hash for this result.")
+    return {"magnet": magnet, "infoHash": digest}
+
+
+
+# One-time Marvel catalogue. Results are shared by every visitor to this Home
+# instance and never expire; the deployment mounts /app/data on persistent VPS
+# storage so a container replacement does not force another provider crawl.
+MARVEL_CATALOGUE_VERSION = 3
+MARVEL_CATALOGUE_PATH = Path(os.getenv("MARVEL_CATALOGUE_PATH", "/app/data/marvel_catalogue.json"))
+MARVEL_MOVIE_SEARCHES: tuple[tuple[str, int], ...] = (
+    ("Spider-Man: Brand New Day", 2026),
+    ("The Fantastic Four: First Steps", 2025),
+    ("Thunderbolts", 2025),
+    ("Captain America: Brave New World", 2025),
+    ("Deadpool & Wolverine", 2024),
+    ("Venom: The Last Dance", 2024),
+    ("Kraven the Hunter", 2024),
+    ("Madame Web", 2024),
+    ("The Marvels", 2023),
+    ("Guardians of the Galaxy Vol. 3", 2023),
+    ("Spider-Man: Across the Spider-Verse", 2023),
+    ("Ant-Man and the Wasp: Quantumania", 2023),
+    ("Black Panther: Wakanda Forever", 2022),
+    ("Thor: Love and Thunder", 2022),
+    ("Doctor Strange in the Multiverse of Madness", 2022),
+    ("Morbius", 2022),
+    ("Spider-Man: No Way Home", 2021),
+    ("Venom: Let There Be Carnage", 2021),
+    ("Eternals", 2021),
+    ("Shang-Chi and the Legend of the Ten Rings", 2021),
+    ("Black Widow", 2021),
+    ("The New Mutants", 2020),
+    ("Dark Phoenix", 2019),
+    ("Spider-Man: Far From Home", 2019),
+    ("Avengers: Endgame", 2019),
+    ("Captain Marvel", 2019),
+    ("Spider-Man: Into the Spider-Verse", 2018),
+    ("Venom", 2018),
+    ("Ant-Man and the Wasp", 2018),
+    ("Deadpool 2", 2018),
+    ("Avengers: Infinity War", 2018),
+    ("Black Panther", 2018),
+    ("Thor: Ragnarok", 2017),
+    ("Logan", 2017),
+    ("Spider-Man: Homecoming", 2017),
+    ("Guardians of the Galaxy Vol. 2", 2017),
+    ("Doctor Strange", 2016),
+    ("X-Men: Apocalypse", 2016),
+    ("Deadpool", 2016),
+    ("Captain America: Civil War", 2016),
+    ("Fantastic Four", 2015),
+    ("Ant-Man", 2015),
+    ("Avengers: Age of Ultron", 2015),
+    ("X-Men: Days of Future Past", 2014),
+    ("The Amazing Spider-Man 2", 2014),
+    ("Captain America: The Winter Soldier", 2014),
+    ("Guardians of the Galaxy", 2014),
+    ("Big Hero 6", 2014),
+    ("Avengers Confidential: Black Widow & Punisher", 2014),
+    ("Iron Man: Rise of Technovore", 2013),
+    ("The Wolverine", 2013),
+    ("Iron Man 3", 2013),
+    ("The Amazing Spider-Man", 2012),
+    ("The Avengers", 2012),
+    ("Ghost Rider: Spirit of Vengeance", 2011),
+    ("X-Men: First Class", 2011),
+    ("Captain America: The First Avenger", 2011),
+    ("Thor", 2011),
+    ("Thor: Tales of Asgard", 2011),
+    ("Iron Man 2", 2010),
+    ("Planet Hulk", 2010),
+    ("X-Men Origins: Wolverine", 2009),
+    ("Hulk Vs.", 2009),
+    ("Punisher: War Zone", 2008),
+    ("The Incredible Hulk", 2008),
+    ("Iron Man", 2008),
+    ("Next Avengers: Heroes of Tomorrow", 2008),
+    ("Spider-Man 3", 2007),
+    ("Ghost Rider", 2007),
+    ("Fantastic Four: Rise of the Silver Surfer", 2007),
+    ("X-Men: The Last Stand", 2006),
+    ("Ultimate Avengers 2", 2006),
+    ("Ultimate Avengers", 2006),
+    ("Elektra", 2005),
+    ("Fantastic Four", 2005),
+    ("Man-Thing", 2005),
+    ("Spider-Man 2", 2004),
+    ("The Punisher", 2004),
+    ("Blade: Trinity", 2004),
+    ("X2: X-Men United", 2003),
+    ("Daredevil", 2003),
+    ("Hulk", 2003),
+    ("Spider-Man", 2002),
+    ("Blade II", 2002),
+    ("X-Men", 2000),
+    ("Blade", 1998),
+    ("Nick Fury: Agent of S.H.I.E.L.D.", 1998),
+    ("Generation X", 1996),
+    ("The Trial of the Incredible Hulk", 1989),
+    ("The Punisher", 1989),
+    ("The Incredible Hulk Returns", 1988),
+    ("Howard the Duck", 1986),
+    ("Captain America II: Death Too Soon", 1979),
+    ("Captain America", 1979),
+    ("Dr. Strange", 1978),
+)
+_MARVEL_CATALOGUE_CONCURRENCY = 2
+_marvel_catalogue_task: asyncio.Task | None = None
+_marvel_catalogue_retry_after = 0.0
+_marvel_catalogue_state: dict[str, Any] = {
+    "status": "idle",
+    "completed": 0,
+    "total": len(MARVEL_MOVIE_SEARCHES),
+    "resultCount": 0,
+    "error": "",
+}
+
+
+def _read_marvel_catalogue() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(MARVEL_CATALOGUE_PATH.read_text(encoding="utf-8"))
+        if (
+            isinstance(payload, dict)
+            and payload.get("version") == MARVEL_CATALOGUE_VERSION
+            and isinstance(payload.get("results"), list)
+            and payload["results"]
+        ):
+            for item in payload["results"]:
+                if isinstance(item, dict):
+                    canonical_poster = _canonical_catalogue_poster_url(item)
+                    if canonical_poster:
+                        item["posterUrl"] = canonical_poster
+            return payload
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _write_marvel_catalogue(payload: dict[str, Any]) -> None:
+    MARVEL_CATALOGUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix="marvel-catalogue-",
+            suffix=".tmp",
+            dir=str(MARVEL_CATALOGUE_PATH.parent),
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, MARVEL_CATALOGUE_PATH)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+
+
+def _marvel_result_matches_title(item: dict[str, Any], title: str, year: int) -> bool:
+    """Prevent related Marvel releases from being mislabeled as another movie."""
+    raw_title = str(item.get("title") or "").strip()
+    if not raw_title:
+        return False
+
+    actual_tokens = set(_search_tokens(raw_title))
+    expected_tokens = _search_tokens(title)
+    if expected_tokens and expected_tokens[0] in {"the", "a", "an"}:
+        expected_tokens = expected_tokens[1:]
+    if not expected_tokens or not all(token in actual_tokens for token in expected_tokens):
+        return False
+
+    # If a release explicitly carries a year, don't cross-wire remakes/sequels.
+    title_years = {
+        int(value) for value in re.findall(r"\b((?:19|20)\d{2})\b", raw_title)
+    }
+    if title_years and year not in title_years:
+        return False
+
+    metadata_year = item.get("year")
+    if metadata_year not in (None, "") and not title_years:
+        try:
+            if int(metadata_year) != year:
+                return False
+        except (TypeError, ValueError):
+            pass
+
+    return True
+
+
+def _extra_result_matches_language(item: dict[str, Any], language: str | None) -> bool:
+    """Separate English-original and Hindi/dubbed torrent releases for shared caches."""
+    normalized_language = str(language or "").strip().lower()
+    if normalized_language not in {"english", "hindi"}:
+        return True
+
+    release_text = " ".join(
+        str(item.get(field) or "")
+        for field in ("title", "quality", "audio", "language", "languages", "audioLanguage", "releaseName")
+    )
+    hindi_marker = re.compile(
+        r"\b(?:hindi|hin|dual[\s._-]*audio|multi[\s._-]*(?:audio|language)|hindi[\s._-]*(?:dubbed|audio))\b",
+        re.I,
+    )
+    other_language_marker = re.compile(
+        r"\b(?:hindi|hin|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|gujarati|urdu|"
+        r"dual[\s._-]*audio|multi[\s._-]*audio|multi[\s._-]*language|dubbed)\b",
+        re.I,
+    )
+    if normalized_language == "hindi":
+        return bool(hindi_marker.search(release_text))
+    return not bool(other_language_marker.search(release_text))
+
+
+async def _build_marvel_catalogue() -> None:
+    global _marvel_catalogue_retry_after
+    semaphore = asyncio.Semaphore(_MARVEL_CATALOGUE_CONCURRENCY)
+    poster_semaphore = asyncio.Semaphore(2)
+    rows_by_hash: dict[str, dict[str, Any]] = {}
+    found_movies: set[str] = set()
+
+    async def resolve_movie_poster(title: str, year: int) -> str:
+        async with poster_semaphore:
+            try:
+                poster = await asyncio.wait_for(
+                    _poster_lookup(title, str(year)),
+                    timeout=14.0,
+                )
+                if poster:
+                    return poster
+            except Exception as exc:
+                logger.debug("Marvel poster lookup failed for '%s (%s)': %s", title, year, exc)
+        return _poster_url_for_release(f"{title} {year}")
+
+    async def search_movie(title: str, year: int) -> list[dict[str, Any]]:
+        async with semaphore:
+            try:
+                query = f"{title} {year}"
+                # Use Home's full provider fan-out first. Some providers return
+                # zero rows for older/animated Marvel titles, so fall back to
+                # the dedicated YTS catalogue search for those titles.
+                try:
+                    primary = await asyncio.wait_for(
+                        search_1337x(query, limit=50, allow_series_fallback=False),
+                        timeout=16.0,
+                    )
+                except Exception as exc:
+                    logger.info("Marvel provider search timed out for '%s': %s", query, exc)
+                    primary = []
+
+                def validate_items(items: Any) -> list[dict[str, Any]]:
+                    accepted: list[dict[str, Any]] = []
+                    if not isinstance(items, list):
+                        return accepted
+                    for original in items:
+                        if (
+                            not isinstance(original, dict)
+                            or not _marvel_result_matches_title(original, title, year)
+                            or not _extra_result_matches_language(original, "english")
+                        ):
+                            continue
+                        item = dict(original)
+                        try:
+                            size = int(float(item.get("size") or 0))
+                            seeders = int(float(item.get("seeders") or 0))
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        if size < 100 * 1024 * 1024 or size > MAX_SEARCH_RESULT_SIZE_BYTES or seeders <= 0:
+                            continue
+                        if not any(str(item.get(key) or "").strip() for key in (
+                            "magnetUrl", "downloadUrl", "sourceUrl", "infoUrl", "infoHash"
+                        )):
+                            continue
+
+                        # This field is the stable catalogue identity, not the
+                        # raw torrent release name. Quality/magnet stay per variant.
+                        item["mediaTitle"] = title
+                        item["year"] = year
+                        if not item.get("posterUrl"):
+                            item["posterUrl"] = _poster_url_for_release(f"{title} {year}")
+                        accepted.append(item)
+                    return accepted
+
+                accepted = validate_items(primary)
+                if len(accepted) < 3:
+                    try:
+                        yts_items = await asyncio.wait_for(
+                            search_yts_movies(query, limit=20),
+                            timeout=8.0,
+                        )
+                        accepted.extend(validate_items(yts_items))
+                    except Exception as exc:
+                        logger.info("Marvel YTS fallback failed for '%s': %s", query, exc)
+
+                # Deduplicate alternatives per movie before enriching shared poster
+                # metadata. Keep the strongest copy of the same info hash.
+                per_movie: dict[str, dict[str, Any]] = {}
+                for item in accepted:
+                    digest = str(item.get("infoHash") or "").strip().lower()
+                    if not re.fullmatch(r"[0-9a-f]{40}", digest):
+                        digest = info_hash(str(item.get("magnetUrl") or item.get("downloadUrl") or ""))
+                    key = "hash:" + digest if re.fullmatch(r"[0-9a-f]{40}", digest, re.I) else (
+                        f"title-size:{_normalize_title(str(item.get('title') or ''))}|{int(item.get('size') or 0)}"
+                    )
+                    previous = per_movie.get(key)
+                    if previous is None or (
+                        int(item.get("seeders") or 0),
+                        int(item.get("leechers") or 0),
+                        1 if str(item.get("magnetUrl") or "").startswith("magnet:") else 0,
+                    ) > (
+                        int(previous.get("seeders") or 0),
+                        int(previous.get("leechers") or 0),
+                        1 if str(previous.get("magnetUrl") or "").startswith("magnet:") else 0,
+                    ):
+                        per_movie[key] = item
+
+                accepted = list(per_movie.values())
+                if accepted:
+                    found_movies.add(f"{_normalize_title(title)}|{year}")
+                    poster_url = await resolve_movie_poster(title, year)
+                    for item in accepted:
+                        item["mediaTitle"] = title
+                        item["year"] = year
+                        item["posterUrl"] = poster_url
+                        item["marvelCatalogueTitle"] = title
+
+                return accepted
+            except Exception as exc:
+                logger.info("Marvel catalogue search failed for '%s (%s)': %s", title, year, exc)
+                return []
+            finally:
+                _marvel_catalogue_state["completed"] = int(
+                    _marvel_catalogue_state.get("completed") or 0
+                ) + 1
+
+    try:
+        _marvel_catalogue_state.update({
+            "status": "building",
+            "completed": 0,
+            "total": len(MARVEL_MOVIE_SEARCHES),
+            "resultCount": 0,
+            "movieCount": 0,
+            "error": "",
+        })
+        tasks = [
+            asyncio.create_task(search_movie(title, year))
+            for title, year in MARVEL_MOVIE_SEARCHES
+        ]
+        for task in asyncio.as_completed(tasks):
+            try:
+                items = await task
+            except Exception as exc:
+                logger.info("Marvel catalogue worker failed: %s", exc)
+                items = []
+
+            for item in items:
+                digest = str(item.get("infoHash") or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{40}", digest):
+                    source = str(item.get("magnetUrl") or item.get("downloadUrl") or "")
+                    digest = info_hash(source)
+                if re.fullmatch(r"[0-9a-f]{40}", digest, re.I):
+                    key = "hash:" + digest.lower()
+                else:
+                    normalized = _normalize_title(str(item.get("title") or ""))
+                    if not normalized:
+                        continue
+                    key = f"title-size:{normalized}|{int(item.get('size') or 0)}"
+
+                previous = rows_by_hash.get(key)
+                candidate_score = (
+                    1 if str(item.get("magnetUrl") or "").startswith("magnet:") else 0,
+                    int(item.get("seeders") or 0),
+                    int(item.get("leechers") or 0),
+                )
+                previous_score = (
+                    1 if previous and str(previous.get("magnetUrl") or "").startswith("magnet:") else 0,
+                    int(previous.get("seeders") or 0) if previous else 0,
+                    int(previous.get("leechers") or 0) if previous else 0,
+                )
+                if previous is None or candidate_score > previous_score:
+                    rows_by_hash[key] = item
+            _marvel_catalogue_state["resultCount"] = len(rows_by_hash)
+            _marvel_catalogue_state["movieCount"] = len(found_movies)
+
+        results = list(rows_by_hash.values())
+        movie_count = len({
+            f"{_normalize_title(str(item.get('mediaTitle') or item.get('title') or ''))}|{item.get('year') or ''}"
+            for item in results
+        })
+        # Don't permanently cache a partial crawl like a list of just a handful
+        # of recent releases. A shared catalogue must contain a useful spread.
+        if movie_count < 12:
+            raise RuntimeError(
+                f"Only {movie_count} Marvel movie titles produced usable results; refusing to cache an incomplete catalogue."
+            )
+
+        def catalogue_sort_key(item: dict[str, Any]) -> tuple[int, float, int, str]:
+            source = str(item.get("mediaTitle") or item.get("title") or "")
+            embedded_year = re.search(r"\b((?:19|20)\d{2})\b", source)
+            try:
+                year = int(item.get("year") or (embedded_year.group(1) if embedded_year else 0))
+            except (TypeError, ValueError):
+                year = int(embedded_year.group(1)) if embedded_year else 0
+            try:
+                rating = float(item.get("rating") or 0)
+            except (TypeError, ValueError):
+                rating = 0.0
+            return (year, rating, int(item.get("seeders") or 0), source.lower())
+
+        results.sort(key=catalogue_sort_key, reverse=True)
+        payload = {
+            "version": MARVEL_CATALOGUE_VERSION,
+            "builtAt": datetime.now(timezone.utc).isoformat(),
+            "titlesQueried": len(MARVEL_MOVIE_SEARCHES),
+            "movieCount": movie_count,
+            "resultCount": len(results),
+            "results": results,
+        }
+        _write_marvel_catalogue(payload)
+        _marvel_catalogue_state.update({
+            "status": "ready",
+            "completed": len(MARVEL_MOVIE_SEARCHES),
+            "total": len(MARVEL_MOVIE_SEARCHES),
+            "resultCount": len(results),
+            "movieCount": movie_count,
+            "error": "",
+            "builtAt": payload["builtAt"],
+        })
+        logger.info(
+            "Built persistent Marvel catalogue: %d movie titles, %d torrent options from %d title searches",
+            movie_count,
+            len(results),
+            len(MARVEL_MOVIE_SEARCHES),
+        )
+    except Exception as exc:
+        _marvel_catalogue_retry_after = time.time() + 60
+        _marvel_catalogue_state.update({
+            "status": "failed",
+            "error": "The first Marvel catalogue build failed. Please try again in a minute.",
+        })
+        logger.warning("Marvel catalogue build failed: %s", exc)
+
+
+
+
+# Additional shared catalogues. Curated DC lists are long-lived; latest-release
+# catalogues are refreshed monthly and keep serving the previous good cache during refresh.
+_EXTRA_CATALOGUES: dict[str, dict[str, Any]] = {
+    "dc-live-action": {
+        "file": "dc_live_action_catalogue.json", "version": 4, "refresh_days": 36500,
+        "minimum_movies": 5, "mode": "fixed", "language": "english",
+        "exclude_titles": [
+            "The Old Guard", "The Old Guard 2", "RED 2", "The Kitchen", "RED",
+            "The Losers", "Stardust", "A History of Violence", "The League of Extraordinary Gentlemen",
+            "Road to Perdition", "Steel", "The Spirit",
+        ],
+        "titles": [
+            ("Superman", 2025), ("Supergirl", 2026), ("The Batman Part II", 2027),
+            ("Joker: Folie à Deux", 2024), ("The Batman", 2022), ("The Suicide Squad", 2021),
+            ("Batman: The Brave and the Bold", 2028), ("Clayface", 2026),
+            ("Superman: Legacy", 2025), ("The Batman - Part II", 2027),
+            ("Batman Forever", 1995), ("Batman & Robin", 1997), ("Batman: Mask of the Phantasm", 1993),
+            ("Superman III", 1983), ("Superman IV: The Quest for Peace", 1987),
+            ("Superman: The Movie", 1978),
+            ("The Crow", 1994),
+            ("The Crow", 2024), ("Spawn", 1997), ("Jonah Hex", 2010),
+            ("Superman II: The Richard Donner Cut", 2006), ("Watchmen: Chapter I", 2024),
+            ("Watchmen: Chapter II", 2024), ("Swamp Thing", 1982),
+            ("Zack Snyder's Justice League", 2021), ("Wonder Woman 1984", 2020),
+            ("Birds of Prey", 2020), ("Joker", 2019), ("Shazam!", 2019),
+            ("Aquaman", 2018), ("Aquaman and the Lost Kingdom", 2023),
+            ("Wonder Woman", 2017), ("Justice League", 2017), ("Man of Steel", 2013),
+            ("Batman v Superman: Dawn of Justice", 2016), ("Suicide Squad", 2016),
+            ("Green Lantern", 2011), ("The Dark Knight Rises", 2012),
+            ("The Dark Knight", 2008), ("Batman Begins", 2005), ("Batman Returns", 1992),
+            ("Batman", 1989), ("Superman Returns", 2006), ("Superman II", 1980),
+            ("Superman", 1978), ("Constantine", 2005), ("Watchmen", 2009),
+            ("V for Vendetta", 2005),
+            ("Catwoman", 2004), ("The Flash", 2023), ("Black Adam", 2022),
+            ("Blue Beetle", 2023), ("Shazam! Fury of the Gods", 2023),
+        ],
+    },
+    "dc-animated": {
+        "file": "dc_animated_catalogue.json", "version": 1, "refresh_days": 36500,
+        "minimum_movies": 5, "mode": "fixed",
+        "titles": [
+            ("Justice League: Crisis on Infinite Earths Part One", 2024),
+            ("Justice League: Crisis on Infinite Earths Part Two", 2024),
+            ("Justice League: Crisis on Infinite Earths Part Three", 2024),
+            ("Justice League: Warworld", 2023), ("Legion of Super-Heroes", 2023),
+            ("Batman: The Doom That Came to Gotham", 2023), ("Green Lantern: Beware My Power", 2022),
+            ("Battle of the Super Sons", 2022), ("Catwoman: Hunted", 2022),
+            ("Injustice", 2021), ("Batman: The Long Halloween Part Two", 2021),
+            ("Batman: The Long Halloween Part One", 2021), ("Justice Society: World War II", 2021),
+            ("Superman: Man of Tomorrow", 2020), ("Justice League Dark: Apokolips War", 2020),
+            ("Wonder Woman: Bloodlines", 2019), ("Batman: Hush", 2019),
+            ("Reign of the Supermen", 2019), ("The Death of Superman", 2018),
+            ("Suicide Squad: Hell to Pay", 2018), ("Batman: Gotham by Gaslight", 2018),
+            ("Justice League Dark", 2017), ("Teen Titans: The Judas Contract", 2017),
+            ("Batman and Harley Quinn", 2017), ("Justice League vs. Teen Titans", 2016),
+            ("Batman: Bad Blood", 2016), ("Justice League: Gods and Monsters", 2015),
+            ("Batman: The Killing Joke", 2016), ("Justice League: Throne of Atlantis", 2015),
+            ("Batman: Assault on Arkham", 2014), ("Son of Batman", 2014),
+            ("Justice League: The Flashpoint Paradox", 2013), ("Batman: Under the Red Hood", 2010),
+            ("Superman/Batman: Public Enemies", 2009), ("Wonder Woman", 2009),
+            ("Justice League: The New Frontier", 2008), ("Batman: Mask of the Phantasm", 1993),
+            ("Batman Beyond: Return of the Joker", 2000), ("Superman: Doomsday", 2007),
+            ("All-Star Superman", 2011), ("Batman: Year One", 2011),
+            ("Batman: The Dark Knight Returns Part 1", 2012), ("Batman: The Dark Knight Returns Part 2", 2013),
+            ("Justice League: Doom", 2012), ("Superman vs. The Elite", 2012),
+        ],
+    },
+    "latest-hollywood": {
+        "file": "latest_hollywood_catalogue.json", "version": 7, "refresh_days": 30,
+        "minimum_movies": 1, "mode": "latest", "discovery_pages": 2,
+    },
+    "latest-bollywood": {
+        "file": "latest_bollywood_catalogue.json", "version": 7, "refresh_days": 30,
+        "minimum_movies": 1, "mode": "latest", "discovery_pages": 2,
+    },
+}
+# Separate persistent caches keep English-original and Hindi/dubbed options
+# independent so neither language can pollute the other catalogue.
+_EXTRA_CATALOGUES["dc-live-action-hindi"] = {
+    **_EXTRA_CATALOGUES["dc-live-action"],
+    "file": "dc_live_action_hindi_catalogue.json",
+    "version": 4,
+    "language": "hindi",
+    "titles": list(_EXTRA_CATALOGUES["dc-live-action"]["titles"]),
+}
+_EXTRA_CATALOGUES["marvel-hindi"] = {
+    "file": "marvel_hindi_catalogue.json",
+    "version": 2,
+    "refresh_days": 36500,
+    "minimum_movies": 5,
+    "mode": "fixed",
+    "language": "hindi",
+    "titles": list(MARVEL_MOVIE_SEARCHES),
+}
+
+_EXTRA_CATALOGUE_PATHS = {
+    key: Path(os.getenv("CATALOGUE_" + key.upper().replace("-", "_") + "_PATH", "/app/data/" + config["file"]))
+    for key, config in _EXTRA_CATALOGUES.items()
+}
+
+# Bundled snapshots let ephemeral hosts (such as Render) start with the same
+# catalogues as the VPS. Seed only missing/empty data files; never replace a
+# populated persistent cache with an older image snapshot.
+_CACHE_SEED_DIR = Path(os.getenv("CACHE_SEED_DIR", "/app/cache-seed"))
+_CACHE_SEED_FILES = (
+    "dc_animated_catalogue.json",
+    "dc_live_action_catalogue.json",
+    "latest_bollywood_catalogue.json",
+    "latest_hollywood_catalogue.json",
+    "marvel_catalogue.json",
+    "marvel_hindi_catalogue.json",
+)
+
+
+def _seed_bundled_catalogue_caches() -> None:
+    destinations = {
+        "marvel_catalogue.json": MARVEL_CATALOGUE_PATH,
+        **{config["file"]: _EXTRA_CATALOGUE_PATHS[key] for key, config in _EXTRA_CATALOGUES.items()},
+    }
+    for filename in _CACHE_SEED_FILES:
+        source = _CACHE_SEED_DIR / filename
+        destination = destinations.get(filename)
+        if destination is None or not source.is_file() or source.stat().st_size == 0:
+            continue
+        try:
+            if destination.is_file() and destination.stat().st_size > 0:
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            logger.info("Seeded catalogue cache %s from bundled snapshot", filename)
+        except OSError as exc:
+            logger.warning("Could not seed catalogue cache %s: %s", filename, exc)
+
+
+app.router.add_event_handler("startup", _seed_bundled_catalogue_caches)
+_extra_catalogue_tasks: dict[str, asyncio.Task | None] = {key: None for key in _EXTRA_CATALOGUES}
+_extra_catalogue_retry_after: dict[str, float] = {}
+_extra_catalogue_states: dict[str, dict[str, Any]] = {
+    key: {"status": "idle", "completed": 0, "total": len(config.get("titles", config.get("queries", []))),
+          "resultCount": 0, "movieCount": 0, "error": ""}
+    for key, config in _EXTRA_CATALOGUES.items()
+}
+
+
+def _read_extra_catalogue(key: str) -> dict[str, Any] | None:
+    path = _EXTRA_CATALOGUE_PATHS[key]
+    config = _EXTRA_CATALOGUES[key]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload_version = payload.get("version")
+        current_version = int(config["version"])
+        # Keep a prior compatible JSON snapshot visible while a behaviour/version
+        # refresh runs, so a temporary TMDB outage never blanks a working catalogue.
+        is_current_version = payload_version == current_version
+        is_older_compatible_version = (
+            isinstance(payload_version, int) and payload_version < current_version
+        )
+        if (is_current_version or is_older_compatible_version) and isinstance(payload.get("results"), list) and payload["results"]:
+            excluded_titles = {
+                _normalize_title(value)
+                for value in (config.get("exclude_titles") or [])
+                if str(value or "").strip()
+            }
+            if excluded_titles:
+                retained_results = []
+                for item in payload["results"]:
+                    if not isinstance(item, dict):
+                        continue
+                    canonical_title = str(
+                        item.get("catalogueTitle")
+                        or item.get("mediaTitle")
+                        or item.get("title")
+                        or ""
+                    ).strip()
+                    if _normalize_title(canonical_title) not in excluded_titles:
+                        retained_results.append(item)
+                if not retained_results:
+                    return None
+                if len(retained_results) != len(payload["results"]):
+                    payload = {
+                        **payload,
+                        "results": retained_results,
+                        "resultCount": len(retained_results),
+                        "movieCount": len({
+                            _normalize_title(str(
+                                item.get("catalogueTitle") or item.get("mediaTitle") or item.get("title") or ""
+                            ))
+                            for item in retained_results
+                        }),
+                    }
+            for item in payload["results"]:
+                if isinstance(item, dict):
+                    canonical_poster = _canonical_catalogue_poster_url(item)
+                    if canonical_poster:
+                        item["posterUrl"] = canonical_poster
+            return payload
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def _write_extra_catalogue(key: str, payload: dict[str, Any]) -> None:
+    path = _EXTRA_CATALOGUE_PATHS[key]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=key + "-", suffix=".tmp",
+                                         dir=str(path.parent), delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _extra_catalogue_is_stale(key: str, payload: dict[str, Any] | None) -> bool:
+    if not payload:
+        return True
+    config = _EXTRA_CATALOGUES[key]
+    try:
+        if int(payload.get("version") or 0) != int(config["version"]):
+            return True
+    except (TypeError, ValueError):
+        return True
+    days = int(config["refresh_days"])
+    if days >= 36500:
+        return False
+    try:
+        built = datetime.fromisoformat(str(payload.get("builtAt") or "").replace("Z", "+00:00"))
+        if built.tzinfo is None:
+            built = built.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - built).total_seconds() >= days * 86400
+    except (ValueError, TypeError):
+        return True
+
+
+def _extra_item_year(item: dict[str, Any], fallback: int = 0) -> int:
+    try:
+        if item.get("year"):
+            return int(item["year"])
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r"\b((?:19|20)\d{2})\b", str(item.get("title") or ""))
+    return int(match.group(1)) if match else fallback
+
+
+async def _discover_latest_catalogue_jobs(key: str) -> list[tuple[str, int]]:
+    """Discover recently released movie titles from TMDB instead of a hardcoded query list."""
+    if key not in {"latest-hollywood", "latest-bollywood"}:
+        raise ValueError(f"Unsupported dynamic latest catalogue: {key}")
+
+    config = _EXTRA_CATALOGUES[key]
+    today = datetime.now(timezone.utc).date()
+    first_page = await api_tmdb_movie_catalogue(key, 1, released_only=True)
+    payloads: list[dict[str, Any]] = [first_page]
+    total_pages = max(1, int(first_page.get("totalPages") or 1))
+    pages_to_fetch = min(max(1, int(config.get("discovery_pages") or 2)), total_pages)
+    if pages_to_fetch > 1:
+        page_results = await asyncio.gather(
+            *(
+                api_tmdb_movie_catalogue(key, page, released_only=True)
+                for page in range(2, pages_to_fetch + 1)
+            ),
+            return_exceptions=True,
+        )
+        for page, result in enumerate(page_results, start=2):
+            if isinstance(result, dict):
+                payloads.append(result)
+            else:
+                logger.warning(
+                    "TMDB title discovery for %s page %d failed: %s",
+                    key, page, str(result) or type(result).__name__,
+                )
+
+    jobs: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    current_year = today.year
+    for payload in payloads:
+        for item in payload.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("original_title") or "").strip()
+            release_date = str(item.get("releaseDate") or "").strip()
+            if not title or not _tmdb_release_date_is_released(release_date, today.isoformat()):
+                continue
+            try:
+                year = int(item.get("year") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if year < current_year - 1 or year > current_year:
+                continue
+            identity = _normalize_title(title) + "|" + str(year)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            jobs.append((title, year))
+
+    if not jobs:
+        raise RuntimeError(
+            f"TMDB returned no released {key} titles from the current or previous year; keeping the previous catalogue."
+        )
+    logger.info(
+        "Discovered %d released movie titles for %s from TMDB across %d page(s)",
+        len(jobs), key, len(payloads),
+    )
+    return jobs
+
+
+async def _build_extra_catalogue(key: str) -> None:
+    config = _EXTRA_CATALOGUES[key]
+    state = _extra_catalogue_states[key]
+    fixed_mode = config["mode"] == "fixed"
+    jobs = list(config.get("titles", [])) if fixed_mode else []
+    semaphore = asyncio.Semaphore(2)
+    poster_semaphore = asyncio.Semaphore(2)
+    state.update({"status": "building", "completed": 0, "total": len(jobs), "resultCount": 0, "error": ""})
+    rows: dict[str, dict[str, Any]] = {}
+    found_movies: set[str] = set()
+
+    async def search_job(title: str, year: int) -> list[dict[str, Any]]:
+        async with semaphore:
+            query = f"{title} {year}".strip() if year else title
+            query_suffix = str(config.get("query_suffix") or "").strip()
+            if query_suffix:
+                query = query + " " + query_suffix
+            try:
+                if fixed_mode:
+                    if str(config.get("language") or "").strip().lower() == "hindi":
+                        # Search the movie title without appending "Hindi dubbed".
+                        # Exact-word constraints previously hid releases labelled only
+                        # "Hin", "Dual Audio" or "Multi Audio".
+                        try:
+                            items = await asyncio.wait_for(
+                                search_1337x(query, limit=50, allow_series_fallback=False),
+                                timeout=18,
+                            )
+                        except Exception as exc:
+                            logger.info("Catalogue %s primary Hindi search failed for %s: %s", key, query, exc)
+                            items = []
+
+                        matched_hindi = [
+                            item for item in items
+                            if isinstance(item, dict)
+                            and _marvel_result_matches_title(item, title, year)
+                            and _extra_result_matches_language(item, "hindi")
+                        ]
+                        if len(matched_hindi) < 3:
+                            targeted_queries = ("Hindi", "dual audio", "multi audio")
+                            targeted_calls = [
+                                asyncio.wait_for(
+                                    search_1337x_direct(
+                                        f"{title} {language_term}",
+                                        limit=50,
+                                        pages=2,
+                                        category="Movies",
+                                        provider_query=f"{title} {language_term}",
+                                    ),
+                                    timeout=18,
+                                )
+                                for language_term in targeted_queries
+                            ]
+                            targeted_results = await asyncio.gather(*targeted_calls, return_exceptions=True)
+                            for result in targeted_results:
+                                if isinstance(result, list):
+                                    items.extend(result)
+                                elif isinstance(result, Exception):
+                                    logger.info(
+                                        "Catalogue %s targeted Hindi search failed for %s: %s",
+                                        key, title, str(result) or type(result).__name__,
+                                    )
+                    else:
+                        try:
+                            items = await asyncio.wait_for(
+                                search_1337x(query, limit=50, allow_series_fallback=False),
+                                timeout=18,
+                            )
+                        except Exception as exc:
+                            logger.info("Catalogue %s primary search failed for %s: %s", key, query, exc)
+                            items = []
+                        if len(items) < 2:
+                            try:
+                                fallback = await asyncio.wait_for(search_yts_movies(query, limit=20), timeout=9)
+                                items = list(items or []) + list(fallback or [])
+                            except Exception as exc:
+                                logger.debug("Catalogue %s YTS fallback failed for %s: %s", key, query, exc)
+                else:
+                    # Search each known title directly in movie listings instead of
+                    # passing it through the broad result filter (which requires year
+                    # and all title tokens to occur literally in provider filenames).
+                    year_match = re.search(r"\b((?:19|20)\d{2})\b", query)
+                    expected_year = int(year_match.group(1)) if year_match else datetime.now(timezone.utc).year
+                    provider_query = re.sub(r"\b((?:19|20)\d{2})\b", "", query).strip(" .-_")
+                    calls = [
+                        asyncio.wait_for(
+                            search_1337x_direct(
+                                query,
+                                limit=50,
+                                pages=2,
+                                category="Movies",
+                                provider_query=provider_query,
+                            ),
+                            timeout=20,
+                        ),
+                        asyncio.wait_for(
+                            search_limetorrents(query, limit=30, pages=1),
+                            timeout=14,
+                        ),
+                    ]
+                    if key == "latest-hollywood":
+                        calls.append(asyncio.wait_for(search_yts_movies(query, limit=20), timeout=12))
+                    searched = await asyncio.gather(*calls, return_exceptions=True)
+                    items = []
+                    for value in searched:
+                        if isinstance(value, list):
+                            items.extend(value)
+                        elif isinstance(value, Exception):
+                            logger.info(
+                                "Catalogue %s provider search failed for %s: %s: %s",
+                                key, query, type(value).__name__, str(value) or "<no message>",
+                            )
+
+                accepted: list[dict[str, Any]] = []
+                for original in items or []:
+                    if not isinstance(original, dict):
+                        continue
+                    item = dict(original)
+                    raw_title = str(item.get("title") or "").strip()
+                    if not raw_title:
+                        continue
+                    if fixed_mode:
+                        if (
+                            not _marvel_result_matches_title(item, title, year)
+                            or not _extra_result_matches_language(item, config.get("language"))
+                        ):
+                            continue
+                        media_title, media_year = title, year
+                    else:
+                        normalized = _normalize_title(unescape(raw_title))
+                        query_year_match = re.search(r"\b((?:19|20)\d{2})\b", query)
+                        expected_year = int(query_year_match.group(1)) if query_year_match else datetime.now(timezone.utc).year
+                        query_title = re.sub(r"\b((?:19|20)\d{2})\b", "", query).strip(" .-_")
+                        query_tokens = [
+                            token for token in _normalize_title(query_title).split()
+                            if token not in {"the", "a", "an", "of", "and", "for", "to", "movie", "film"}
+                        ]
+                        result_tokens = set(normalized.split())
+                        # Roman-numbered sequels are frequently indexed with Arabic numerals.
+                        matched_tokens = sum(
+                            1 if token in result_tokens or (
+                                token in {"ii", "iii", "iv"} and
+                                ({"ii": "2", "iii": "3", "iv": "4"}[token] in result_tokens)
+                            ) else 0
+                            for token in query_tokens
+                        )
+                        minimum_matches = max(1, len(query_tokens) - 1) if len(query_tokens) > 2 else len(query_tokens)
+                        if query_tokens and matched_tokens < minimum_matches:
+                            continue
+
+                        category = str(item.get("category") or "").strip().lower()
+                        if (
+                            category in {"tv", "television", "series", "tv series", "television series"}
+                            or "television series" in category
+                            or re.search(r"\b(?:S\d{1,2}E\d{1,2}|season\s+\d+|complete\s+series|episode\s+\d+|web[\s.-]?series)\b", raw_title, re.I)
+                        ):
+                            continue
+
+                        current_year = datetime.now(timezone.utc).year
+                        title_years = [int(value) for value in re.findall(r"\b((?:19|20)\d{2})\b", raw_title)]
+                        if title_years:
+                            media_year = title_years[-1]
+                        else:
+                            media_year = _extra_item_year(item, fallback=expected_year)
+                        if media_year < current_year - 1 or media_year > current_year:
+                            continue
+
+                        # The query title is the canonical display/group title for all of its torrent variants.
+                        media_title = unescape(query_title)
+                    try:
+                        raw_size = item.get("size_bytes") or item.get("sizeBytes") or item.get("size") or 0
+                        if isinstance(raw_size, (int, float)):
+                            size = int(raw_size)
+                        else:
+                            size = parse_size(str(raw_size))
+                        seeders = int(float(str(item.get("seeders") or 0).replace(",", "")))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if size < 100 * 1024 * 1024 or size > MAX_SEARCH_RESULT_SIZE_BYTES or seeders <= 0:
+                        continue
+                    if not any(str(item.get(field) or "").strip() for field in ("magnetUrl", "downloadUrl", "sourceUrl", "infoUrl", "infoHash")):
+                        continue
+                    item["mediaTitle"] = media_title
+                    item["year"] = media_year or None
+                    if not item.get("posterUrl"):
+                        item["posterUrl"] = _poster_url_for_release(f"{media_title} {media_year or ''}")
+                    accepted.append(item)
+
+                # Resolve one poster per movie group and reuse it across quality variants.
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                for item in accepted:
+                    group_key = _normalize_title(str(item.get("mediaTitle") or item.get("title") or ""))
+                    grouped.setdefault(group_key, []).append(item)
+                for group_key, variants in grouped.items():
+                    if not variants:
+                        continue
+                    poster = str(variants[0].get("posterUrl") or "")
+                    if not poster:
+                        async with poster_semaphore:
+                            try:
+                                poster = await asyncio.wait_for(_poster_lookup(str(variants[0]["mediaTitle"]), str(variants[0].get("year") or "")), timeout=10)
+                            except Exception:
+                                poster = ""
+                    for item in variants:
+                        item["posterUrl"] = poster or _poster_url_for_release(str(item.get("mediaTitle") or item.get("title") or ""))
+                        item["catalogueKey"] = key
+                        item["catalogueTitle"] = str(item.get("mediaTitle") or item.get("title") or "")
+                    found_movies.update(group_key + "|" + str(v.get("year") or "") for v in variants for group_key in [_normalize_title(str(v.get("mediaTitle") or v.get("title") or ""))])
+                return accepted
+            finally:
+                state["completed"] = int(state.get("completed") or 0) + 1
+
+    try:
+        if not fixed_mode:
+            jobs = await _discover_latest_catalogue_jobs(key)
+            state.update({"status": "building", "completed": 0, "total": len(jobs), "resultCount": 0, "error": ""})
+        tasks = [asyncio.create_task(search_job(title, year)) for title, year in jobs]
+        for task in asyncio.as_completed(tasks):
+            try:
+                items = await task
+            except Exception as exc:
+                logger.info("Catalogue %s search task failed: %s", key, exc)
+                items = []
+            for item in items:
+                digest = str(item.get("infoHash") or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{40}", digest):
+                    digest = info_hash(str(item.get("magnetUrl") or item.get("downloadUrl") or ""))
+                dedupe = "hash:" + digest if re.fullmatch(r"[0-9a-f]{40}", digest, re.I) else (
+                    "title-size:" + _normalize_title(str(item.get("title") or "")) + "|" + str(item.get("size") or 0)
+                )
+                previous = rows.get(dedupe)
+                if previous is None or (int(item.get("seeders") or 0), int(item.get("leechers") or 0)) > (int(previous.get("seeders") or 0), int(previous.get("leechers") or 0)):
+                    rows[dedupe] = item
+            state["resultCount"] = len(rows)
+            state["movieCount"] = len(found_movies)
+
+        results = list(rows.values())
+        movie_count = len({ _normalize_title(str(item.get("mediaTitle") or item.get("title") or "")) + "|" + str(item.get("year") or "") for item in results })
+        if movie_count < int(config["minimum_movies"]):
+            raise RuntimeError(f"Only {movie_count} titles found; keeping the previous catalogue.")
+        results.sort(key=lambda item: (_extra_item_year(item), float(item.get("rating") or 0), int(item.get("seeders") or 0)), reverse=True)
+        payload = {"version": config["version"], "builtAt": datetime.now(timezone.utc).isoformat(),
+                   "titlesQueried": len(jobs), "movieCount": movie_count, "resultCount": len(results), "results": results}
+        _write_extra_catalogue(key, payload)
+        _extra_catalogue_retry_after.pop(key, None)
+        state.update({"status": "ready", "completed": len(jobs), "total": len(jobs), "movieCount": movie_count,
+                      "resultCount": len(results), "builtAt": payload["builtAt"], "error": ""})
+        logger.info("Built %s catalogue: %d titles / %d torrent options", key, movie_count, len(results))
+    except Exception as exc:
+        _extra_catalogue_retry_after[key] = time.monotonic() + 300
+        state.update({
+            "status": "failed",
+            "error": "Catalogue refresh failed; previous cached results were retained.",
+            "debugError": f"{type(exc).__name__}: {str(exc)[:240]}",
+        })
+        logger.exception("Catalogue %s build failed: %s", key, exc)
+
+
+async def _ensure_extra_catalogue_refresh(key: str) -> None:
+    cached = _read_extra_catalogue(key)
+    if _extra_catalogue_is_stale(key, cached):
+        if time.monotonic() < _extra_catalogue_retry_after.get(key, 0.0):
+            return
+        task = _extra_catalogue_tasks.get(key)
+        if task is None or task.done():
+            _extra_catalogue_tasks[key] = asyncio.create_task(_build_extra_catalogue(key))
+
+
+async def _extra_catalogue_monthly_scheduler() -> None:
+    # Do not launch bulk provider traffic during startup. Catalogue endpoints
+    # refresh the requested cache on demand; this is only the daily backstop.
+    while True:
+        await asyncio.sleep(24 * 60 * 60)
+        for key, config in _EXTRA_CATALOGUES.items():
+            if int(config["refresh_days"]) < 36500:
+                await _ensure_extra_catalogue_refresh(key)
+
+
+
+def _tmdb_cache_disk_key(cache_key: tuple[str, int]) -> str:
+    return cache_key[0] + ":" + str(cache_key[1])
+
+
+def _read_tmdb_persistent_cache(cache_key: tuple[str, int]) -> tuple[float, dict[str, Any]] | None:
+    try:
+        payload = json.loads(TMDB_CATALOGUE_CACHE_FILE.read_text(encoding="utf-8"))
+        row = (payload.get("catalogues") or {}).get(_tmdb_cache_disk_key(cache_key))
+        if not isinstance(row, dict) or not isinstance(row.get("payload"), dict):
+            return None
+        saved_at = float(row.get("savedAt") or 0)
+        if saved_at <= 0:
+            return None
+        return saved_at, row["payload"]
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _write_tmdb_persistent_cache(cache_key: tuple[str, int], payload: dict[str, Any]) -> None:
+    try:
+        TMDB_CATALOGUE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            disk = json.loads(TMDB_CATALOGUE_CACHE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(disk, dict):
+                disk = {}
+        except (OSError, ValueError, TypeError):
+            disk = {}
+        catalogues = disk.get("catalogues")
+        if not isinstance(catalogues, dict):
+            catalogues = {}
+        catalogues[_tmdb_cache_disk_key(cache_key)] = {
+            "savedAt": time.time(),
+            "payload": payload,
+        }
+        # Keep the file bounded if an unusual client requests many pages.
+        if len(catalogues) > 300:
+            ordered = sorted(
+                catalogues.items(),
+                key=lambda pair: float((pair[1] or {}).get("savedAt") or 0),
+                reverse=True,
+            )
+            catalogues = dict(ordered[:300])
+        disk["catalogues"] = catalogues
+        temp_path = TMDB_CATALOGUE_CACHE_FILE.with_name(
+            TMDB_CATALOGUE_CACHE_FILE.name + "." + uuid.uuid4().hex + ".tmp"
+        )
+        temp_path.write_text(json.dumps(disk, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp_path, TMDB_CATALOGUE_CACHE_FILE)
+    except (OSError, ValueError, TypeError) as exc:
+        # Caching is best-effort; it must never turn a successful API response into a failure.
+        logger.info("Could not write TMDB persistent cache: %s", exc)
+
+
+def _tmdb_ott_disk_key(cache_key: tuple[int, str]) -> str:
+    return str(cache_key[0]) + ":" + cache_key[1]
+
+
+def _read_tmdb_ott_persistent_cache(cache_key: tuple[int, str]) -> tuple[float, dict[str, Any]] | None:
+    try:
+        payload = json.loads(TMDB_OTT_CACHE_FILE.read_text(encoding="utf-8"))
+        row = (payload.get("items") or {}).get(_tmdb_ott_disk_key(cache_key))
+        if not isinstance(row, dict) or not isinstance(row.get("payload"), dict):
+            return None
+        saved_at = float(row.get("savedAt") or 0)
+        if saved_at <= 0:
+            return None
+        return saved_at, row["payload"]
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _write_tmdb_ott_persistent_cache(cache_key: tuple[int, str], payload: dict[str, Any]) -> None:
+    try:
+        TMDB_OTT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            disk = json.loads(TMDB_OTT_CACHE_FILE.read_text(encoding="utf-8"))
+            if not isinstance(disk, dict):
+                disk = {}
+        except (OSError, ValueError, TypeError):
+            disk = {}
+        items = disk.get("items")
+        if not isinstance(items, dict):
+            items = {}
+        items[_tmdb_ott_disk_key(cache_key)] = {
+            "savedAt": time.time(),
+            "payload": payload,
+        }
+        # Bound cache growth as users browse many different movie titles.
+        if len(items) > 1500:
+            ordered = sorted(
+                items.items(),
+                key=lambda pair: float((pair[1] or {}).get("savedAt") or 0),
+                reverse=True,
+            )
+            items = dict(ordered[:1500])
+        disk["items"] = items
+        temp_path = TMDB_OTT_CACHE_FILE.with_name(
+            TMDB_OTT_CACHE_FILE.name + "." + uuid.uuid4().hex + ".tmp"
+        )
+        temp_path.write_text(json.dumps(disk, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp_path, TMDB_OTT_CACHE_FILE)
+    except (OSError, ValueError, TypeError) as exc:
+        # A cache write failure must not hide otherwise usable availability data.
+        logger.info("Could not write TMDB OTT cache: %s", exc)
+
+
+def _tmdb_watch_provider_rows(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("provider_name") or "").strip()
+        provider_id = item.get("provider_id")
+        if not name:
+            continue
+        identity = str(provider_id if provider_id is not None else name.casefold())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        logo_path = str(item.get("logo_path") or "").strip()
+        rows.append({
+            "providerId": provider_id,
+            "name": name,
+            "logoUrl": "https://image.tmdb.org/t/p/w92" + logo_path if logo_path else "",
+        })
+    return rows
+
+
+async def _watchmode_movie_sources(movie_id: int, region: str) -> list[dict[str, Any]]:
+    """Look up legal streaming/rent/buy options by the matching TMDB movie ID."""
+    if not WATCHMODE_API_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=4.0),
+            follow_redirects=True,
+            headers={"Accept": "application/json", "X-API-Key": WATCHMODE_API_KEY},
+        ) as client:
+            response = await client.get(
+                f"{WATCHMODE_API_BASE}/title/movie-{movie_id}/sources/",
+                params={"regions": region},
+            )
+        if response.status_code in {401, 403}:
+            logger.warning("Watchmode rejected WATCHMODE_API_KEY (HTTP %s)", response.status_code)
+            return []
+        if response.status_code == 429 or response.status_code >= 500:
+            logger.info("Watchmode temporarily unavailable (HTTP %s)", response.status_code)
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("Watchmode source lookup failed for TMDB movie %s in %s: %s", movie_id, region, exc)
+        return []
+
+
+def _watchmode_provider_rows(rows: list[dict[str, Any]], accepted_types: set[str]) -> list[dict[str, Any]]:
+    providers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in rows:
+        name = str(item.get("name") or item.get("source_name") or "").strip()
+        kind = str(item.get("type") or item.get("source_type") or "").strip().lower()
+        if not name or kind not in accepted_types:
+            continue
+        provider_id = item.get("source_id", item.get("id"))
+        identity = str(provider_id if provider_id is not None else name.casefold())
+        if identity in seen:
+            continue
+        seen.add(identity)
+        logo = str(item.get("logo_url") or item.get("logo") or "").strip()
+        providers.append({
+            "providerId": provider_id,
+            "name": name,
+            "logoUrl": logo,
+            "webUrl": str(item.get("web_url") or item.get("url") or "").strip(),
+        })
+    return providers
+
+
+async def _tmdb_fetch_movie_ott_availability(movie_id: int, region: str) -> dict[str, Any]:
+    # Prefer Watchmode for legal platform availability when configured. Keep TMDB
+    # as a fallback and as the source of regional release-date metadata.
+    watchmode_rows, release_result = await asyncio.gather(
+        _watchmode_movie_sources(movie_id, region),
+        _tmdb_get_json(f"movie/{movie_id}/release_dates"),
+        return_exceptions=True,
+    )
+    if isinstance(watchmode_rows, Exception):
+        watchmode_rows = []
+    if isinstance(release_result, Exception):
+        logger.info("Could not load digital release dates for TMDB movie %s: %s", movie_id, release_result)
+        release_payload: dict[str, Any] = {}
+    else:
+        release_payload = release_result if isinstance(release_result, dict) else {}
+
+    watchmode_streaming = _watchmode_provider_rows(watchmode_rows, {"sub", "free", "ads", "tve", "subscription"})
+    watchmode_rent = _watchmode_provider_rows(watchmode_rows, {"rent", "rental"})
+    watchmode_buy = _watchmode_provider_rows(watchmode_rows, {"buy", "purchase"})
+
+    # TMDB/JustWatch fallback remains available if Watchmode is not configured,
+    # temporarily unreachable, or has no usable provider records for this title.
+    tmdb_provider_result: dict[str, Any] = {}
+    if not (watchmode_streaming or watchmode_rent or watchmode_buy):
+        try:
+            result = await _tmdb_get_json(f"movie/{movie_id}/watch/providers")
+            if isinstance(result, dict):
+                tmdb_provider_result = result
+        except Exception as exc:
+            logger.info("TMDB provider fallback failed for movie %s: %s", movie_id, exc)
+
+    all_regions = (tmdb_provider_result.get("results") or {}) if isinstance(tmdb_provider_result, dict) else {}
+    region_payload = all_regions.get(region) or {}
+    streaming = watchmode_streaming or (
+        _tmdb_watch_provider_rows(region_payload.get("flatrate"))
+        + _tmdb_watch_provider_rows(region_payload.get("free"))
+        + _tmdb_watch_provider_rows(region_payload.get("ads"))
+    )
+    rent = watchmode_rent or _tmdb_watch_provider_rows(region_payload.get("rent"))
+    buy = watchmode_buy or _tmdb_watch_provider_rows(region_payload.get("buy"))
+    availability_source = "Watchmode" if watchmode_streaming or watchmode_rent or watchmode_buy else "TMDB"
+
+    def merge_providers(groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for group in groups:
+            for provider in group:
+                identity = str(provider.get("providerId") or provider.get("name", "").casefold())
+                if identity not in seen:
+                    seen.add(identity)
+                    merged.append(provider)
+        return merged
+
+    streaming = merge_providers([streaming])
+    rent = merge_providers([rent])
+    buy = merge_providers([buy])
+
+    digital_dates: list[str] = []
+    theatrical_dates: list[str] = []
+    for region_release in release_payload.get("results") or []:
+        if not isinstance(region_release, dict) or str(region_release.get("iso_3166_1") or "").upper() != region:
+            continue
+        for release in region_release.get("release_dates") or []:
+            if not isinstance(release, dict):
+                continue
+            release_type = str(release.get("type") or "")
+            if release_type not in {"2", "3", "4"}:
+                continue
+            day = str(release.get("release_date") or "").strip()[:10]
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                try:
+                    datetime.strptime(day, "%Y-%m-%d")
+                    if release_type == "4":
+                        digital_dates.append(day)
+                    else:
+                        # Types 2 and 3 are limited and wide theatrical releases.
+                        theatrical_dates.append(day)
+                except ValueError:
+                    continue
+
+    digital_release_date = min(digital_dates) if digital_dates else None
+    theatrical_release_date = min(theatrical_dates) if theatrical_dates else None
+    today = datetime.now(timezone.utc).date().isoformat()
+    if streaming:
+        status = "streaming"
+    elif rent or buy:
+        status = "rent_buy"
+    elif digital_release_date and digital_release_date > today:
+        status = "digital_scheduled"
+    elif digital_release_date:
+        # A listed digital release date does not guarantee subscription streaming.
+        status = "digital_release_known"
+    else:
+        status = "not_confirmed"
+
+    provider_link = str(region_payload.get("link") or "").strip()
+    if not provider_link:
+        provider_link = f"https://www.themoviedb.org/movie/{movie_id}/watch?locale={region}"
+
+    return {
+        "movieId": movie_id,
+        "region": region,
+        "status": status,
+        "streamingProviders": streaming,
+        "rentProviders": rent,
+        "buyProviders": buy,
+        "theatricalReleaseDate": theatrical_release_date,
+        "digitalReleaseDate": digital_release_date,
+        "providerLink": provider_link,
+        "checkedAt": datetime.now(timezone.utc).isoformat(),
+        "source": availability_source,
+        "providerAttribution": "Streaming availability data powered by Watchmode." if availability_source == "Watchmode" else "Streaming availability data powered by JustWatch via TMDB.",
+        "attribution": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+    }
+
+async def _tmdb_get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    global _tmdb_api_connect_failure_until
+
+    if not TMDB_READ_ACCESS_TOKEN and not TMDB_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "TMDB API credentials are not configured. Add TMDB_READ_ACCESS_TOKEN "
+                "or TMDB_API_KEY to the server environment to enable paginated movie discovery."
+            ),
+        )
+
+    cooldown_remaining = _tmdb_api_connect_failure_until - time.monotonic()
+    if cooldown_remaining > 0:
+        retry_in = max(1, int(cooldown_remaining + 0.999))
+        raise HTTPException(
+            status_code=503,
+            detail=f"TMDB API connections are temporarily failing from this VPS; skipping retries for about {retry_in}s.",
+        )
+
+    query = dict(params or {})
+    headers = {"Accept": "application/json"}
+    if TMDB_READ_ACCESS_TOKEN:
+        headers["Authorization"] = "Bearer " + TMDB_READ_ACCESS_TOKEN
+    else:
+        query["api_key"] = TMDB_API_KEY
+
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(12.0, connect=4.0),
+                follow_redirects=True,
+                headers=headers,
+            ) as client:
+                response = await client.get(f"{TMDB_API_BASE}/{path.lstrip('/')}", params=query)
+
+            if response.status_code in {401, 403}:
+                raise HTTPException(
+                    status_code=503,
+                    detail="TMDB rejected the configured credentials. Check TMDB_API_KEY or TMDB_READ_ACCESS_TOKEN.",
+                )
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < 2:
+                    logger.warning(
+                        "TMDB temporary HTTP %s for %s (attempt %s/3)",
+                        response.status_code, path, attempt + 1,
+                    )
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
+                if response.status_code == 429:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="TMDB rate-limited this request after retries. Please wait briefly and try again.",
+                    )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=502, detail="TMDB returned an unexpected response.")
+            return payload
+        except HTTPException:
+            raise
+        except httpx.RequestError as exc:
+            last_error = exc
+            is_transient_connection_error = isinstance(
+                exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
+            )
+            logger.warning(
+                "TMDB network request failed for %s (attempt %s/3): %s: %s",
+                path, attempt + 1, type(exc).__name__, str(exc) or "<no message>",
+            )
+
+            # A single reset is common with the currently flaky route to TMDB.
+            # Retry before opening the shared cooldown so one bad edge connection
+            # does not suppress an otherwise successful follow-up attempt.
+            if attempt < 2:
+                backoff_seconds = (0.5 * (2 ** attempt)) + (secrets.randbelow(251) / 1000)
+                await asyncio.sleep(backoff_seconds)
+                continue
+
+            if is_transient_connection_error:
+                _tmdb_api_connect_failure_until = max(
+                    _tmdb_api_connect_failure_until,
+                    time.monotonic() + TMDB_API_CONNECT_FAILURE_COOLDOWN_SECONDS,
+                )
+                logger.warning(
+                    "TMDB connection failed after %s attempts; opening %ss cooldown",
+                    attempt + 1, TMDB_API_CONNECT_FAILURE_COOLDOWN_SECONDS,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "TMDB API connections failed after retries. "
+                        "Requests are paused briefly; cached catalogues will be used when available."
+                    ),
+                ) from exc
+        except httpx.HTTPStatusError as exc:
+            logger.warning("TMDB returned HTTP %s for %s", exc.response.status_code, path)
+            raise HTTPException(status_code=502, detail=f"TMDB returned HTTP {exc.response.status_code}.") from exc
+        except ValueError as exc:
+            logger.warning("TMDB returned invalid JSON for %s: %s", path, exc)
+            raise HTTPException(status_code=502, detail="TMDB returned an invalid response. Try again shortly.") from exc
+
+    logger.warning(
+        "TMDB request exhausted retries for %s: %s",
+        path,
+        (type(last_error).__name__ + ": " + str(last_error)) if last_error else "upstream failure",
+    )
+    raise HTTPException(
+        status_code=502,
+        detail="TMDB is temporarily unreachable from the VPS after three attempts. Please try again shortly.",
+    )
+
+
+async def _tmdb_discovered_company_ids(franchise: str) -> list[str]:
+    normalized = franchise.strip().lower()
+    now = time.monotonic()
+    cached = _tmdb_company_id_cache.get(normalized)
+    if cached and now - cached[0] < TMDB_COMPANY_CACHE_SECONDS:
+        return cached[1]
+
+    task = _tmdb_company_inflight.get(normalized)
+    if task is None or task.done():
+        task = asyncio.create_task(_tmdb_load_company_ids(normalized))
+        _tmdb_company_inflight[normalized] = task
+    try:
+        return await task
+    finally:
+        if task.done() and _tmdb_company_inflight.get(normalized) is task:
+            _tmdb_company_inflight.pop(normalized, None)
+
+
+async def _tmdb_load_company_ids(franchise: str) -> list[str]:
+    if franchise == "marvel":
+        ids = {"420", "19551", "38679", "2301", "13252"}
+        queries = ("Marvel Studios", "Marvel Entertainment", "Marvel Animation", "Marvel Productions")
+    else:
+        ids = {"9993"}
+        queries = ("DC Entertainment", "DC Films", "DC Comics")
+
+    async def search_company(query: str) -> list[str]:
+        try:
+            payload = await _tmdb_get_json("search/company", {"query": query, "page": 1})
+        except HTTPException as exc:
+            logger.info("TMDB company lookup failed for %s: %s", query, exc.detail)
+            return []
+        found: list[str] = []
+        for row in payload.get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            company_id = row.get("id")
+            if not name or not isinstance(company_id, (int, str)):
+                continue
+            lower_name = name.casefold()
+            if franchise == "marvel" and "marvel" not in lower_name:
+                continue
+            if franchise == "dc" and not (
+                "dc entertainment" in lower_name
+                or "dc films" in lower_name
+                or "dc comics" in lower_name
+                or lower_name.startswith("dc ")
+            ):
+                continue
+            found.append(str(company_id))
+        return found
+
+    discovered = await asyncio.gather(*(search_company(query) for query in queries))
+    for values in discovered:
+        ids.update(values)
+    result = sorted(ids, key=lambda value: (value not in {"420", "9993"}, int(value)))[:20]
+    _tmdb_company_id_cache[franchise] = (time.monotonic(), result)
+    return result
+
+
+def _tmdb_release_date_is_released(value: Any, today: str) -> bool:
+    """Return True only when a real ISO release date is on or before today's UTC date."""
+    release_text = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", release_text):
+        return False
+    try:
+        release_date = datetime.strptime(release_text, "%Y-%m-%d").date()
+        cutoff_date = datetime.strptime(today, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return False
+    return release_date <= cutoff_date
+
+
+async def _tmdb_fetch_movie_catalogue(catalogue_key: str, page: int, released_only: bool = True) -> dict[str, Any]:
+    today = datetime.now(timezone.utc).date().isoformat()
+    params: dict[str, Any] = {
+        "include_adult": "false",
+        "include_video": "false",
+        "language": "en-US",
+        "page": page,
+        "sort_by": "primary_release_date.desc",
+    }
+    if released_only:
+        params["release_date.lte"] = today
+
+    if catalogue_key in {"latest-hollywood", "popular-hollywood"}:
+        params["with_original_language"] = "en"
+        if catalogue_key == "popular-hollywood":
+            params["sort_by"] = "popularity.desc"
+    elif catalogue_key in {"latest-bollywood", "popular-bollywood"}:
+        params["with_original_language"] = "hi"
+        params["with_origin_country"] = "IN"
+        if catalogue_key == "latest-bollywood":
+            # Keep the latest catalogue focused on established Hindi feature
+            # films, not obscure/poorly documented entries or short videos.
+            # TMDB applies these before pagination, improving the usefulness of
+            # each page while retaining newest-release ordering.
+            params["vote_count.gte"] = 75
+            params["vote_average.gte"] = 5.5
+            params["with_runtime.gte"] = 70
+        elif catalogue_key == "popular-bollywood":
+            # Preserve the existing popularity-ranked catalogue unchanged.
+            params["sort_by"] = "popularity.desc"
+    elif catalogue_key in {"marvel", "dc-live-action", "dc-animated"}:
+        franchise = "marvel" if catalogue_key == "marvel" else "dc"
+        company_ids = await _tmdb_discovered_company_ids(franchise)
+        params["with_companies"] = "|".join(company_ids)
+        if catalogue_key == "dc-animated":
+            params["with_genres"] = "16"
+        elif catalogue_key == "dc-live-action":
+            params["without_genres"] = "16"
+    elif catalogue_key in {"trending-hollywood", "trending-bollywood"}:
+        # TMDB's trending endpoint is ranked globally, so collect several upstream
+        # pages and filter by original language here to keep the category useful for
+        # Hollywood and Hindi cinema rather than showing unrelated languages.
+        wanted_language = "en" if catalogue_key == "trending-hollywood" else "hi"
+        source_pages_per_page = 6
+        source_start = (page - 1) * source_pages_per_page + 1
+        source_page_numbers = range(source_start, min(source_start + source_pages_per_page, 501))
+        requests = [
+            _tmdb_get_json("trending/movie/week", {"page": source_page, "language": "en-US"})
+            for source_page in source_page_numbers
+        ]
+        payloads = await asyncio.gather(*requests, return_exceptions=True)
+        successful_payloads = [value for value in payloads if isinstance(value, dict)]
+        if not successful_payloads:
+            failure = next((value for value in payloads if isinstance(value, Exception)), None)
+            if isinstance(failure, HTTPException):
+                raise failure
+            raise HTTPException(status_code=502, detail="TMDB trending feed could not be reached.")
+
+        raw_results = []
+        seen_ids: set[str] = set()
+        total_source_pages = 1
+        for payload in successful_payloads:
+            total_source_pages = max(total_source_pages, int(payload.get("total_pages") or 1))
+            for item in payload.get("results") or []:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("original_language") or "").lower() != wanted_language:
+                    continue
+                if released_only and not _tmdb_release_date_is_released(item.get("release_date"), today):
+                    continue
+                item_id = str(item.get("id") or "")
+                if item_id and item_id in seen_ids:
+                    continue
+                if item_id:
+                    seen_ids.add(item_id)
+                raw_results.append(item)
+
+        results: list[dict[str, Any]] = []
+        for item in raw_results:
+            title = str(item.get("title") or item.get("original_title") or "").strip()
+            if not title:
+                continue
+            release_date = str(item.get("release_date") or "").strip()
+            year_match = re.match(r"^(\d{4})", release_date)
+            poster_path = str(item.get("poster_path") or "").strip()
+            backdrop_path = str(item.get("backdrop_path") or "").strip()
+            results.append({
+                "id": item.get("id"),
+                "title": title,
+                "year": int(year_match.group(1)) if year_match else None,
+                "releaseDate": release_date,
+                "overview": str(item.get("overview") or "").strip(),
+                "posterUrl": TMDB_IMAGE_BASE + poster_path if poster_path else "",
+                "backdropUrl": "https://image.tmdb.org/t/p/w780" + backdrop_path if backdrop_path else "",
+                "rating": float(item.get("vote_average") or 0),
+                "genres": [int(genre) for genre in (item.get("genre_ids") or []) if str(genre).isdigit()],
+                "source": "TMDB",
+            })
+
+        return {
+            "catalogue": catalogue_key,
+            "provider": "TMDB Weekly Trending",
+            "page": page,
+            "totalPages": max(1, min(500, (total_source_pages + source_pages_per_page - 1) // source_pages_per_page)),
+            # Trending does not expose a language-filtered total. This is the count collected
+            # for the requested page, not a claim about every matching title in TMDB.
+            "totalResults": len(results),
+            "results": results,
+            "attribution": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+        }
+    else:
+        raise HTTPException(status_code=404, detail="Unknown movie catalogue.")
+
+    payload = await _tmdb_get_json("discover/movie", params)
+    raw_results = payload.get("results") or []
+    results: list[dict[str, Any]] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("original_title") or "").strip()
+        if not title:
+            continue
+        release_date = str(item.get("release_date") or "").strip()
+        if released_only and not _tmdb_release_date_is_released(release_date, today):
+            continue
+        year_match = re.match(r"^(\d{4})", release_date)
+        poster_path = str(item.get("poster_path") or "").strip()
+        backdrop_path = str(item.get("backdrop_path") or "").strip()
+        results.append({
+            "id": item.get("id"),
+            "title": title,
+            "year": int(year_match.group(1)) if year_match else None,
+            "releaseDate": release_date,
+            "overview": str(item.get("overview") or "").strip(),
+            "posterUrl": TMDB_IMAGE_BASE + poster_path if poster_path else "",
+            "backdropUrl": "https://image.tmdb.org/t/p/w780" + backdrop_path if backdrop_path else "",
+            "rating": float(item.get("vote_average") or 0),
+            "genres": [int(genre) for genre in (item.get("genre_ids") or []) if str(genre).isdigit()],
+            "source": "TMDB",
+        })
+
+    total_pages = max(1, min(500, int(payload.get("total_pages") or 1)))
+    current_page = max(1, min(500, int(payload.get("page") or page)))
+    return {
+        "catalogue": catalogue_key,
+        "releasedOnly": released_only,
+        "provider": "TMDB",
+        "page": current_page,
+        "totalPages": total_pages,
+        "totalResults": int(payload.get("total_results") or len(results)),
+        "results": results,
+        "attribution": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+    }
+
+
+@app.post("/api/movies/catalogue/cache/clear")
+async def api_clear_tmdb_movie_caches():
+    """Clear all TMDB catalogue, OTT and company-discovery caches for a fresh lookup."""
+    global _tmdb_cache_clear_last_at
+
+    now = time.monotonic()
+    # This endpoint is available to Home visitors, so keep a small global cooldown
+    # to prevent accidental repeated cache flushes from exhausting the TMDB quota.
+    if now - _tmdb_cache_clear_last_at < 15:
+        raise HTTPException(status_code=429, detail="TMDB cache was cleared recently. Wait a few seconds before clearing it again.")
+    _tmdb_cache_clear_last_at = now
+
+    tasks = list(_tmdb_movie_catalogue_inflight.values()) + list(_tmdb_ott_inflight.values()) + list(_tmdb_company_inflight.values())
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    _tmdb_movie_catalogue_cache.clear()
+    _tmdb_movie_catalogue_inflight.clear()
+    _tmdb_ott_cache.clear()
+    _tmdb_ott_inflight.clear()
+    _tmdb_company_id_cache.clear()
+    _tmdb_company_inflight.clear()
+
+    removed_files: list[str] = []
+    for cache_file in (TMDB_CATALOGUE_CACHE_FILE, TMDB_OTT_CACHE_FILE):
+        try:
+            cache_file.unlink(missing_ok=True)
+            removed_files.append(cache_file.name)
+        except OSError as exc:
+            logger.exception("Could not delete TMDB cache file %s", cache_file)
+            raise HTTPException(
+                status_code=500,
+                detail="In-memory TMDB caches were cleared, but a persistent cache file could not be deleted: " + cache_file.name,
+            ) from exc
+
+    logger.info("Cleared all TMDB caches: %s", ", ".join(removed_files))
+    return {
+        "status": "cleared",
+        "cacheTypes": ["movie catalogues", "OTT availability", "company discovery"],
+        "persistentFiles": removed_files,
+        "refetchRequired": True,
+    }
+
+
+@app.get("/api/movies/catalogue/{catalogue_key}")
+async def api_tmdb_movie_catalogue(
+    catalogue_key: str,
+    page: int = Query(1, ge=1, le=500),
+    released_only: bool = Query(True),
+):
+    allowed = {
+        "latest-hollywood", "latest-bollywood",
+        "popular-hollywood", "popular-bollywood",
+        "trending-hollywood", "trending-bollywood",
+        "marvel", "dc-live-action", "dc-animated",
+    }
+    if catalogue_key not in allowed:
+        raise HTTPException(status_code=404, detail="Unknown movie catalogue.")
+
+    # Keep released-only and include-upcoming responses in separate cache slots.
+    cache_key = (catalogue_key + ("|released-v4" if released_only else "|upcoming-v3"), page)
+    now = time.monotonic()
+    cache_ttl = 30 * 60 if catalogue_key.startswith("trending-") else TMDB_CATALOGUE_CACHE_SECONDS
+    cached = _tmdb_movie_catalogue_cache.get(cache_key)
+    if cached and now - cached[0] < cache_ttl:
+        return cached[1]
+
+    # A disk cache survives container restarts, unlike the in-memory TTL cache.
+    persistent = _read_tmdb_persistent_cache(cache_key)
+    if persistent:
+        saved_at, persistent_payload = persistent
+        age_seconds = max(0.0, time.time() - saved_at)
+        if age_seconds < cache_ttl:
+            _tmdb_movie_catalogue_cache[cache_key] = (
+                time.monotonic() - age_seconds,
+                persistent_payload,
+            )
+            return persistent_payload
+
+    task = _tmdb_movie_catalogue_inflight.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(_tmdb_fetch_movie_catalogue(catalogue_key, page, released_only))
+        _tmdb_movie_catalogue_inflight[cache_key] = task
+    try:
+        payload = await task
+        _tmdb_movie_catalogue_cache[cache_key] = (time.monotonic(), payload)
+        _write_tmdb_persistent_cache(cache_key, payload)
+        return payload
+    except HTTPException as exc:
+        # Prefer a stale response over an empty screen when TMDB has an outage.
+        stale_payload = cached[1] if cached else (persistent[1] if persistent else None)
+        if stale_payload:
+            stale_response = dict(stale_payload)
+            stale_response["stale"] = True
+            stale_response["cacheWarning"] = exc.detail
+            logger.warning("Serving stale TMDB catalogue %s page %s after upstream failure", catalogue_key, page)
+            return stale_response
+        raise
+    except Exception as exc:
+        logger.exception("TMDB movie catalogue failed for %s page %s", catalogue_key, page)
+        stale_payload = cached[1] if cached else (persistent[1] if persistent else None)
+        if stale_payload:
+            stale_response = dict(stale_payload)
+            stale_response["stale"] = True
+            stale_response["cacheWarning"] = "TMDB is temporarily unavailable; showing the last cached catalogue."
+            return stale_response
+        raise HTTPException(status_code=502, detail="Could not load the movie catalogue from TMDB.") from exc
+    finally:
+        if task.done() and _tmdb_movie_catalogue_inflight.get(cache_key) is task:
+            _tmdb_movie_catalogue_inflight.pop(cache_key, None)
+
+
+@app.get("/api/movies/ott/{movie_id}")
+async def api_tmdb_movie_ott_availability(
+    movie_id: int,
+    region: str = Query("IN", min_length=2, max_length=2),
+):
+    """Return cached streaming, rental, purchase and digital-release data for one movie."""
+    if movie_id < 1:
+        raise HTTPException(status_code=404, detail="Unknown movie.")
+
+    region = region.strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", region):
+        raise HTTPException(status_code=422, detail="Region must be a two-letter country code.")
+
+    cache_key = (movie_id, region)
+    now = time.monotonic()
+    cached = _tmdb_ott_cache.get(cache_key)
+    if cached and now - cached[0] < TMDB_OTT_CACHE_SECONDS:
+        return cached[1]
+
+    persistent = _read_tmdb_ott_persistent_cache(cache_key)
+    if persistent:
+        saved_at, persistent_payload = persistent
+        age_seconds = max(0.0, time.time() - saved_at)
+        if age_seconds < TMDB_OTT_CACHE_SECONDS:
+            _tmdb_ott_cache[cache_key] = (time.monotonic() - age_seconds, persistent_payload)
+            return persistent_payload
+
+    # Only use recent stale results during an outage; never retain old availability indefinitely.
+    max_stale_seconds = 14 * 24 * 60 * 60
+    stale_payload = None
+    if cached and now - cached[0] <= max_stale_seconds:
+        stale_payload = cached[1]
+    elif persistent and time.time() - persistent[0] <= max_stale_seconds:
+        stale_payload = persistent[1]
+    task = _tmdb_ott_inflight.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(_tmdb_fetch_movie_ott_availability(movie_id, region))
+        _tmdb_ott_inflight[cache_key] = task
+    try:
+        payload = await task
+        _tmdb_ott_cache[cache_key] = (time.monotonic(), payload)
+        _write_tmdb_ott_persistent_cache(cache_key, payload)
+        return payload
+    except HTTPException as exc:
+        if stale_payload:
+            stale_response = dict(stale_payload)
+            stale_response["stale"] = True
+            stale_response["cacheWarning"] = exc.detail
+            return stale_response
+        raise
+    except Exception as exc:
+        logger.exception("TMDB OTT availability failed for movie %s in %s", movie_id, region)
+        if stale_payload:
+            stale_response = dict(stale_payload)
+            stale_response["stale"] = True
+            stale_response["cacheWarning"] = "OTT availability is temporarily unavailable; showing the last cached result."
+            return stale_response
+        raise HTTPException(status_code=502, detail="Could not load OTT availability from TMDB.") from exc
+    finally:
+        if task.done() and _tmdb_ott_inflight.get(cache_key) is task:
+            _tmdb_ott_inflight.pop(cache_key, None)
+
+
+@app.get("/api/catalogue/extra/{catalogue_key}")
+async def api_extra_catalogue(catalogue_key: str):
+    if catalogue_key not in _EXTRA_CATALOGUES:
+        raise HTTPException(404, "Unknown catalogue")
+    cached = _read_extra_catalogue(catalogue_key)
+    await _ensure_extra_catalogue_refresh(catalogue_key)
+    state = _extra_catalogue_states[catalogue_key]
+    # For monthly catalogues, stale-but-useful data is returned immediately while
+    # the refresh runs; first-ever builds report progress for the UI to poll.
+    if cached:
+        return {"status": "ready", "builtAt": cached.get("builtAt"),
+                "completed": int(cached.get("titlesQueried") or 0), "total": int(cached.get("titlesQueried") or 0),
+                "resultCount": int(cached.get("resultCount") or len(cached["results"])),
+                "movieCount": int(cached.get("movieCount") or 0), "refreshing": bool(_extra_catalogue_tasks.get(catalogue_key) and not _extra_catalogue_tasks[catalogue_key].done()),
+                "results": cached["results"]}
+    return {**state, "results": []}
+
+
+async def _warm_extra_catalogues_on_startup() -> None:
+    # Catalogue builds are deliberately lazy. The old startup warm-up launched
+    # all stale/missing catalogues together and flooded every upstream provider.
+    asyncio.create_task(_extra_catalogue_monthly_scheduler())
+
+
+app.router.add_event_handler("startup", _warm_extra_catalogues_on_startup)
+
+
+@app.get("/api/catalogue/marvel")
+async def api_marvel_catalogue():
+    # A completed catalogue is served straight from the persistent shared file:
+    # no provider calls and no per-visitor refreshes.
+    cached = _read_marvel_catalogue()
+    if cached:
+        return {
+            "status": "ready",
+            "builtAt": cached.get("builtAt"),
+            "completed": int(cached.get("titlesQueried") or len(MARVEL_MOVIE_SEARCHES)),
+            "total": int(cached.get("titlesQueried") or len(MARVEL_MOVIE_SEARCHES)),
+            "resultCount": int(cached.get("resultCount") or len(cached["results"])),
+            "movieCount": int(cached.get("movieCount") or 0),
+            "results": cached["results"],
+        }
+
+    global _marvel_catalogue_task
+    if _marvel_catalogue_task is None or _marvel_catalogue_task.done():
+        if _marvel_catalogue_state.get("status") == "failed" and time.time() < _marvel_catalogue_retry_after:
+            return {**_marvel_catalogue_state, "results": []}
+        _marvel_catalogue_state.update({
+            "status": "building",
+            "completed": 0,
+            "total": len(MARVEL_MOVIE_SEARCHES),
+            "resultCount": 0,
+            "error": "",
+        })
+        _marvel_catalogue_task = asyncio.create_task(_build_marvel_catalogue())
+
+    return {
+        **_marvel_catalogue_state,
+        "total": len(MARVEL_MOVIE_SEARCHES),
+        "results": [],
+    }
+
+
+
+async def _warm_marvel_catalogue_on_startup() -> None:
+    """Keep startup quiet; the Marvel catalogue builds when first requested."""
+    if _read_marvel_catalogue():
+        logger.info("Persistent Marvel catalogue is available; startup warm-up skipped.")
+    else:
+        logger.info("Marvel catalogue build deferred until the catalogue is requested.")
+
+
+app.router.add_event_handler("startup", _warm_marvel_catalogue_on_startup)
+
+
 @app.get("/api/search")
 async def api_search(q: str = Query(..., min_length=1), limit: int = Query(50, ge=1, le=50)):
     return await search_1337x(q, limit)
@@ -3565,43 +6396,40 @@ async def api_health():
 
 @app.get("/api/seedr/session")
 async def seedr_session(request: Request):
-    """Initialize/restore the browser session and expose only the CSRF token."""
+    """Initialize the browser session quickly; provider health checks happen on demand."""
     session_id = _seedr_request_session_id.get().strip()
     session = _seedr_get_session(session_id)
-    token = current_seedr_token()
-    connected = False
-
-    if token:
-        try:
-            token_ctx = _seedr_request_token.set(token)
-            try:
-                await seedr_request("/tasks" if _seedr_session_auth_mode(session_id) == "pat" else "/user")
-            finally:
-                _seedr_request_token.reset(token_ctx)
-            connected = True
-        except Exception:
-            _clear_seedr_session_token(session_id)
-
+    # Session bootstrap must not wait on Seedr. The CSRF token is needed before
+    # the browser can submit a PAT, and a slow provider must not cause POST 403s.
+    # Actual token/API failures are reported by the operation the user requests.
     return {
-        "connected": connected,
+        "connected": bool(current_seedr_token()),
         "csrfToken": str(session.get("csrf_token") or ""),
     }
 
 
 async def _validate_seedr_pat(token: str) -> None:
+    """Validate a Seedr PAT sequentially; avoid bursts of concurrent auth requests."""
     token = normalize_seedr_token(token)
     if not token:
         raise SeedrError("SEEDR_PAT_MISSING", 400, "A Seedr Personal Access Token is required.")
 
     endpoints = (
-        f"{SEEDR_PAT_BASE}/fs/root/contents",
+        f"{SEEDR_PAT_BASE}/user",
         f"{SEEDR_PAT_BASE}/tasks",
-        f"{SEEDR_V2_BASE}/fs/root/contents",
+        f"{SEEDR_PAT_BASE}/fs/root/contents",
         f"{SEEDR_V2_BASE}/tasks",
+        f"{SEEDR_V2_BASE}/fs/root/contents",
     )
+    outcomes: list[str] = []
     saw_unauthorized = False
+    timeout = httpx.Timeout(8.0, connect=3.0)
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+    # The endpoints have been verified to accept the current PAT when called
+    # individually. Do not fan out concurrently: concurrent probes previously
+    # all failed at the transport layer despite these same endpoints succeeding
+    # when tested one at a time. Stop on the first 2xx response.
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for url in endpoints:
             try:
                 response = await client.get(
@@ -3609,40 +6437,58 @@ async def _validate_seedr_pat(token: str) -> None:
                     headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
                 )
             except httpx.HTTPError as exc:
-                logger.info("Seedr PAT validation transport error: %s", exc)
+                logger.info(
+                    "Seedr PAT validation transport error: endpoint=%s error=%s",
+                    url,
+                    type(exc).__name__,
+                )
+                outcomes.append(f"{url}=transport:{type(exc).__name__}")
                 continue
 
-            raw = response.text
             if 200 <= response.status_code < 300:
-                logger.info("Seedr PAT validation succeeded")
+                logger.info(
+                    "Seedr PAT validation succeeded: endpoint=%s status=%s",
+                    url,
+                    response.status_code,
+                )
                 return
 
             if response.status_code == 401:
                 saw_unauthorized = True
+                outcomes.append(f"{url}=401")
                 continue
 
-            if response.status_code in {404, 405, 403}:
+            if response.status_code in {403, 404, 405}:
+                outcomes.append(f"{url}={response.status_code}")
                 continue
 
             try:
-                data = response.json() if raw else {}
+                payload = response.json() if response.content else {}
                 reason = str(
-                    data.get("error_description")
-                    or data.get("reason_phrase")
-                    or data.get("message")
-                    or data.get("error")
+                    payload.get("error_description")
+                    or payload.get("reason_phrase")
+                    or payload.get("message")
+                    or payload.get("error")
                     or ""
-                ).strip()
-            except Exception:
+                ).strip() if isinstance(payload, dict) else ""
+            except (ValueError, TypeError):
                 reason = ""
 
-            raise SeedrError(
-                "SEEDR_PAT_REJECTED",
-                502,
-                reason or f"Seedr PAT validation failed (HTTP {response.status_code}).",
+            # Retry the next known API variant for transient/provider-specific
+            # errors rather than concluding the token is invalid prematurely.
+            outcomes.append(f"{url}=HTTP{response.status_code}")
+            logger.info(
+                "Seedr PAT validation endpoint returned HTTP %s: endpoint=%s reason=%s",
+                response.status_code,
+                url,
+                reason[:160],
             )
 
-    if saw_unauthorized:
+    logger.warning(
+        "Seedr PAT validation found no successful endpoint: %s",
+        ", ".join(outcomes),
+    )
+    if saw_unauthorized and not any("transport:" in row for row in outcomes):
         raise SeedrError(
             "SEEDR_PAT_REJECTED",
             401,
@@ -3652,7 +6498,7 @@ async def _validate_seedr_pat(token: str) -> None:
     raise SeedrError(
         "SEEDR_PAT_VALIDATION_FAILED",
         502,
-        "Seedr could not validate the Personal Access Token right now.",
+        "Could not validate the Seedr token using the account API. Please retry shortly.",
     )
 
 
@@ -4112,15 +6958,19 @@ async def seedr_quota():
         "remainingSpace": max(0, max_space - used),
     }
 
-async def _prepare_seedr_space(required_bytes: int) -> list[dict[str, Any]]:
-    """Free the oldest completed Seedr torrent folders when a new torrent needs more space."""
+async def _prepare_seedr_space(
+    required_bytes: int,
+    *,
+    force_one: bool = False,
+) -> list[dict[str, Any]]:
+    """Free old completed Seedr folders; optionally force at least one deletion after a quota rejection."""
     required = max(0, int(required_bytes or 0))
     if required <= 0:
         return []
 
     quota = await seedr_quota()
     remaining = int(quota.get("remainingSpace") or 0)
-    if remaining >= required:
+    if remaining >= required and not force_one:
         return []
 
     library = await get_seedr_metadata_tree(force_refresh=True)
@@ -4179,7 +7029,7 @@ async def _prepare_seedr_space(required_bytes: int) -> list[dict[str, Any]]:
 
     deleted: list[dict[str, Any]] = []
     for _, _, folder in candidates:
-        if remaining >= required:
+        if remaining >= required and (not force_one or deleted):
             break
 
         folder_id = str(folder.get("folderId") or folder.get("id") or "").strip()
@@ -4262,22 +7112,66 @@ async def seedr_add(request: Request):
         folder,
     )
 
-    deleted_folders: list[dict[str, Any]] = []
+    # Treat every new Seedr add as replacing the prior unfinished transfer.
+    # Do not depend on frontend localStorage/current-notice state: an old task
+    # may still exist after a page refresh or backend/container restart.
+    replace_task_id = str(payload.get("replace_task_id") or "").strip()
+    cancelled_tasks = await _cancel_active_seedr_tasks_for_replacement(replace_task_id)
+
+    deleted_folders: list[dict[str, Any]] = [
+        {
+            "folderId": str(item.get("folderId") or ""),
+            "name": str(item.get("name") or "Cancelled Seedr task"),
+            "size": max(0, int(item.get("size") or 0)),
+        }
+        for item in cancelled_tasks
+        if item.get("folderDeleted") and str(item.get("folderId") or "").strip()
+    ]
     if auto_cleanup and required_bytes > 0:
-        deleted_folders = await _prepare_seedr_space(required_bytes)
+        deleted_folders.extend(await _prepare_seedr_space(required_bytes))
 
     try:
         task = unwrap_seedr_task(await add_task(raw_magnet, folder))
     except SeedrError as exc:
-        logger.exception(
-            "Seedr add failed: session=%s mode=%s code=%s status=%s detail=%s",
-            _seedr_session_fingerprint(session_id),
-            _seedr_session_auth_mode(session_id),
-            exc.code,
-            exc.status_code,
-            exc.detail,
+        reason = str(exc.detail or "").lower()
+        is_storage_shortage = (
+            exc.status_code == 413
+            or "not enough space" in reason
+            or "insufficient storage" in reason
+            or "insufficient space" in reason
         )
-        raise
+        if not (is_storage_shortage and auto_cleanup and required_bytes > 0):
+            logger.exception(
+                "Seedr add failed: session=%s mode=%s code=%s status=%s detail=%s",
+                _seedr_session_fingerprint(session_id),
+                _seedr_session_auth_mode(session_id),
+                exc.code,
+                exc.status_code,
+                exc.detail,
+            )
+            raise
+
+        # Seedr can reject a new magnet even when its quota endpoint appears to
+        # have enough free bytes (for example, while an old transfer is stuck
+        # reserving space). Cancelled tasks are already removed; now delete at
+        # least one oldest completed folder and retry the same requested magnet
+        # exactly once.
+        logger.warning(
+            "Seedr reported insufficient space after preflight; reclaiming one more completed folder before retry: required=%s",
+            required_bytes,
+        )
+        deleted_folders.extend(await _prepare_seedr_space(required_bytes, force_one=True))
+        try:
+            task = unwrap_seedr_task(await add_task(raw_magnet, folder))
+        except SeedrError as retry_exc:
+            logger.exception(
+                "Seedr retry after storage cleanup failed: session=%s code=%s status=%s detail=%s",
+                _seedr_session_fingerprint(session_id),
+                retry_exc.code,
+                retry_exc.status_code,
+                retry_exc.detail,
+            )
+            raise
     except Exception as exc:
         logger.exception(
             "Seedr add unexpected failure: session=%s mode=%s exception_type=%s exception=%s",
@@ -4311,6 +7205,7 @@ async def seedr_add(request: Request):
         "torrent_name": task_name,
         "folder_id": task_folder_id,
         "deleted_folders": deleted_folders,
+        "cancelled_tasks": cancelled_tasks,
     }
 
 def _seedr_file_folder_id(files: list[dict[str, Any]]) -> str:
@@ -5055,7 +7950,7 @@ async def seedr_v2_request(path: str) -> Any:
     if not bearer:
         raise HTTPException(503, "Seedr access token is empty")
     url = SEEDR_V2_BASE.rstrip("/") + "/" + str(path).lstrip("/")
-    async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0), follow_redirects=True) as client:
         response = await client.get(
             url,
             headers={"Authorization": f"Bearer {bearer}", "Accept": "application/json"},
@@ -6025,20 +8920,212 @@ async def seedr_file_subtitle(
         },
     )
 
+async def _cancel_seedr_task_and_partial_folder(
+    tid: str,
+    task: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Stop an unfinished Seedr task and remove its partial folder, never a completed download."""
+    global _seedr_metadata_cache
+
+    task_id_value = str(tid or "").strip()
+    if not task_id_value:
+        raise HTTPException(400, "A Seedr task id is required")
+
+    task_found = isinstance(task, dict) and bool(task)
+    task_value = task if isinstance(task, dict) else {}
+    if not task_found:
+        try:
+            raw = seedr_data(await seedr_request(f"/tasks/{quote(task_id_value, safe='')}"))
+            task_value = unwrap_seedr_task(raw)
+            task_found = bool(task_value)
+        except (HTTPException, SeedrError) as exc:
+            if getattr(exc, "status_code", 0) != 404:
+                raise
+            task_value = {}
+
+    complete = task_complete(task_value) if task_found else False
+    active = task_found and not complete
+    task_name = seedr_task_name(task_value) or f"Torrent {task_id_value}"
+    folder_id = seedr_task_folder_id(task_value) if task_found else ""
+    task_files: list[dict[str, Any]] = []
+
+    # Some Seedr API variants expose the created folder only in task contents.
+    if active and not folder_id:
+        try:
+            task_files = await task_contents(task_id_value)
+            folder_id = (
+                _seedr_effective_task_folder_id(task_value, task_files)
+                or _seedr_file_folder_id(task_files)
+            )
+        except (HTTPException, SeedrError):
+            task_files = []
+
+    folder_size = 0
+    for file in task_files:
+        if not isinstance(file, dict):
+            continue
+        try:
+            folder_size += max(0, int(float(file.get("size") or 0)))
+        except (TypeError, ValueError):
+            continue
+    task_deleted = False
+    if task_found:
+        try:
+            await seedr_request(f"/tasks/{quote(task_id_value, safe='')}", "DELETE")
+            task_deleted = True
+        except (HTTPException, SeedrError) as exc:
+            status_code = getattr(exc, "status_code", 0)
+            if status_code == 405:
+                try:
+                    await seedr_request(f"/tasks/{quote(task_id_value, safe='')}/delete", "POST")
+                    task_deleted = True
+                except (HTTPException, SeedrError) as fallback_exc:
+                    if getattr(fallback_exc, "status_code", 0) != 404:
+                        raise
+            elif status_code != 404:
+                raise
+
+    folder_deleted = False
+    if active and folder_id and folder_id != "0":
+        # Seedr can remove the task before its partial folder is ready to be
+        # deleted. Retry the folder DELETE with backoff instead of returning an
+        # error that forces the user to click Prepare a second time.
+        max_delete_attempts = 5
+        last_delete_error: Exception | None = None
+        for attempt in range(max_delete_attempts):
+            try:
+                await seedr_request(f"/fs/folder/{quote(folder_id, safe='')}", "DELETE")
+                folder_deleted = True
+                last_delete_error = None
+                break
+            except (HTTPException, SeedrError) as exc:
+                status_code = getattr(exc, "status_code", 0)
+                if status_code == 404:
+                    # A previous attempt or Seedr's own task deletion already
+                    # removed the transient folder.
+                    folder_deleted = True
+                    last_delete_error = None
+                    break
+
+                last_delete_error = exc
+                if attempt + 1 < max_delete_attempts:
+                    delay = min(0.75 * (2 ** attempt), 4.0)
+                    logger.warning(
+                        "Seedr partial-folder delete retry task=%s folder=%s attempt=%s/%s delay_seconds=%.2f status=%s detail=%s",
+                        task_id_value,
+                        folder_id,
+                        attempt + 1,
+                        max_delete_attempts,
+                        delay,
+                        status_code,
+                        getattr(exc, "detail", str(exc)),
+                    )
+                    await asyncio.sleep(delay)
+
+        if not folder_deleted:
+            # Do not abort the new Prepare solely because the partial-folder
+            # deletion endpoint briefly failed. The old task has already been
+            # cancelled; continue to quota cleanup and the requested add, which
+            # will trigger the existing storage-recovery retry if necessary.
+            logger.error(
+                "Seedr partial-folder deletion did not confirm success after retries; continuing with new add task=%s folder=%s status=%s detail=%s",
+                task_id_value,
+                folder_id,
+                getattr(last_delete_error, "status_code", 0),
+                getattr(last_delete_error, "detail", str(last_delete_error)),
+            )
+
+    _seedr_cleanup_jobs.pop(task_id_value, None)
+    _seedr_torrent_names_by_task.pop(task_id_value, None)
+    if folder_id:
+        _seedr_torrent_names.pop(folder_id, None)
+        _seedr_folder_cache.pop(folder_id, None)
+    _save_seedr_cleanup_jobs()
+    _seedr_metadata_cache = None
+    _seedr_folder_cache.clear()
+
+    return {
+        "taskId": task_id_value,
+        "name": task_name,
+        "found": task_found,
+        "active": active,
+        "completed": complete,
+        "taskDeleted": task_deleted,
+        "folderId": folder_id,
+        "folderDeleted": folder_deleted,
+        "size": folder_size,
+    }
+
+
+async def _cancel_active_seedr_tasks_for_replacement(
+    replace_task_id: str = "",
+) -> list[dict[str, Any]]:
+    """Cancel all unfinished tasks in the connected Seedr account before a new torrent is added."""
+    explicit_id = str(replace_task_id or "").strip()
+    tracked_ids = {str(task_id_value).strip() for task_id_value in _seedr_cleanup_jobs}
+    tracked_ids.discard("")
+
+    try:
+        payload = seedr_data(await seedr_request("/tasks"))
+    except (HTTPException, SeedrError) as exc:
+        logger.warning("Could not list Seedr tasks before replacement: %s", getattr(exc, "detail", str(exc)))
+        raise SeedrError(
+            "SEEDR_TASK_LIST_FAILED",
+            503,
+            "Could not check the current Seedr download before replacing it. Please retry.",
+        ) from exc
+
+    cancelled: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw_task in arr(payload, ("tasks", "torrents", "items")):
+        task = unwrap_seedr_task(seedr_data(raw_task))
+        if not task:
+            continue
+        task_id_value = task_id(task)
+        if task_id_value:
+            seen_ids.add(task_id_value)
+        if not task_id_value or task_complete(task):
+            continue
+        if task_id_value in {str(item.get("taskId") or "") for item in cancelled}:
+            continue
+
+        result = await _cancel_seedr_task_and_partial_folder(task_id_value, task)
+        if result.get("active"):
+            cancelled.append(result)
+
+    # A tracked or explicitly selected task may be temporarily absent from the
+    # list endpoint. Check those IDs directly so stale Seedr tasks do not survive
+    # simply because the backend restarted or /tasks omitted a row.
+    fallback_ids = tracked_ids | ({explicit_id} if explicit_id else set())
+    for task_id_value in sorted(fallback_ids - seen_ids):
+        try:
+            result = await _cancel_seedr_task_and_partial_folder(task_id_value)
+        except (HTTPException, SeedrError) as exc:
+            logger.warning(
+                "Seedr replacement could not cancel stale task=%s: %s",
+                task_id_value,
+                getattr(exc, "detail", str(exc)),
+            )
+            raise
+        if result.get("active"):
+            cancelled.append(result)
+
+    if cancelled:
+        logger.info(
+            "Seedr replacement cancelled %s unfinished task(s): %s",
+            len(cancelled),
+            ",".join(str(item.get("taskId") or "") for item in cancelled),
+        )
+    else:
+        logger.info("Seedr replacement found no unfinished Seedr tasks")
+    return cancelled
+
+
 @app.delete("/api/seedr/tasks/{tid}")
 async def seedr_task_delete(tid: str):
     if not current_seedr_token():
         raise HTTPException(503, "Seedr is not configured")
-    global _seedr_metadata_cache
-    try:
-        result = await seedr_request(f"/tasks/{quote(tid)}", "DELETE")
-    except HTTPException as exc:
-        if exc.status_code != 405:
-            raise
-        result = await seedr_request(f"/tasks/{quote(tid)}/delete", "POST")
-    _seedr_metadata_cache = None
-    _seedr_folder_cache.clear()
-    return result
+    return await _cancel_seedr_task_and_partial_folder(tid)
 
 @app.delete("/api/seedr/files/{file_id}")
 async def seedr_file_delete(file_id: str):
@@ -6622,7 +9709,7 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
     label = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug report"}[feedback_type]
     title_prefix = {"review": "Review", "suggestion": "Suggestion", "bug": "Bug report"}[feedback_type]
     title_text = message.replace("\\n", " ").strip()
-    title_text = re.sub(r"\\s+", " ", title_text)[:70] or "New feedback"
+    title_text = re.sub(r"\s+", " ", title_text)[:70] or "New feedback"
 
     if feedback_type == "review" and rating is not None:
         stars = "⭐" * rating
