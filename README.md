@@ -29,6 +29,31 @@ Seedr's current settings page exposes **Add Device Code** under **Extensions, AP
 
 The exact device-code endpoints used by the implementation are the currently reachable Seedr device-code endpoints; the live code endpoint returns a device code, user code, verification URL, expiry, and polling interval. citeturn594779view0
 
+## Dynamic movie catalogues
+
+Marvel Movies and DC Live-Action each have separate persistent English and Hindi torrent caches. Select a franchise shortcut and choose **English audio** or **Hindi audio**; the caches filter releases by language/audio markers so language variants do not get mixed together. DC Animated retains its persistent shared torrent cache. These cached views do not require TMDB for the initial load.
+
+The separate **TMDB movie discovery** control lets visitors select Marvel, DC Live-Action or DC Animated and browse paginated TMDB movie metadata. OTT availability is loaded in the background, and torrent-provider searches happen only when a movie's **Prepare** action is selected. The **Clear TMDB cache & reload** button deletes the server's in-memory and persistent TMDB catalogue, OTT availability and company-discovery caches, then requests the selected catalogue again. The clear-cache endpoint has a short global cooldown to protect the TMDB API quota.
+
+Popular Hollywood, Trending Hollywood and Popular Bollywood browse paginated movie metadata from TMDB. Popular categories sort by TMDB popularity; trending categories use TMDB's weekly trending feed and filter to the selected original language. The Latest Hollywood, Latest Bollywood and Trending Bollywood shortcuts are intentionally omitted from the current UI.
+
+For non-commercial use, request a free TMDB API credential in your TMDB account under **Settings → API**. Add either variable to the private `.env.debug` file on the VPS (never commit credentials):
+
+```dotenv
+TMDB_READ_ACCESS_TOKEN=<your TMDB API Read Access Token>
+WATCHMODE_API_KEY=<your Watchmode API key>
+# Or use the v3 API key instead:
+# TMDB_API_KEY=<your TMDB API key>
+```
+
+The deployment workflow recreates the container from `.env.debug`, so rerun the Home VPS deployment after saving the variable. TMDB requires its logo and attribution notice in the app; the movie-browser UI includes both. Its free developer access is for non-commercial use—commercial use needs a separate TMDB agreement.
+
+## OTT availability
+
+Movie catalogue cards check India (`IN`) streaming availability in the background. Home distinguishes subscription/free/ad-supported streaming from rental and purchase options, displays the regional digital release date when TMDB has one, and offers a **Streaming now in India** filter. A missing provider listing is shown as unconfirmed rather than proof that a movie is unavailable.
+
+The backend endpoint is `GET /api/movies/ott/{movie_id}?region=IN`. When `WATCHMODE_API_KEY` is configured, it first checks Watchmode legal streaming, rental and purchase sources for India using the TMDB movie ID. TMDB/JustWatch is retained as a fallback and supplies regional release-date metadata. Requests are coalesced and cached for 24 hours in `/app/data/tmdb_ott_availability_cache.json` (override with `TMDB_OTT_CACHE_FILE` or `TMDB_OTT_CACHE_SECONDS`). Keep `WATCHMODE_API_KEY` server-side only; never expose it in frontend environment variables or commit it. Provider attribution is returned by the API, while TMDB attribution remains required as described above.
+
 ## Vercel
 
 Set the project Root Directory to `frontend`.
