@@ -447,6 +447,7 @@ export default function App() {
   // stream URL, then the player shows its own browser-loading state.
   const [seedrStreamLoadingId, setSeedrStreamLoadingId] = useState<string | null>(null);
   const [isCancellingSeedr, setIsCancellingSeedr] = useState(false);
+  const seedrPrepareGenerationRef = useRef(0);
   const [activeSeedrFolderOpen, setActiveSeedrFolderOpen] = useState(false);
   const [selectedSeedrFolderId, setSelectedSeedrFolderId] = useState<string | null>(() => {
     try {
@@ -478,6 +479,37 @@ export default function App() {
       } catch {}
       return next;
     });
+  }, []);
+
+  const forgetSeedrFolders = useCallback((folderIds: Array<string | number>) => {
+    const removedIds = new Set(
+      folderIds.map(id => String(id || '').trim()).filter(Boolean)
+    );
+    if (removedIds.size === 0) return;
+
+    setSeedrDeletedFolderIds(prev => Array.from(new Set([...prev, ...removedIds])));
+    setSeedrFolderContentsCache(prev =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([folderId]) => !removedIds.has(String(folderId)))
+      )
+    );
+    setSeedrLibraryFolders(prev =>
+      prev.filter(folder => !removedIds.has(String(folder.folderId || folder.id || '')))
+    );
+    setSeedrFiles(prev =>
+      prev.filter(file => !removedIds.has(String(file.folderId || '')))
+    );
+    setSeedrTorrentNames(prev => {
+      const next = { ...prev };
+      for (const id of removedIds) delete next[id];
+      try {
+        window.localStorage.setItem(seedrTorrentNamesKey, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    setSelectedSeedrFolderId(prev => (
+      prev && removedIds.has(String(prev)) ? null : prev
+    ));
   }, []);
 
   const toSeedrStorageFile = useCallback((file: {
@@ -1209,6 +1241,8 @@ export default function App() {
       magnetUrl?: string;
       downloadUrl?: string;
       sourceUrl?: string;
+      infoUrl?: string;
+      indexer?: string;
     },
     metadata?: {
       name: string;
@@ -1224,6 +1258,12 @@ export default function App() {
     folderId: string;
     folderPath: string;
   }>; deletedFolderIds: string[] }> => {
+    const prepareGeneration = ++seedrPrepareGenerationRef.current;
+    // Defer replacement until a valid magnet has been resolved and is ready to
+    // submit. This prevents a bad/unresolvable selection from cancelling the
+    // currently working Seedr task.
+    const replacementTaskId = seedrDownloadActive ? seedrNotice?.taskId : null;
+
     if (!seedrConnected) {
       // Preparing a search result requires a personal Seedr connection.
       // Open the same connection dialog used by the header instead of
@@ -1233,27 +1273,38 @@ export default function App() {
       throw new Error('Connect your Seedr account first.'); 
     }
 
-    if (seedrDownloadActive) {
-      const message = 'One Seedr file is already loading. Cancel that loading or wait for it to finish before preparing another.';
-      setSeedrAddBlockedNotice(message);
-      setActiveTab('files');
-      window.setTimeout(() => setSeedrAddBlockedNotice(null), 5000);
-      throw new Error(message);
+    if (prepareGeneration !== seedrPrepareGenerationRef.current) {
+      throw new Error('Seedr preparation was replaced by a newer selection.');
     }
 
-    const source = String(result.magnetUrl || result.downloadUrl || result.sourceUrl || '').trim();
-    const magnet = source.toLowerCase().startsWith('magnet:?')
-      ? source
-      : result.infoHash
+    let magnet = String(result.magnetUrl || result.downloadUrl || '').trim();
+    if (!magnet.toLowerCase().startsWith('magnet:?')) {
+      magnet = result.infoHash
         ? 'magnet:?xt=urn:btih:' + result.infoHash.trim()
-        : source;
+        : '';
+    }
 
-    if (!magnet) {
+    // Search results now load from listing pages without waiting for every
+    // provider detail page. Resolve the magnet only when the user chooses
+    // Prepare, keeping slow provider pages out of the initial search request.
+    if (!magnet && result.infoUrl) {
+      const resolved = await api.resolveSearchMagnet(result.infoUrl, result.indexer || '');
+      magnet = String(resolved?.magnet || '').trim();
+    }
+
+    if (!magnet.toLowerCase().startsWith('magnet:?')) {
       throw new Error('This search result does not contain a usable magnet link.');
     }
 
+    if (prepareGeneration !== seedrPrepareGenerationRef.current) {
+      throw new Error('Seedr preparation was replaced by a newer selection.');
+    }
+
     let resolvedMetadata = metadata;
-    if (!resolvedMetadata) {
+    // Seedr can resolve metadata itself. When the search provider already
+    // supplied a title and byte size, do not block Prepare on a separate
+    // libtorrent/DHT metadata lookup that may hang on stale or weak swarms.
+    if (!resolvedMetadata && !(Number(result.size) > 0 && String(result.title || '').trim())) {
       resolvedMetadata = await api.inspectMagnet(
         magnet,
         'Downloads',
@@ -1268,7 +1319,35 @@ export default function App() {
       'Torrent';
     const requiredBytes = Number(resolvedMetadata?.totalSize || result.size || 0);
 
-    const prepared = await api.prepareSeedrMagnet(magnet, requiredBytes, torrentName);
+    if (prepareGeneration !== seedrPrepareGenerationRef.current) {
+      throw new Error('Seedr preparation was replaced by a newer selection.');
+    }
+
+    const prepared = await api.prepareSeedrMagnet(
+      magnet,
+      requiredBytes,
+      torrentName,
+      replacementTaskId == null ? undefined : replacementTaskId
+    );
+
+    // The backend is authoritative for task replacement and also catches a
+    // stale task left behind after a page refresh. Reject the older UI waiter
+    // so its card stops spinning, without treating that cancellation as an
+    // error for the newly selected torrent.
+    const cancelledTaskIds = new Set(
+      (Array.isArray(prepared?.cancelledTasks) ? prepared.cancelledTasks : [])
+        .map((task: any) => String(task?.taskId ?? task?.task_id ?? task?.id ?? '').trim())
+        .filter(Boolean)
+    );
+    for (const cancelledTaskId of cancelledTaskIds) {
+      const waiter = seedrPrepareWaiters.current[cancelledTaskId];
+      if (!waiter) continue;
+      delete seedrPrepareWaiters.current[cancelledTaskId];
+      waiter.reject(new Error('Seedr preparation was cancelled by another selection.'));
+    }
+    if (seedrNotice?.taskId != null && cancelledTaskIds.has(String(seedrNotice.taskId))) {
+      setSeedrNotice(null);
+    }
 
     // Prepare can automatically remove older completed Seedr folders to make
     // room for the new torrent. Remove those folders from every local cache
@@ -1281,24 +1360,7 @@ export default function App() {
     ));
 
     if (deletedFolderIds.length > 0) {
-      const deletedSet = new Set(deletedFolderIds);
-      setSeedrDeletedFolderIds(prev => Array.from(new Set([...prev, ...deletedFolderIds])));
-
-      setSeedrFolderContentsCache(prev =>
-        Object.fromEntries(
-          Object.entries(prev).filter(([folderId]) => !deletedSet.has(String(folderId)))
-        )
-      );
-      setSeedrLibraryFolders(prev =>
-        prev.filter(folder => !deletedSet.has(String(folder.folderId || folder.id || '')))
-      );
-      setSeedrFiles(prev =>
-        prev.filter(file => !deletedSet.has(String(file.folderId || '')))
-      );
-
-      if (selectedSeedrFolderId && deletedSet.has(String(selectedSeedrFolderId))) {
-        setSelectedSeedrFolderId(null);
-      }
+      forgetSeedrFolders(deletedFolderIds);
     }
 
     const taskId = prepared?.seedrTaskId;
@@ -1336,7 +1398,13 @@ export default function App() {
       ...completed,
       deletedFolderIds,
     };
-  }, [seedrConnected, seedrDownloadActive, rememberSeedrTorrentName]);
+  }, [
+    seedrConnected,
+    seedrDownloadActive,
+    seedrNotice,
+    rememberSeedrTorrentName,
+    forgetSeedrFolders
+  ]);
 
   const handleSearchAdd = async (
     source: string,
@@ -2010,7 +2078,10 @@ export default function App() {
     const currentNotice = seedrNotice;
     try {
       setIsCancellingSeedr(true);
-      await api.deleteSeedrTask(taskId);
+      const cancelled = await api.deleteSeedrTask(taskId);
+      if (cancelled?.folderDeleted && cancelled?.folderId) {
+        forgetSeedrFolders([String(cancelled.folderId)]);
+      }
       const waiterKey = String(taskId);
       const waiter = seedrPrepareWaiters.current[waiterKey];
       if (waiter) {
@@ -2657,6 +2728,30 @@ export default function App() {
             </div>
           </div>
 
+          {/* Primary navigation stays on the same header row to save vertical space. */}
+          <nav className="hidden md:flex items-center gap-1.5 ml-5 mr-auto">
+            <button
+              onClick={() => setActiveTab('search')}
+              className={activeTab === 'search'
+                ? 'px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20'
+                : 'px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}
+            >
+              <Search className="w-4 h-4" />
+              <span>Search</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('files')}
+              className={activeTab === 'files'
+                ? 'px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20'
+                : 'px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}
+            >
+              <Folder className="w-4 h-4" />
+              <span>My Cloud Files</span>
+              <span className="text-[10px] opacity-70">({files.length})</span>
+            </button>
+          </nav>
+
           {/* Right: Quick actions & User Switcher */}
           <div className="flex items-center gap-2">
             <button
@@ -2701,33 +2796,6 @@ export default function App() {
           </div>
         </div>
       </header>
-
-      {/* Desktop Subheader Navigation Tabs */}
-      <div className="hidden md:block bg-slate-900/60 border-b border-slate-800/80 px-6">
-        <div className="max-w-7xl mx-auto flex items-center gap-2 py-2">          <button
-            onClick={() => setActiveTab('search')}
-            className={activeTab === 'search'
-              ? 'px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20'
-              : 'px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'}
-          >
-            <Search className="w-4 h-4" />
-            <span>Search</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('files')}
-            className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition ${
-              activeTab === 'files'
-                ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/20'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            <Folder className="w-4 h-4" />
-            <span>My Cloud Files</span>
-            <span className="text-[10px] opacity-70">({files.length})</span>
-          </button>
-        </div>
-      </div>
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-2.5 sm:p-6 pb-20 md:pb-12">
@@ -3551,7 +3619,7 @@ export default function App() {
                     value={seedrPat}
                     onChange={(e) => setSeedrPat(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !seedrPatSubmitting) {
+                      if (e.key === 'Enter' && !seedrPatSubmitting && seedrSessionReady) {
                         void connectSeedrWithPat();
                       }
                     }}
@@ -3569,7 +3637,7 @@ export default function App() {
 
                   <button
                     type="button"
-                    disabled={seedrPatSubmitting || !seedrPat.trim()}
+                    disabled={seedrPatSubmitting || !seedrPat.trim() || !seedrSessionReady}
                     onClick={() => { void connectSeedrWithPat(); }}
                     className="mt-3 w-full rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
                   >
