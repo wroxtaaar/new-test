@@ -12,11 +12,31 @@ import {
   Database,
   AlertCircle,
   SlidersHorizontal,
-  Star,
   Film
 } from 'lucide-react';
-import { api, API_BASE, TorrentSearchResult } from '../api/client.ts';
+import { api, API_BASE, MovieCatalogueItem, MovieCatalogueKey, MovieCataloguePage, MovieOttAvailability, MovieOttProvider, TorrentSearchResult } from '../api/client.ts';
 import { formatBytes } from '../utils/formatters.ts';
+
+type MovieOttCardState = MovieOttAvailability | { status: 'loading' | 'error'; message?: string };
+
+function providerNames(providers: MovieOttProvider[]): React.ReactNode {
+  const shown = providers.slice(0, 3);
+  return (
+    <>
+      {shown.map((provider, index) => (
+        <React.Fragment key={String(provider.providerId ?? provider.name) + '-' + index}>
+          {index > 0 ? ', ' : ''}
+          {provider.webUrl ? (
+            <a href={provider.webUrl} target="_blank" rel="noreferrer" className="text-cyan-300 underline underline-offset-2 hover:text-cyan-200">
+              {provider.name}
+            </a>
+          ) : provider.name}
+        </React.Fragment>
+      ))}
+      {providers.length > 3 ? ' +' + (providers.length - 3) : ''}
+    </>
+  );
+}
 
 type SeedrSearchFile = {
   id: string;
@@ -51,17 +71,334 @@ function formatPublished(value?: string) {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+interface TorrentQualityGroup {
+  key: string;
+  title: string;
+  year: string;
+  variants: TorrentSearchResult[];
+  posterResult: TorrentSearchResult;
+}
+
+function torrentGroupReleaseYear(group: TorrentQualityGroup): number {
+  // The year shown on the card is the most trustworthy user-facing sort key.
+  const displayedYear = group.title.match(/\(((?:19|20)\d{2})\)\s*$/)?.[1];
+  if (displayedYear) return Number(displayedYear);
+
+  const groupYear = Number.parseInt(String(group.year || ''), 10);
+  if (groupYear > 0) return groupYear;
+
+  for (const variant of group.variants) {
+    const year = Number.parseInt(String(variant.year || ''), 10);
+    if (year > 0) return year;
+  }
+  return 0;
+}
+
+function torrentResultKey(result: TorrentSearchResult): string {
+  return String(result.guid || result.infoHash || result.magnetUrl || result.downloadUrl || result.title);
+}
+
+function normalizeGroupTitle(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[’']/g, '')
+    .replace(/[._]+/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:the|a|an)\s+/, '');
+}
+
+function torrentMediaIdentity(result: TorrentSearchResult): { title: string; normalized: string; year: string } {
+  const source = String(result.mediaTitle || result.title || '').trim();
+  const embeddedYears: Array<{ year: string; index: number }> = [];
+  const yearPattern = /\b((?:19|20)\d{2})\b/g;
+  let yearMatch: RegExpExecArray | null;
+  while ((yearMatch = yearPattern.exec(source)) !== null) {
+    embeddedYears.push({ year: yearMatch[1], index: yearMatch.index });
+  }
+  const metadataYear = String(result.year || '').trim();
+  // Titles such as "Wonder Woman 1984" can contain a year-like token that is
+  // not the film's release year. Only remove a token matching release metadata.
+  const embeddedYear = metadataYear
+    ? [...embeddedYears].reverse().find(match => match.year === metadataYear) || null
+    : embeddedYears[embeddedYears.length - 1] || null;
+  let year = metadataYear || embeddedYear?.year || '';
+  let title = source.replace(/[._]+/g, ' ');
+
+  if (embeddedYear) {
+    title = title.slice(0, embeddedYear.index);
+  } else {
+    // Release tags in brackets are often incomplete on public indexers.
+    title = title
+      .replace(/\[[^\]]*(?:\]|$)/g, ' ')
+      .replace(/\([^)]*(?:\)|$)/g, ' ');
+    title = title.split(
+      /\b(?:2160p|1440p|1080p|720p|576p|480p|4k|8k|web[- ]?dl|web[- ]?rip|webrip|bluray|blu[- ]?ray|brrip|hdrip|dvdrip|dvdscr|telesync|telecine|r5|r6|cam|hdcam|x264|x265|h264|h265|hevc|xvid|divx|dts|aac|ac3|ddp|eng|english|nlsub|dual[ .-]?audio|hindi|tamil|telugu|malayalam|kannada|proper|repack|remux|hdr|bluelady|jaybob|haggis|voltage|dtrg|document|vision|sonido|saimorny|ltt)\b/i
+    )[0];
+  }
+
+  title = title.replace(/\s+/g, ' ').trim().replace(/[\s._:[\](){}-]+$/g, '').trim();
+  let normalized = normalizeGroupTitle(title);
+
+  // Common LimeTorrents release shorthand: keep the sequel distinct from
+  // The Avengers (2012), while presenting it with its catalogue title.
+  if ((normalized === 'avengers 2' || normalized === 'the avengers 2') && (!year || year === '2015')) {
+    title = 'Avengers: Age of Ultron';
+    normalized = normalizeGroupTitle(title);
+    year = year || '2015';
+  } else if (
+    (normalized === 'marvel s the avengers' || normalized === 'marvels the avengers') &&
+    (!year || year === '2012')
+  ) {
+    title = 'The Avengers';
+    normalized = normalizeGroupTitle(title);
+    year = year || '2012';
+  } else if (normalized === 'avengers age of ultron' && (!year || year === '2015')) {
+    title = 'Avengers: Age of Ultron';
+    year = year || '2015';
+  } else if (normalized === 'the avengers' && year === '2012') {
+    title = 'The Avengers';
+  }
+
+  if (!title) title = String(result.title || result.mediaTitle || 'Unknown title').trim();
+  return { title, normalized: normalizeGroupTitle(title), year };
+}
+
+function torrentQualityDetails(result: TorrentSearchResult): { key: string; label: string; rank: number } {
+  const raw = `${String(result.quality || '')} ${String(result.title || '')}`;
+  const resolution = raw.match(/\b(2160p|1440p|1080p|720p|576p|480p|4k|8k)\b/i)?.[1]?.toLowerCase() || '';
+  const resolutionLabel = resolution === '4k' ? '2160p (4K)' : resolution.toUpperCase();
+  const formats: Array<[RegExp, string, number]> = [
+    [/\b3d\b.*\b(?:bluray|blu[ .-]?ray)\b|\b(?:bluray|blu[ .-]?ray)\b.*\b3d\b/i, '3D BluRay', 950],
+    [/\b(?:blu[ .-]?ray|bluray)\b/i, 'BluRay', 900],
+    [/\b(?:web[- .]?dl)\b/i, 'WEB-DL', 850],
+    [/\b(?:web[- .]?rip|webrip)\b/i, 'WEBRip', 800],
+    [/\b(?:brrip)\b/i, 'BRRip', 700],
+    [/\b(?:hdtv)\b/i, 'HDTV', 650],
+    [/\b(?:hdrip)\b/i, 'HDRip', 600],
+    [/\b(?:dvdscr|dvd[ .-]?scr)\b/i, 'DVDScr', 500],
+    [/\b(?:dvdrip|dvd)\b/i, 'DVDRip', 450],
+    [/\b(?:telesync|ts)\b/i, 'Telesync', 400],
+    [/\b(?:telecine|tc)\b/i, 'Telecine', 350],
+    [/\b(?:r5|r6)\b/i, 'R5/R6', 300],
+    [/\b(?:hdcam|cam)\b/i, 'CAM', 200],
+  ];
+  const format = formats.find(([pattern]) => pattern.test(raw));
+  const label = [resolutionLabel, format?.[1]].filter(Boolean).join(' ') || (resolutionLabel || 'Other release');
+  const resolutionRank = resolution === '2160p' || resolution === '4k' ? 2160
+    : resolution === '1440p' ? 1440
+    : resolution === '1080p' ? 1080
+    : resolution === '720p' ? 720
+    : resolution === '576p' ? 576
+    : resolution === '480p' ? 480
+    : resolution === '8k' ? 4320
+    : 0;
+  // Resolution dominates source format so 1080p is never ranked below 720p
+  // just because the latter carries a BluRay tag.
+  const rank = resolutionRank * 1000 + (format?.[2] || 0);
+  return { key: label.toLowerCase().replace(/[^a-z0-9]+/g, '-'), label, rank };
+}
+
+function groupTorrentResults(results: TorrentSearchResult[]): TorrentQualityGroup[] {
+  const titleBuckets = new Map<string, Array<{ result: TorrentSearchResult; identity: ReturnType<typeof torrentMediaIdentity> }>>();
+  for (const result of results) {
+    const identity = torrentMediaIdentity(result);
+    if (!identity.normalized) continue;
+    const bucket = titleBuckets.get(identity.normalized) || [];
+    bucket.push({ result, identity });
+    titleBuckets.set(identity.normalized, bucket);
+  }
+
+  const groups: TorrentQualityGroup[] = [];
+  for (const [normalized, entries] of titleBuckets) {
+    const knownYears = Array.from(new Set(entries.map(entry => entry.identity.year).filter(Boolean)));
+    const yearBuckets = new Map<string, typeof entries>();
+    for (const entry of entries) {
+      // Unknown-year releases can join a title only if this result set has one
+      // unambiguous year for that title; don't merge remakes with one another.
+      const year = entry.identity.year || (knownYears.length === 1 ? knownYears[0] : '');
+      const bucket = yearBuckets.get(year) || [];
+      bucket.push(entry);
+      yearBuckets.set(year, bucket);
+    }
+
+    for (const [year, yearEntries] of yearBuckets) {
+      const bestByQuality = new Map<string, { result: TorrentSearchResult; quality: ReturnType<typeof torrentQualityDetails> }>();
+      for (const entry of yearEntries) {
+        const quality = torrentQualityDetails(entry.result);
+        const previous = bestByQuality.get(quality.key);
+        if (!previous) {
+          // sortedResults is already ordered by the chosen ranking, so the
+          // first occurrence is the preferred swarm for this quality.
+          bestByQuality.set(quality.key, { result: entry.result, quality });
+        }
+      }
+
+      const variants = Array.from(bestByQuality.values())
+        .sort((a, b) => {
+          const qualityDifference = b.quality.rank - a.quality.rank;
+          if (qualityDifference !== 0) return qualityDifference;
+          const seederDifference = (Number(b.result.seeders) || 0) - (Number(a.result.seeders) || 0);
+          if (seederDifference !== 0) return seederDifference;
+          return (Number(b.result.size) || 0) - (Number(a.result.size) || 0);
+        })
+        .map(value => value.result);
+      if (!variants.length) continue;
+      const title = yearEntries[0].identity.title;
+      groups.push({
+        key: `${normalized}|${year || 'unknown'}`,
+        title: year ? `${title} (${year})` : title,
+        year,
+        variants,
+        posterResult: variants.find(item => item.posterUrl || item.mediaTitle) || variants[0],
+      });
+    }
+  }
+
+  return groups;
+}
+
 export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], seedrDeletedFolderIds = [], onPlaySeedrFile }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TorrentSearchResult[]>([]);
+  const [selectedQualityByGroup, setSelectedQualityByGroup] = useState<Record<string, string>>({});
+  const [movieTorrentPreviewGroup, setMovieTorrentPreviewGroup] = useState<TorrentQualityGroup | null>(null);
+  const [movieTorrentPreviewCatalogueId, setMovieTorrentPreviewCatalogueId] = useState<string | null>(null);
+  const [movieTorrentPickerGroups, setMovieTorrentPickerGroups] = useState<TorrentQualityGroup[] | null>(null);
+  const [movieTorrentSearchLoading, setMovieTorrentSearchLoading] = useState(false);
+  const [movieTorrentSearchTitle, setMovieTorrentSearchTitle] = useState('');
+  const [movieTorrentSearchError, setMovieTorrentSearchError] = useState('');
+  const [selectedMovieTorrentQualityByGroup, setSelectedMovieTorrentQualityByGroup] = useState<Record<string, string>>({});
+  const movieTorrentSearchControllerRef = useRef<AbortController | null>(null);
+  const movieTorrentSearchGenerationRef = useRef(0);
+
   const [isSearching, setIsSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState('');
+  const [catalogueBuildProgress, setCatalogueBuildProgress] = useState('');
+  const [movieCatalogue, setMovieCatalogue] = useState<MovieCataloguePage | null>(null);
+  const [movieCatalogueSearchText, setMovieCatalogueSearchText] = useState('');
+  const [releasedOnly, setReleasedOnly] = useState(true);
+  type FranchiseTmdbKey = 'marvel' | 'dc-live-action' | 'dc-animated';
+  type CachedFranchiseKey = 'marvel' | 'dc-live-action';
+  const [tmdbFranchiseKey, setTmdbFranchiseKey] = useState<FranchiseTmdbKey>('marvel');
+  const [openCachedLanguageMenu, setOpenCachedLanguageMenu] = useState<CachedFranchiseKey | null>(null);
+
+  useEffect(() => {
+    if (!openCachedLanguageMenu) return;
+
+    const handleOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && !target.closest('[data-cached-language-menu="true"]')) {
+        setOpenCachedLanguageMenu(null);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenCachedLanguageMenu(null);
+    };
+
+    document.addEventListener('pointerdown', handleOutsidePointerDown);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('pointerdown', handleOutsidePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [openCachedLanguageMenu]);
+  const [isClearingTmdbCache, setIsClearingTmdbCache] = useState(false);
+  const [tmdbCacheMessage, setTmdbCacheMessage] = useState('');
+
+  const tmdbFranchiseLabels: Record<FranchiseTmdbKey, string> = {
+    marvel: 'Marvel Movies',
+    'dc-live-action': 'DC Live-Action',
+    'dc-animated': 'DC Animated',
+  };
+  const [streamingOnly, setStreamingOnly] = useState(false);
+  const [ottAvailability, setOttAvailability] = useState<Record<string, MovieOttCardState>>({});
+  const ottAvailabilityRef = useRef<Record<string, MovieOttCardState>>({});
+  const ottQueueRef = useRef<string[]>([]);
+  const ottQueuedIdsRef = useRef(new Set<string>());
+  const ottActiveWorkersRef = useRef(0);
+  const ottLookupGenerationRef = useRef(0);
+  const ottQueuePumpRef = useRef<() => void>(() => {});
+
+  const setOttState = (movieId: string, state: MovieOttCardState) => {
+    const next = { ...ottAvailabilityRef.current, [movieId]: state };
+    ottAvailabilityRef.current = next;
+    setOttAvailability(next);
+  };
+
+  // Limit upstream load. The backend also caches each movie/region response for 24 hours
+  // and coalesces simultaneous requests, so repeated visitors reuse the same result.
+  const pumpOttQueue = () => {
+    while (ottActiveWorkersRef.current < 3 && ottQueueRef.current.length > 0) {
+      const movieId = ottQueueRef.current.shift();
+      if (!movieId) continue;
+      ottActiveWorkersRef.current += 1;
+      const lookupGeneration = ottLookupGenerationRef.current;
+      void (async () => {
+        try {
+          const availability = await api.getMovieOttAvailability(Number(movieId), 'IN');
+          if (lookupGeneration === ottLookupGenerationRef.current) {
+            setOttState(movieId, availability);
+          }
+        } catch (error: any) {
+          if (lookupGeneration === ottLookupGenerationRef.current) {
+            setOttState(movieId, {
+              status: 'error',
+              message: String(error?.message || 'OTT availability could not be checked.'),
+            });
+          }
+        } finally {
+          if (lookupGeneration === ottLookupGenerationRef.current) {
+            ottQueuedIdsRef.current.delete(movieId);
+          }
+          ottActiveWorkersRef.current -= 1;
+          ottQueuePumpRef.current();
+        }
+      })();
+    }
+  };
+  ottQueuePumpRef.current = pumpOttQueue;
+
+  const queueOttLookups = (movies: MovieCatalogueItem[], retryErrors = false) => {
+    const next = { ...ottAvailabilityRef.current };
+    let changed = false;
+    for (const movie of movies) {
+      const movieId = String(movie.id);
+      if (!/^\d+$/.test(movieId) || ottQueuedIdsRef.current.has(movieId)) continue;
+      const existing = next[movieId];
+      if (existing && !(retryErrors && existing.status === 'error')) continue;
+      ottQueuedIdsRef.current.add(movieId);
+      ottQueueRef.current.push(movieId);
+      next[movieId] = { status: 'loading' };
+      changed = true;
+    }
+    if (changed) {
+      ottAvailabilityRef.current = next;
+      setOttAvailability(next);
+    }
+    ottQueuePumpRef.current();
+  };
+
+  const visibleMovieCatalogueItems = useMemo(() => {
+    const movies = movieCatalogue?.results || [];
+    if (!streamingOnly) return movies;
+    return movies.filter(movie => ottAvailability[String(movie.id)]?.status === 'streaming');
+  }, [movieCatalogue, streamingOnly, ottAvailability]);
+
+  const ottPendingCount = movieCatalogue?.results.filter(movie => {
+    const status = ottAvailability[String(movie.id)]?.status;
+    return !status || status === 'loading';
+  }).length || 0;
+
   // Seed count is the default ranking so the strongest swarms appear first.
   // 720p/1080p are mutually exclusive. Size and Time are independent sort toggles.
   const [resolutionFilter, setResolutionFilter] = useState<'720p' | '1080p' | null>(null);
   const [sizeSort, setSizeSort] = useState<'asc' | 'desc' | null>(null);
   const [timeSort, setTimeSort] = useState<'desc' | 'asc' | null>(null);
+  const [releaseYearSort, setReleaseYearSort] = useState<'newest' | 'oldest' | null>(null);
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [preparingTorrentKey, setPreparingTorrentKey] = useState<string | null>(null);
   const [playingTorrentKey, setPlayingTorrentKey] = useState<string | null>(null);
@@ -69,6 +406,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [prepareWaitTitle, setPrepareWaitTitle] = useState('');
   const [prepareWaitOpen, setPrepareWaitOpen] = useState(false);
   const [prepareError, setPrepareError] = useState('');
+  const [fullTorrentTitle, setFullTorrentTitle] = useState<string | null>(null);
+  const [fullTorrentTitleKey, setFullTorrentTitleKey] = useState<string | null>(null);
+  const [fullTorrentTitleFading, setFullTorrentTitleFading] = useState(false);
 
   // Metadata is prefetched in small batches so search remains fast while the
   // most likely results are already resolved when the user clicks Add.
@@ -83,6 +423,259 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const recentSearchRef = useRef<HTMLDivElement | null>(null);
   const searchRequestRef = useRef<AbortController | null>(null);
   const searchGenerationRef = useRef(0);
+  const fullTorrentTitleFadeTimerRef = useRef<number | null>(null);
+  const fullTorrentTitleHideTimerRef = useRef<number | null>(null);
+
+  // Poster resolution runs independently of torrent search and ranking.
+  // Results are queued in seed order, but only two background resolutions run
+  // at once so this never becomes a search bottleneck.
+  const [posterOverrides, setPosterOverrides] = useState<Record<string, string>>({});
+  const posterLoadedRef = useRef(new Set<string>());
+  const posterBackgroundQueueRef = useRef<Array<{ key: string; result: TorrentSearchResult }>>([]);
+  const posterBackgroundQueuedRef = useRef(new Set<string>());
+  const posterBackgroundActiveRef = useRef(0);
+  const posterBackgroundGenerationRef = useRef(0);
+  const posterBackgroundAttemptsRef = useRef(new Map<string, number>());
+
+  const posterKeyFor = (result: TorrentSearchResult) =>
+    String(
+      result.guid ||
+      result.infoHash ||
+      result.magnetUrl ||
+      result.downloadUrl ||
+      result.title
+    );
+
+  const fullTorrentTitleFor = (result: TorrentSearchResult) => {
+    // Indexer search pages can truncate the displayed title, while the magnet's
+    // dn parameter normally carries the actual full torrent name.
+    const magnet = String(result.magnetUrl || result.downloadUrl || '').trim();
+    if (magnet) {
+      try {
+        const query = magnet.includes('?') ? magnet.slice(magnet.indexOf('?') + 1) : '';
+        const params = new URLSearchParams(query);
+        const displayName = params.get('dn')?.trim();
+        if (displayName) return displayName;
+      } catch {
+        // Fall back to the API title below.
+      }
+    }
+
+    return String(result.title || result.mediaTitle || '').trim();
+  };
+
+  const rawPosterUrlFor = (result: TorrentSearchResult) => {
+    const raw = String(result.posterUrl || '').trim();
+    if (!raw) return '';
+    return raw.startsWith('/') ? API_BASE + raw : raw;
+  };
+
+  const posterResolveCandidateUrlsFor = (result: TorrentSearchResult) => {
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+
+    const addCandidate = (title: string, year = '') => {
+      const clean = String(title || '')
+        .replace(/[._]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/^[-._\s]+|[-._\s]+$/g, '')
+        .trim();
+      if (!clean) return;
+
+      const yearMatch = clean.match(/\b((?:19|20)\d{2})\b/);
+      const inferredYear = year || yearMatch?.[1] || '';
+      const titleOnly = clean.replace(/\s*\b((?:19|20)\d{2})\b.*$/i, '').trim() || clean;
+
+      const params = new URLSearchParams({ title: titleOnly });
+      if (inferredYear) params.set('year', inferredYear);
+      const url = API_BASE + '/api/poster/resolve?' + params.toString();
+      if (!seen.has(url)) {
+        seen.add(url);
+        candidates.push(url);
+      }
+    };
+
+    // Ask the existing poster resolver first. This uses the same lookup and
+    // cache as normal image rendering, so successful work is shared.
+    const rawUrl = rawPosterUrlFor(result);
+    if (rawUrl) {
+      addCandidate(
+        rawUrl.split('?title=')[1]?.split('&')[0]
+          ? decodeURIComponent(rawUrl.split('?title=')[1].split('&')[0].replace(/\+/g, ' '))
+          : String(result.mediaTitle || result.title || ''),
+        String(result.year || '')
+      );
+    }
+
+    const explicitYear = result.year ? String(result.year) : '';
+    const mediaTitle = String(result.mediaTitle || '').trim();
+    const rawTitle = String(result.title || '').trim();
+    const baseTitle = mediaTitle || rawTitle;
+
+    addCandidate(mediaTitle, explicitYear);
+
+    const cleaned = baseTitle
+      .replace(/[._]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const yearMatch = cleaned.match(/\b((?:19|20)\d{2})\b/);
+    const year = explicitYear || yearMatch?.[1] || '';
+
+    if (!mediaTitle && yearMatch?.index != null) {
+      addCandidate(cleaned.slice(0, yearMatch.index), year);
+    }
+
+    const releaseCut = cleaned.split(
+      /\b(?:2160p|1440p|1080p|720p|576p|480p|4k|8k|web[- ]?dl|web[- ]?rip|webrip|bluray|brrip|hdrip|dvdrip|cam|hdcam|x264|x265|h264|h265|hevc|aac|ddp|atmos|proper|repack|remastered|extended|unrated|directors?\s+cut)\b/i
+    )[0].trim();
+    if (releaseCut) addCandidate(releaseCut, year);
+
+    const softClean = cleaned
+      .replace(
+        /\b(?:hindi|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|gujarati|urdu|dual\s+audio|multi\s+audio|dubbed|dub|multi|proper|repack|remastered|extended|unrated|imax|hdr10\+?|dolby\s+vision)\b/gi,
+        ' '
+      )
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (softClean) addCandidate(softClean, year);
+
+    const aliasPairs: Array<[RegExp, string]> = [
+      [/\bspiderman\b/gi, 'Spider Man'],
+      [/\bspider\s+man\b/gi, 'Spiderman'],
+      [/\bantman\b/gi, 'Ant Man'],
+      [/\bant\s+man\b/gi, 'Antman'],
+      [/\bironman\b/gi, 'Iron Man'],
+      [/\biron\s+man\b/gi, 'Ironman'],
+      [/\bblackpanther\b/gi, 'Black Panther'],
+      [/\bblack\s+panther\b/gi, 'Blackpanther'],
+      [/\bdoctorstrange\b/gi, 'Doctor Strange'],
+      [/\bdoctor\s+strange\b/gi, 'Doctorstrange'],
+      [/\bcaptainamerica\b/gi, 'Captain America'],
+      [/\bcaptain\s+america\b/gi, 'Captainamerica'],
+      [/\bguardiansofthegalaxy\b/gi, 'Guardians of the Galaxy'],
+    ];
+
+    for (const [pattern, replacement] of aliasPairs) {
+      if (pattern.test(cleaned)) {
+        addCandidate(cleaned.replace(pattern, replacement), year);
+      }
+    }
+
+    return candidates;
+  };
+
+  const resolvePosterInBackground = async (url: string, generation: number) => {
+    if (generation !== posterBackgroundGenerationRef.current) return '';
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'force-cache'
+      });
+
+      if (!response.ok) return '';
+
+      const data = await response.json().catch(() => null);
+      const resolved = String(data?.url || '').trim();
+      return resolved;
+    } catch {
+      return '';
+    }
+  };
+
+  const startPosterBackgroundWorkers = () => {
+    const generation = posterBackgroundGenerationRef.current;
+
+    while (
+      posterBackgroundActiveRef.current < 2 &&
+      posterBackgroundQueueRef.current.length > 0
+    ) {
+      const job = posterBackgroundQueueRef.current.shift();
+      if (!job) break;
+
+      posterBackgroundQueuedRef.current.delete(job.key);
+      posterBackgroundActiveRef.current += 1;
+
+      void (async () => {
+        try {
+          if (generation !== posterBackgroundGenerationRef.current) return;
+
+          const key = job.key;
+
+          // A visible/loaded poster wins immediately; don't spend background
+          // work resolving something the browser already has.
+          if (posterLoadedRef.current.has(key)) return;
+
+          const candidates = posterResolveCandidateUrlsFor(job.result);
+          for (const candidate of candidates) {
+            if (generation !== posterBackgroundGenerationRef.current) return;
+
+            const resolved = await resolvePosterInBackground(candidate, generation);
+            if (resolved) {
+              setPosterOverrides(prev => (
+                prev[key] === resolved ? prev : { ...prev, [key]: resolved }
+              ));
+              return;
+            }
+
+            await new Promise(resolve => window.setTimeout(resolve, 250));
+          }
+
+          // One delayed retry gives transient provider failures another chance.
+          const attempts = posterBackgroundAttemptsRef.current.get(key) || 0;
+          if (attempts < 1 && generation === posterBackgroundGenerationRef.current) {
+            posterBackgroundAttemptsRef.current.set(key, attempts + 1);
+            window.setTimeout(() => {
+              if (generation !== posterBackgroundGenerationRef.current) return;
+              if (posterLoadedRef.current.has(key)) return;
+              if (posterBackgroundQueuedRef.current.has(key)) return;
+
+              posterBackgroundQueuedRef.current.add(key);
+              posterBackgroundQueueRef.current.push(job);
+              startPosterBackgroundWorkers();
+            }, 45000);
+          }
+        } finally {
+          posterBackgroundActiveRef.current = Math.max(
+            0,
+            posterBackgroundActiveRef.current - 1
+          );
+
+          if (generation === posterBackgroundGenerationRef.current) {
+            startPosterBackgroundWorkers();
+          }
+        }
+      })();
+    }
+  };
+
+  const startPosterBackgroundSearch = (items: TorrentSearchResult[]) => {
+    posterBackgroundGenerationRef.current += 1;
+    posterBackgroundQueueRef.current = [];
+    posterBackgroundQueuedRef.current.clear();
+    posterBackgroundAttemptsRef.current.clear();
+    posterLoadedRef.current.clear();
+
+    const generation = posterBackgroundGenerationRef.current;
+
+    for (const result of items) {
+      const key = posterKeyFor(result);
+      if (!key || posterBackgroundQueuedRef.current.has(key)) continue;
+
+      posterBackgroundQueuedRef.current.add(key);
+      posterBackgroundQueueRef.current.push({ key, result });
+    }
+
+    // Start immediately after results arrive, but never await this work.
+    if (generation === posterBackgroundGenerationRef.current) {
+      startPosterBackgroundWorkers();
+    }
+  };
+
+  const posterUrlFor = (result: TorrentSearchResult) =>
+    posterOverrides[posterKeyFor(result)] || rawPosterUrlFor(result);
 
   const normalizeMatchText = (value: string) =>
     String(value || '')
@@ -96,26 +689,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const title = normalizeMatchText(result.title);
     if (!title || title.length < 4) return [];
 
-    const exact: SeedrSearchFile[] = [];
-    const related: SeedrSearchFile[] = [];
-
-    for (const file of seedrFiles) {
+    // Only auto-associate an existing Seedr file when the torrent title matches
+    // the actual Seedr folder/file name exactly. The previous fuzzy fallback
+    // could make one downloaded torrent appear as "Play" on several different
+    // search results for the same movie (e.g. different qualities/releases).
+    return seedrFiles.filter(file => {
       const folderPath = String(file.folderPath || '');
       const folderName = folderPath.split('/').filter(Boolean).pop() || '';
       const fileName = normalizeMatchText(file.name);
       const folder = normalizeMatchText(folderName);
 
-      if (folder === title || fileName === title) {
-        exact.push(file);
-        continue;
-      }
-
-      if (title.length >= 8 && (folder.includes(title) || title.includes(folder) || fileName.includes(title))) {
-        related.push(file);
-      }
-    }
-
-    return exact.length > 0 ? exact : related;
+      return folder === title || fileName === title;
+    });
   };
 
   const preparedForResult = (result: TorrentSearchResult): SeedrSearchFile[] => {
@@ -128,7 +713,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
   const preparedByKeyRef = useRef(new Map<string, { files: SeedrSearchFile[] }>());
   const apiFetchRecent = (input: RequestInfo | URL, init?: RequestInit) => {
-    const base = API_BASE;
+    const base = (String(import.meta.env.VITE_API_URL || '').trim() || 'https://torrent-studio-vercel-render-seedr-26fd.onrender.com').replace(/\/+$/, '');
     const value = String(input);
     return fetch(value.startsWith('/') ? base + value : value, init);
   };
@@ -166,6 +751,41 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  const showFullTorrentTitleBubble = (result: TorrentSearchResult) => {
+    if (fullTorrentTitleFadeTimerRef.current !== null) {
+      window.clearTimeout(fullTorrentTitleFadeTimerRef.current);
+    }
+    if (fullTorrentTitleHideTimerRef.current !== null) {
+      window.clearTimeout(fullTorrentTitleHideTimerRef.current);
+    }
+
+    const key = posterKeyFor(result);
+    setFullTorrentTitleKey(key);
+    setFullTorrentTitle(String(result.title || result.mediaTitle || '').trim());
+    setFullTorrentTitleFading(false);
+
+    fullTorrentTitleFadeTimerRef.current = window.setTimeout(() => {
+      setFullTorrentTitleFading(true);
+    }, 5550);
+
+    fullTorrentTitleHideTimerRef.current = window.setTimeout(() => {
+      setFullTorrentTitle(null);
+      setFullTorrentTitleKey(null);
+      setFullTorrentTitleFading(false);
+    }, 6000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (fullTorrentTitleFadeTimerRef.current !== null) {
+        window.clearTimeout(fullTorrentTitleFadeTimerRef.current);
+      }
+      if (fullTorrentTitleHideTimerRef.current !== null) {
+        window.clearTimeout(fullTorrentTitleHideTimerRef.current);
+      }
     };
   }, []);
 
@@ -212,10 +832,17 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
 
 
-  const runSearch = async (event?: React.FormEvent) => {
+  const runSearch = async (event?: React.FormEvent, searchOverride?: string, searchMode?: 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'latest-hollywood' | 'latest-bollywood') => {
     event?.preventDefault();
+    setMovieTorrentSearchError('');
+    setMovieTorrentPreviewCatalogueId(null);
+    movieTorrentSearchControllerRef.current?.abort();
+    movieTorrentSearchGenerationRef.current += 1;
+    setMovieTorrentSearchLoading(false);
+    setMovieTorrentPickerGroups(null);
+    setMovieTorrentPreviewGroup(null);
 
-    const trimmed = query.trim();
+    const trimmed = (searchOverride ?? query).trim();
     if (trimmed.length < 2) {
       setError('Enter at least 2 characters to search.');
       setResults([]);
@@ -230,15 +857,56 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
     try {
       setIsSearching(true);
+      setCatalogueBuildProgress('');
+      setMovieCatalogue(null);
       setShowRecentSearches(false);
       setError('');
       setResults([]);
+      setSelectedQualityByGroup({});
       setSearched(false);
+      setPosterOverrides({});
+      posterLoadedRef.current.clear();
+      posterBackgroundQueueRef.current = [];
+      posterBackgroundQueuedRef.current.clear();
+      posterBackgroundAttemptsRef.current.clear();
+      posterBackgroundGenerationRef.current += 1;
       saveRecentSearch(trimmed);
+      setCatalogueBuildProgress('');
+
+      let data: TorrentSearchResult[];
+      if (searchMode) {
+        const labels: Record<string, string> = {
+          marvel: 'Marvel English', 'marvel-hindi': 'Marvel Hindi',
+          'dc-live-action': 'DC Live-Action English', 'dc-live-action-hindi': 'DC Live-Action Hindi',
+          'dc-animated': 'DC animated',
+          'latest-hollywood': 'Latest Hollywood', 'latest-bollywood': 'Latest Bollywood'
+        };
+        let catalogue = searchMode === 'marvel'
+          ? await api.getMarvelCatalogue(controller.signal)
+          : await api.getCatalogue(searchMode, controller.signal);
+        while (catalogue.status === 'building' || catalogue.status === 'idle') {
+          if (generation !== searchGenerationRef.current) return;
+          setCatalogueBuildProgress(
+            'Building shared ' + (labels[searchMode] || 'movie') + ' catalogue: ' +
+            catalogue.completed + ' of ' + catalogue.total +
+            ' searches completed. Results will be cached for future visitors.'
+          );
+          await new Promise<void>(resolve => window.setTimeout(resolve, 2200));
+          catalogue = searchMode === 'marvel'
+            ? await api.getMarvelCatalogue(controller.signal)
+            : await api.getCatalogue(searchMode, controller.signal);
+        }
+        if (catalogue.status !== 'ready') {
+          throw new Error(catalogue.error || ('Could not load the ' + (labels[searchMode] || 'movie') + ' catalogue.'));
+        }
+        data = catalogue.results;
+        setCatalogueBuildProgress(catalogue.refreshing ? 'Showing cached results while the monthly refresh runs in the background.' : '');
+      } else {
+        data = await api.searchTorrents(trimmed, 50, controller.signal);
+      }
 
       // The backend owns low-result TV/season fallback. Keeping that logic
       // server-side avoids launching duplicate season searches from the browser.
-      const data = await api.searchTorrents(trimmed, 50, controller.signal);
 
       // Never let an older request overwrite a newer search. This matters
       // when a slow 1337x fallback finishes after a later click.
@@ -246,6 +914,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
       setResults(data);
       setSearched(true);
+      startPosterBackgroundSearch(data);
 
       // Do not wait for metadata before displaying results. Start resolving
       // the first two results immediately, then the next two after that batch
@@ -303,6 +972,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (err?.name === 'AbortError') return;
       setResults([]);
       setSearched(true);
+      setCatalogueBuildProgress('');
       setError(err?.message || 'Torrent search failed.');
     } finally {
       if (generation === searchGenerationRef.current) {
@@ -314,16 +984,285 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }
   };
 
+  const searchMovieTorrents = async (movie: MovieCatalogueItem) => {
+    const titleQuery = movie.title + (movie.year ? ' ' + movie.year : '');
+    movieTorrentSearchControllerRef.current?.abort();
+    const controller = new AbortController();
+    movieTorrentSearchControllerRef.current = controller;
+    const generation = ++movieTorrentSearchGenerationRef.current;
+
+    setMovieTorrentSearchTitle(titleQuery);
+    setMovieTorrentPreviewCatalogueId(String(movie.id));
+    setMovieTorrentSearchLoading(true);
+    setMovieTorrentSearchError('');
+    setMovieTorrentPreviewGroup(null);
+    setMovieTorrentPickerGroups(null);
+    setSelectedMovieTorrentQualityByGroup({});
+    setResults([]);
+    setSearched(false);
+    setQuery(titleQuery);
+    setSelectedQualityByGroup({});
+
+    try {
+      let data = await api.searchTorrents(titleQuery, 50, controller.signal);
+      if (generation !== movieTorrentSearchGenerationRef.current) return;
+
+      // Prefer active swarms, but don't let missing seeder metadata hide every
+      // release. The regular search can display results from indexers that do
+      // not report seed counts reliably.
+      const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
+      const lowQualityRelease = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
+      // Indexers often return loose keyword matches. Keep a result only when the
+      // actual release title contains the selected movie title as a phrase, so a
+      // movie called "Only Me" won't show unrelated releases containing "Only"
+      // and "Me" far apart in their titles.
+      const expectedTitle = normalizeGroupTitle(movie.title);
+      const groupUsableResults = (items: TorrentSearchResult[], requireActiveSeeders: boolean) => {
+        const usable = items.filter(result => {
+          const releaseTitle = normalizeGroupTitle(String(result.title || ''));
+          const mediaTitle = normalizeGroupTitle(String(result.mediaTitle || ''));
+          const titleMatches = Boolean(expectedTitle) &&
+            (releaseTitle.includes(expectedTitle) || mediaTitle === expectedTitle || mediaTitle.includes(expectedTitle));
+          if (!titleMatches) return false;
+          const rawSize = Number(result.size);
+          const size = Number.isFinite(rawSize) && rawSize > 0 ? rawSize : 0;
+          const seeders = Number(result.seeders);
+          const hasSource = Boolean(
+            String(result.magnetUrl || '').trim() ||
+            String(result.downloadUrl || '').trim() ||
+            String(result.sourceUrl || '').trim()
+          );
+          if (!hasSource || size < 100 * 1024 * 1024 || size > maxSeedrFriendlySize) return false;
+          if (requireActiveSeeders && (!Number.isFinite(seeders) || seeders <= 0)) return false;
+          return !lowQualityRelease.test(String(result.title || '') + ' ' + String(result.quality || ''));
+        });
+        return groupTorrentResults(usable);
+      };
+
+      let groups = groupUsableResults(data, true);
+
+      // Year tags aren't always present in torrent filenames. When the strict
+      // title+year search yields nothing, retry the movie's plain title before
+      // concluding that the provider has no releases.
+      const titleOnlyQuery = String(movie.title || '').trim();
+      if (
+        groups.length === 0 &&
+        titleOnlyQuery &&
+        titleOnlyQuery.toLowerCase() !== titleQuery.trim().toLowerCase()
+      ) {
+        try {
+          const titleOnlyResults = await api.searchTorrents(titleOnlyQuery, 50, controller.signal);
+          if (generation !== movieTorrentSearchGenerationRef.current) return;
+          const seen = new Set<string>();
+          data = [...data, ...titleOnlyResults].filter(result => {
+            const key = String(
+              result.infoHash || result.magnetUrl || result.downloadUrl ||
+              result.sourceUrl || (String(result.title || '') + '|' + String(result.size || ''))
+            ).trim().toLowerCase();
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          groups = groupUsableResults(data, true);
+        } catch (retryError: any) {
+          if (retryError?.name === 'AbortError' || generation !== movieTorrentSearchGenerationRef.current) return;
+          // Keep the first response; the fallback below can still use it.
+        }
+      }
+
+      // Some indexers omit seeder counts. If no actively seeded releases
+      // survived, show linked, non-CAM releases within the size limit rather
+      // than reporting a false "no releases" failure.
+      if (groups.length === 0) {
+        groups = groupUsableResults(data, false);
+      }
+
+      if (groups.length === 0) {
+        if (movieCatalogue?.catalogue === 'popular-bollywood') {
+          setMovieTorrentSearchError('Coming soon on OTT — this title is not available to prepare right now. Check back later for a streaming release.');
+        } else {
+          setMovieTorrentSearchError('No usable torrent releases were found for ' + titleQuery + '. Try again later or use a shorter title.');
+        }
+        return;
+      }
+
+      startPosterBackgroundSearch(groups.flatMap(group => group.variants));
+      if (groups.length === 1) {
+        // One canonical result stays on the movie browser in a normal-style
+        // inline torrent card, including its grouped quality dropdown.
+        const group = groups[0];
+        setSelectedMovieTorrentQualityByGroup({ [group.key]: torrentResultKey(group.variants[0]) });
+        setMovieTorrentPreviewGroup(group);
+      } else {
+        // Keep the catalogue visible and let the user pick a release from a
+        // compact text/list modal. Choosing a row opens its grouped card below.
+        setMovieTorrentPickerGroups(groups);
+      }
+    } catch (error: any) {
+      if (generation !== movieTorrentSearchGenerationRef.current || error?.name === 'AbortError') return;
+      setMovieTorrentSearchError(String(error?.message || 'Torrent search failed for ' + titleQuery + '.'));
+    } finally {
+      if (generation === movieTorrentSearchGenerationRef.current) {
+        setMovieTorrentSearchLoading(false);
+        if (movieTorrentSearchControllerRef.current === controller) {
+          movieTorrentSearchControllerRef.current = null;
+        }
+      }
+    }
+  };
+
+  const selectMovieTorrentGroup = (group: TorrentQualityGroup) => {
+    setSelectedMovieTorrentQualityByGroup({ [group.key]: torrentResultKey(group.variants[0]) });
+    setMovieTorrentPreviewGroup(group);
+    setMovieTorrentPickerGroups(null);
+    setMovieTorrentSearchError('');
+    startPosterBackgroundSearch(group.variants);
+  };
+
+  const prepareMovieTorrent = async (result: TorrentSearchResult) => {
+    const source = result.magnetUrl || result.downloadUrl || result.sourceUrl;
+    const torrentKey = result.infoHash || source || result.title;
+    if (!source || preparingTorrentKey === torrentKey) return;
+
+    setPrepareError('');
+    setMovieTorrentSearchError('');
+    setPreparingTorrentKey(torrentKey);
+    setPrepareWaitTitle(result.title);
+    setPrepareWaitOpen(false);
+    const longWaitTimer = window.setTimeout(() => setPrepareWaitOpen(true), 30000);
+
+    try {
+      const metadata = metadataCacheRef.current.get(torrentKey);
+      const prepared = await onPrepare(result, metadata);
+      const deletedFolderIds = new Set(
+        (prepared?.deletedFolderIds || []).map(id => String(id).trim()).filter(Boolean)
+      );
+      if (deletedFolderIds.size > 0) {
+        for (const [key, entry] of preparedByKeyRef.current.entries()) {
+          if (entry.files.some(file => deletedFolderIds.has(String(file.folderId)))) {
+            preparedByKeyRef.current.delete(key);
+          }
+        }
+      }
+      if (prepared?.files?.length) {
+        preparedByKeyRef.current.set(torrentKey, { files: prepared.files });
+      }
+      setPrepareWaitOpen(false);
+    } catch (error: any) {
+      const message = String(error?.message || 'Could not prepare this torrent.');
+      if (!message.toLowerCase().includes('cancelled by another selection')) {
+        setPrepareError(message);
+      }
+    } finally {
+      window.clearTimeout(longWaitTimer);
+      setPreparingTorrentKey(current => current === torrentKey ? null : current);
+    }
+  };
+
+  const openMovieCatalogue = async (
+    key: MovieCatalogueKey,
+    searchText: string,
+    page = 1,
+    onlyReleased = releasedOnly,
+  ) => {
+    movieTorrentSearchControllerRef.current?.abort();
+    movieTorrentSearchGenerationRef.current += 1;
+    setMovieTorrentSearchLoading(false);
+    setMovieTorrentPickerGroups(null);
+    setMovieTorrentPreviewGroup(null);
+    setMovieTorrentPreviewCatalogueId(null);
+    setMovieTorrentSearchError('');
+    const generation = ++searchGenerationRef.current;
+    searchRequestRef.current?.abort();
+    const controller = new AbortController();
+    searchRequestRef.current = controller;
+
+    try {
+      setIsSearching(true);
+      setCatalogueBuildProgress('Loading the ' + searchText.replace(/Movies?$/i, '').trim() + ' movie catalogue…');
+      setMovieCatalogueSearchText(searchText);
+      setShowRecentSearches(false);
+      setQuery(searchText);
+      setError('');
+      setResults([]);
+      setSelectedQualityByGroup({});
+      setSearched(false);
+      setPosterOverrides({});
+      posterLoadedRef.current.clear();
+      posterBackgroundQueueRef.current = [];
+      posterBackgroundQueuedRef.current.clear();
+      posterBackgroundAttemptsRef.current.clear();
+      posterBackgroundGenerationRef.current += 1;
+
+      const data = await api.getMovieCatalogue(key, page, onlyReleased, controller.signal);
+      if (generation !== searchGenerationRef.current) return;
+      setMovieCatalogue(data);
+      queueOttLookups(data.results);
+      setCatalogueBuildProgress('');
+    } catch (err: any) {
+      if (generation !== searchGenerationRef.current) return;
+      if (err?.name === 'AbortError') return;
+
+      const message = String(err?.message || 'Movie catalogue failed.');
+      const legacyFallbackKey: Record<MovieCatalogueKey, 'marvel' | 'dc-live-action' | 'dc-animated' | 'latest-hollywood' | 'latest-bollywood'> = {
+        marvel: 'marvel',
+        'dc-live-action': 'dc-live-action',
+        'dc-animated': 'dc-animated',
+        'latest-hollywood': 'latest-hollywood',
+        'latest-bollywood': 'latest-bollywood',
+        'popular-hollywood': 'latest-hollywood',
+        'trending-hollywood': 'latest-hollywood',
+        'popular-bollywood': 'latest-bollywood',
+        'trending-bollywood': 'latest-bollywood',
+      };
+      const fallbackKey = legacyFallbackKey[key];
+      if (fallbackKey) {
+        setMovieCatalogue(null);
+        await runSearch(undefined, searchText, fallbackKey);
+        const categoryFallback = fallbackKey === 'latest-hollywood' && key !== 'latest-hollywood'
+          ? 'Latest Hollywood'
+          : fallbackKey === 'latest-bollywood' && key !== 'latest-bollywood'
+            ? 'Latest Bollywood'
+            : searchText.replace(/Movies?$/i, '').trim();
+        const reason = message.includes('TMDB API credentials are not configured')
+          ? 'TMDB credentials are not configured.'
+          : message;
+        setError(
+          reason + ' Falling back to the existing ' + categoryFallback +
+          ' torrent catalogue where cached results are available. Popular and Trending shortcuts use Latest results during the outage.'
+        );
+      } else {
+        setMovieCatalogue(null);
+        setError(message);
+      }
+    } finally {
+      if (generation === searchGenerationRef.current) {
+        setIsSearching(false);
+        setCatalogueBuildProgress('');
+        if (searchRequestRef.current === controller) {
+          searchRequestRef.current = null;
+        }
+      }
+    }
+  };
+
   const sortedResults = useMemo(() => {
-    // new-test intentionally keeps the 2 GB limit.
+    // Keep only Seedr-friendly results between 100 MB and 2 GB.
     const maxSeedrFriendlySize = 2 * 1024 * 1024 * 1024;
+    // Exclude theatrical/unfinished releases regardless of provider. Keep the
+    // tokens bounded so words such as "timestamp" are not mistaken for TS.
+    const lowQualityRelease = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
     const sorted = results.filter(result => {
       const size = Number(result.size) || 0;
-      if (size > maxSeedrFriendlySize) return false;
+      const seeders = Number(result.seeders);
+      if (!Number.isFinite(seeders) || seeders <= 0) return false;
+      if (size < 100 * 1024 * 1024 || size > maxSeedrFriendlySize) return false;
+      const releaseText = `${String(result.title || '')} ${String(result.quality || '')}`;
+      if (lowQualityRelease.test(releaseText)) return false;
       if (resolutionFilter) {
-        const title = String(result.title || '');
+        const quality = torrentQualityDetails(result).label;
         const pattern = resolutionFilter === '720p' ? /(?:^|[^0-9])720p(?:[^0-9]|$)/i : /(?:^|[^0-9])1080p(?:[^0-9]|$)/i;
-        if (!pattern.test(title)) return false;
+        if (!pattern.test(quality)) return false;
       }
       return true;
     });
@@ -340,22 +1279,81 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         const comparison = timeSort === 'asc' ? aTime - bTime : bTime - aTime;
         if (comparison !== 0) return comparison;
       }
-      return (Number(b.seeders) || 0) - (Number(a.seeders) || 0);
+      // Keep the backend's relevance-first ranking by default. Re-sorting here
+      // by quality/seeders would undo its title-match scoring and let popular
+      // but less relevant releases appear above better matches.
+      return 0;
     });
     return sorted;
   }, [results, resolutionFilter, sizeSort, timeSort]);
 
-  const posterUrlFor = (result: TorrentSearchResult) => {
-    const raw = String(result.posterUrl || '').trim();
-    if (!raw) return '';
-    return raw.startsWith('/') ? API_BASE + raw : raw;
+  const groupedResults = useMemo(() => {
+    const groups = groupTorrentResults(sortedResults);
+    if (!releaseYearSort) return groups;
+
+    // Sort whole movie groups, never individual torrent variants. The year is
+    // the movie's release year (catalogue metadata), not the torrent upload date.
+    return [...groups].sort((a, b) => {
+      const yearA = torrentGroupReleaseYear(a);
+      const yearB = torrentGroupReleaseYear(b);
+      // Keep entries with unknown release years at the bottom in either mode.
+      if (!yearA && !yearB) {
+        return normalizeGroupTitle(a.title).localeCompare(normalizeGroupTitle(b.title), undefined, { numeric: true });
+      }
+      if (!yearA) return 1;
+      if (!yearB) return -1;
+      if (yearA !== yearB) {
+        return releaseYearSort === 'newest' ? yearB - yearA : yearA - yearB;
+      }
+      // Stable, predictable order for movies released in the same year.
+      return normalizeGroupTitle(a.title).localeCompare(normalizeGroupTitle(b.title), undefined, { numeric: true });
+    });
+  }, [sortedResults, releaseYearSort]);
+
+  const clearTmdbCacheAndReload = async () => {
+    const currentCatalogue = movieCatalogue;
+    const key = currentCatalogue?.catalogue || tmdbFranchiseKey;
+    const searchText = currentCatalogue ? movieCatalogueSearchText : tmdbFranchiseLabels[tmdbFranchiseKey];
+    const page = currentCatalogue?.page || 1;
+    const onlyReleased = currentCatalogue?.releasedOnly ?? releasedOnly;
+
+    setIsClearingTmdbCache(true);
+    setTmdbCacheMessage('');
+    try {
+      await api.clearTmdbMovieCaches();
+      ottLookupGenerationRef.current += 1;
+      ottQueueRef.current = [];
+      ottQueuedIdsRef.current.clear();
+      ottAvailabilityRef.current = {};
+      setOttAvailability({});
+      setTmdbCacheMessage('TMDB catalogue and OTT caches cleared. Reloading the selected catalogue…');
+      await openMovieCatalogue(key, searchText, page, onlyReleased);
+      setTmdbCacheMessage('TMDB caches cleared and a fresh catalogue request was sent.');
+    } catch (error: any) {
+      setTmdbCacheMessage(String(error?.message || 'Could not clear TMDB caches.'));
+    } finally {
+      setIsClearingTmdbCache(false);
+    }
+  };
+
+  const selectCachedFranchiseLanguage = (franchise: CachedFranchiseKey, language: 'english' | 'hindi') => {
+    setOpenCachedLanguageMenu(null);
+    setResolutionFilter(null);
+    setSizeSort(null);
+    setTimeSort(null);
+    setReleaseYearSort(null);
+    setTmdbFranchiseKey(franchise);
+    const mode = franchise === 'marvel'
+      ? (language === 'hindi' ? 'marvel-hindi' : 'marvel')
+      : (language === 'hindi' ? 'dc-live-action-hindi' : 'dc-live-action');
+    const category = franchise === 'marvel' ? 'Marvel Movies' : 'DC Live-Action Movies';
+    const languageLabel = language === 'hindi' ? 'Hindi' : 'English';
+    void runSearch(undefined, category + ' (' + languageLabel + ')', mode);
   };
 
   const extractedQuality = (result: TorrentSearchResult) => {
-    if (result.quality) return result.quality;
-    const title = String(result.title || '');
-    const match = title.match(/\b(2160p|1440p|1080p|720p|480p|4k|8k)\b(?:\s+(WEB-DL|WEBRip|BluRay|HDR|HEVC|x264|x265))?/i);
-    return match ? match[0] : '';
+    const details = torrentQualityDetails(result);
+    return details.label === 'Other release' ? '' : details.label;
   };
 
   return (
@@ -366,9 +1364,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             <Search className="w-5 h-5 text-cyan-400" />
             Search Torrents
           </h2>
-          <p className="hidden sm:block text-xs text-slate-400">
-            Search cached torrent indexes for movies and TV. Search works independently of the Render backend.
-          </p>
         </div>
 
         <form data-torrent-search="true" onSubmit={runSearch} className="mt-2.5 sm:mt-4 flex flex-row gap-1.5 sm:gap-2">
@@ -394,6 +1389,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 onClick={() => {
                   setQuery('');
                   setError('');
+                  setMovieCatalogue(null);
                   setSearched(false);
                   setResults([]);
                   setShowRecentSearches(recentSearches.length > 0);
@@ -484,14 +1480,146 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           </button>
         </form>
 
+        <div className="mt-2 flex flex-wrap gap-2" aria-label="Movie catalogues">
+          <button
+            type="button"
+            onClick={() => {
+              setResolutionFilter(null);
+              setSizeSort(null);
+              setTimeSort(null);
+              setReleaseYearSort(null);
+              void openMovieCatalogue('popular-bollywood', 'Popular Bollywood Movies', 1);
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-cyan-500 hover:text-cyan-300"
+          >
+            ⭐ Popular Bollywood
+          </button>
 
+          <button
+            type="button"
+            onClick={() => {
+              setResolutionFilter(null);
+              setSizeSort(null);
+              setTimeSort(null);
+              setReleaseYearSort(null);
+              setStreamingOnly(false);
+              void openMovieCatalogue('latest-bollywood', 'Bollywood Movies', 1);
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-cyan-500 hover:text-cyan-300"
+          >
+            🎬 Bollywood
+          </button>
+
+          {([
+            ['marvel', '🦸 Marvel Movies'],
+            ['dc-live-action', '🦇 DC Live-Action'],
+          ] as const).map(([franchise, label]) => (
+            <div key={franchise} data-cached-language-menu="true" className="relative">
+              <button
+                type="button"
+                aria-expanded={openCachedLanguageMenu === franchise}
+                onClick={() => setOpenCachedLanguageMenu(current => current === franchise ? null : franchise)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-cyan-500 hover:text-cyan-300"
+              >
+                {label} <span className="ml-1 text-[10px]">▾</span>
+              </button>
+              {openCachedLanguageMenu === franchise && (
+                <div className="absolute left-0 top-full z-40 mt-1 min-w-[150px] overflow-hidden rounded-lg border border-slate-700 bg-slate-950 shadow-xl">
+                  {(['english', 'hindi'] as const).map(language => (
+                    <button
+                      key={language}
+                      type="button"
+                      onClick={() => selectCachedFranchiseLanguage(franchise, language)}
+                      className="block w-full px-3 py-2.5 text-left text-xs font-semibold text-slate-200 hover:bg-slate-800 hover:text-cyan-300"
+                    >
+                      {language === 'hindi' ? 'Hindi audio' : 'English audio'}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button
+            type="button"
+            onClick={() => {
+              setResolutionFilter(null);
+              setSizeSort(null);
+              setTimeSort(null);
+              setReleaseYearSort(null);
+              void runSearch(undefined, 'DC Animated Movies', 'dc-animated');
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-cyan-500 hover:text-cyan-300"
+          >
+            🎞️ DC Animated
+          </button>
+
+          {([
+            ['popular-hollywood', '⭐ Popular Hollywood', 'Popular Hollywood Movies'],
+            ['trending-hollywood', '🔥 Trending Hollywood', 'Trending Hollywood Movies'],
+          ] as const).map(([key, label, searchText]) => (
+            <button key={key} type="button" onClick={() => {
+              setResolutionFilter(null);
+              setSizeSort(null);
+              setTimeSort(null);
+              setReleaseYearSort(null);
+              void openMovieCatalogue(key, searchText, 1);
+            }} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-cyan-500 hover:text-cyan-300">{label}</button>
+          ))}
+        </div>
+        <div className="mt-2 flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950/70 p-2.5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-slate-200">TMDB movie discovery</div>
+            <div className="text-[11px] text-slate-500">Load fresh Marvel/DC movie metadata instead of the cached torrent list.</div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Franchise to browse using TMDB"
+              value={tmdbFranchiseKey}
+              onChange={(event) => setTmdbFranchiseKey(event.target.value as FranchiseTmdbKey)}
+              className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200 sm:flex-none"
+            >
+              <option value="marvel">Marvel Movies</option>
+              <option value="dc-live-action">DC Live-Action</option>
+              <option value="dc-animated">DC Animated</option>
+            </select>
+            <button
+              type="button"
+              disabled={isSearching}
+              onClick={() => {
+                setResolutionFilter(null);
+                setSizeSort(null);
+                setTimeSort(null);
+                setReleaseYearSort(null);
+                void openMovieCatalogue(tmdbFranchiseKey, tmdbFranchiseLabels[tmdbFranchiseKey], 1);
+              }}
+              className="shrink-0 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 disabled:opacity-50"
+            >
+              Browse with TMDB
+            </button>
+            <button
+              type="button"
+              disabled={isSearching || isClearingTmdbCache}
+              onClick={() => void clearTmdbCacheAndReload()}
+              className="shrink-0 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-50"
+              title="Clears all TMDB movie-catalogue and OTT caches, then refetches the current catalogue."
+            >
+              {isClearingTmdbCache
+                ? <><Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />Clearing…</>
+                : 'Clear TMDB cache & reload'}
+            </button>
+          </div>
+          {tmdbCacheMessage && (
+            <div className="text-[11px] leading-relaxed text-slate-400">{tmdbCacheMessage}</div>
+          )}
+        </div>
       </div>
 
       {isSearching && (
         <div className="p-5 sm:p-7 rounded-xl sm:rounded-2xl bg-slate-900 border border-slate-800 flex flex-col items-center justify-center gap-3">
           <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
-          <div className="text-sm font-semibold text-slate-200">Searching torrents...</div>
-          <div className="text-xs text-slate-500 text-center">Checking the fastest media sources and waiting for results.</div>
+          <div className="text-sm font-semibold text-slate-200">{catalogueBuildProgress ? 'Loading movie catalogue...' : 'Searching torrents...'}</div>
+          <div className="text-xs text-slate-500 text-center">{catalogueBuildProgress || 'Checking the fastest media sources and waiting for results.'}</div>
         </div>
       )}
 
@@ -555,6 +1683,445 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         </div>
       )}
 
+      {movieCatalogue && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+            <div className="text-xs text-slate-400">
+              {movieCatalogue.catalogue.startsWith('trending-')
+                ? movieCatalogue.results.length + ' trending titles on this page · Page ' + movieCatalogue.page + ' of ' + movieCatalogue.totalPages
+                : movieCatalogue.totalResults.toLocaleString() + ' movies · Page ' + movieCatalogue.page + ' of ' + movieCatalogue.totalPages.toLocaleString()
+              } · Metadata by {movieCatalogue.provider}
+            </div>
+            <div className="text-[11px] text-slate-500">Select a movie to search torrent providers</div>
+          </div>
+
+          <div className="flex flex-col gap-2 rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <label className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={releasedOnly}
+                  onChange={(event) => {
+                    const next = event.target.checked;
+                    setReleasedOnly(next);
+                    void openMovieCatalogue(
+                      movieCatalogue.catalogue,
+                      movieCatalogueSearchText,
+                      movieCatalogue.page,
+                      next,
+                    );
+                  }}
+                  className="h-4 w-4 accent-cyan-400"
+                />
+                Released movies only
+              </label>
+              <label className="flex cursor-pointer select-none items-center gap-2 text-xs font-semibold text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={streamingOnly}
+                  onChange={(event) => setStreamingOnly(event.target.checked)}
+                  className="h-4 w-4 accent-cyan-400"
+                />
+                Streaming now in India
+              </label>
+            </div>
+            <div className="text-[11px] leading-relaxed text-slate-500">
+              {releasedOnly ? 'Hides future and unconfirmed release dates.' : 'Includes upcoming releases.'}
+              {' '}OTT status, provider names and India digital-release dates are checked in the background.
+              {' '}Availability is checked with Watchmode when configured, with TMDB/JustWatch as a fallback; listings may be incomplete.
+            </div>
+          </div>
+
+          {movieTorrentSearchLoading && (
+            <div className="flex items-center gap-3 rounded-xl border border-cyan-500/30 bg-slate-950 px-3 py-3 text-sm text-slate-200">
+              <Loader2 className="h-5 w-5 shrink-0 animate-spin text-cyan-400" />
+              <div>
+                <div className="font-semibold">Finding torrent releases for {movieTorrentSearchTitle}…</div>
+                <div className="mt-0.5 text-xs text-slate-500">Combining matching qualities in the background. The movie catalogue stays open.</div>
+              </div>
+            </div>
+          )}
+          {movieTorrentSearchError && (
+            <div className={'flex items-start justify-between gap-3 rounded-xl border px-3 py-3 text-xs ' + (movieTorrentSearchError.startsWith('Coming soon on OTT') ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100' : 'border-amber-500/30 bg-amber-500/10 text-amber-200')}>
+              <span>{movieTorrentSearchError}</span>
+              <button type="button" onClick={() => setMovieTorrentSearchError('')} className="shrink-0 underline">Dismiss</button>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 lg:gap-4">
+            {visibleMovieCatalogueItems.map(movie => {
+              const previewGroup = movieTorrentPreviewCatalogueId === String(movie.id)
+                ? movieTorrentPreviewGroup
+                : null;
+              if (previewGroup) {
+                const selectedKey = selectedMovieTorrentQualityByGroup[previewGroup.key] || torrentResultKey(previewGroup.variants[0]);
+                const result = previewGroup.variants.find(variant => torrentResultKey(variant) === selectedKey) || previewGroup.variants[0];
+                const source = result.magnetUrl || result.downloadUrl || result.sourceUrl;
+                const torrentKey = result.infoHash || source || result.title;
+                const isPreparing = preparingTorrentKey === torrentKey;
+                const preparedFiles = preparedForResult(result);
+                const primaryFile = preparedFiles.find(file => /\.(mkv|mp4|m4v|webm|mov|avi|m3u8|ts|mp3|wav|flac|aac|ogg|m4a)$/i.test(file.name)) || preparedFiles[0];
+                const posterUrl = posterUrlFor(previewGroup.posterResult);
+                return (
+                  <article
+                    key={String(movie.id)}
+                    className="relative min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 transition hover:border-slate-700"
+                  >
+                    <div className="relative aspect-[2/3] w-full overflow-hidden rounded-t-xl bg-slate-950">
+                      {posterUrl ? (
+                        <img
+                          src={posterUrl}
+                          alt={previewGroup.title}
+                          loading="lazy"
+                          className="h-full w-full object-cover"
+                          onLoad={(event) => {
+                            const key = posterKeyFor(previewGroup.posterResult);
+                            posterLoadedRef.current.add(key);
+                            event.currentTarget.style.display = '';
+                            event.currentTarget.parentElement?.querySelector('[data-catalogue-torrent-poster-placeholder="true"]')?.classList.add('hidden');
+                          }}
+                          onError={(event) => {
+                            const key = posterKeyFor(previewGroup.posterResult);
+                            posterLoadedRef.current.delete(key);
+                            event.currentTarget.style.display = 'none';
+                            event.currentTarget.parentElement?.querySelector('[data-catalogue-torrent-poster-placeholder="true"]')?.classList.remove('hidden');
+                            if (!posterBackgroundQueuedRef.current.has(key) && !posterOverrides[key]) {
+                              posterBackgroundQueuedRef.current.add(key);
+                              posterBackgroundQueueRef.current.unshift({ key, result: previewGroup.posterResult });
+                              startPosterBackgroundWorkers();
+                            }
+                          }}
+                        />
+                      ) : null}
+                      <div
+                        data-catalogue-torrent-poster-placeholder="true"
+                        className={(posterUrl && posterLoadedRef.current.has(posterKeyFor(previewGroup.posterResult)) ? "hidden " : "") + "absolute inset-0 flex items-center justify-center bg-slate-950 text-slate-600"}
+                      >
+                        <Film className="h-8 w-8" />
+                      </div>
+                      {Number(result.seeders) > 0 && (
+                        <div className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-md bg-black/80 px-2 py-1 text-[10px] font-bold text-emerald-400">
+                          <Users className="h-3 w-3" />
+                          {Number(result.seeders) || 0}
+                        </div>
+                      )}
+                      {result.indexer && (
+                        <div
+                          className="absolute right-2 top-2 max-w-[70%] truncate rounded-md bg-black/75 px-2 py-1 text-[10px] font-medium text-slate-300"
+                          title={result.indexer}
+                        >
+                          {result.indexer}
+                        </div>
+                      )}
+                      {extractedQuality(result) && (
+                        <div className="absolute bottom-2 left-2 rounded-md border border-cyan-400/30 bg-slate-950/85 px-2 py-1 text-[10px] font-bold text-cyan-300">
+                          {extractedQuality(result)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-2 p-2.5">
+                      <div className="flex items-start gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => showFullTorrentTitleBubble({
+                            ...result,
+                            title: fullTorrentTitleFor(result) || result.title
+                          })}
+                          className="min-w-0 flex-1 text-left text-sm font-semibold leading-snug text-slate-100 line-clamp-2 hover:text-cyan-300"
+                          title="Click to view full torrent name"
+                        >
+                          {previewGroup.title}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMovieTorrentPreviewGroup(null);
+                            setMovieTorrentPreviewCatalogueId(null);
+                            setMovieTorrentSearchError('');
+                          }}
+                          className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-slate-500 hover:bg-slate-800 hover:text-white"
+                          title="Back to movie details"
+                          aria-label="Back to movie details"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] sm:text-xs">
+                        <span className="font-semibold text-emerald-400">▲ {Number(result.seeders) || 0} seeders</span>
+                        <span className="font-semibold text-amber-400">▼ {Number(result.leechers) || 0} peers</span>
+                        <span className="text-slate-500">{previewGroup.year || movie.year || ''}</span>
+                      </div>
+                      {previewGroup.variants.length > 1 && (
+                        <select
+                          aria-label={'Choose quality for ' + previewGroup.title}
+                          value={torrentResultKey(result)}
+                          onChange={event => setSelectedMovieTorrentQualityByGroup(previous => ({
+                            ...previous,
+                            [previewGroup.key]: event.target.value
+                          }))}
+                          className="w-full min-w-0 rounded-lg border border-slate-800 bg-slate-950 px-2 py-2 text-[10px] sm:text-xs font-medium text-slate-200 outline-none focus:border-cyan-500"
+                          title="Choose quality and torrent source"
+                        >
+                          {previewGroup.variants.map(variant => {
+                            const quality = torrentQualityDetails(variant);
+                            const size = formatBytes(Number(variant.size) || 0);
+                            const seeds = Number(variant.seeders) || 0;
+                            const provider = String(variant.indexer || '').trim();
+                            return (
+                              <option key={torrentResultKey(variant)} value={torrentResultKey(variant)}>
+                                {quality.label} · {size} · ▲{seeds}{provider ? ' · ' + provider : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      )}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="shrink-0 font-mono text-[10px] sm:text-[11px] text-slate-300">
+                          {formatBytes(Number(result.size) || 0)}
+                        </span>
+                        {preparedFiles.length > 0 && primaryFile ? (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setPlayingTorrentKey(torrentKey);
+                              try { await onPlaySeedrFile?.(primaryFile); }
+                              finally { setPlayingTorrentKey(current => current === torrentKey ? null : current); }
+                            }}
+                            disabled={playingTorrentKey === torrentKey}
+                            className="shrink-0 rounded-lg bg-emerald-400 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-60"
+                          >
+                            {playingTorrentKey === torrentKey ? 'Opening…' : 'Play'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void prepareMovieTorrent(result)}
+                            disabled={!source || isPreparing}
+                            className="shrink-0 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 disabled:opacity-50"
+                          >
+                            {isPreparing ? 'Preparing…' : 'Prepare'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </article>
+                );
+              }
+              return (
+                <article key={String(movie.id)} className="min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 flex flex-col">
+                <div className="relative aspect-[2/3] bg-slate-950">
+                  {movie.posterUrl ? (
+                    <img
+                      src={movie.posterUrl}
+                      alt={movie.title}
+                      loading="lazy"
+                      className="h-full w-full object-cover"
+                      onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center text-slate-600">
+                      <Film className="h-8 w-8" />
+                    </div>
+                  )}
+                  {movie.rating != null && movie.rating > 0 && (
+                    <span className="absolute left-2 top-2 rounded-md bg-slate-950/90 px-2 py-1 text-[10px] font-bold text-emerald-300">
+                      ★ {movie.rating.toFixed(1)}
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-1 flex-col gap-2 p-2.5">
+                  <div>
+                    <h3 className="text-sm font-bold leading-snug text-slate-100">{movie.title}</h3>
+                    <p className="mt-0.5 text-xs text-slate-500">{movie.year || 'Release year unknown'}</p>
+                    {(() => {
+                      const ott = ottAvailability[String(movie.id)];
+                      if (!ott || ott.status === 'loading') {
+                        return <p className="mt-2 text-[10px] text-slate-500">Checking OTT availability in India…</p>;
+                      }
+                      if (ott.status === 'error') {
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => queueOttLookups([movie], true)}
+                            title={ott.message}
+                            className="mt-2 text-left text-[10px] font-semibold text-amber-300 underline underline-offset-2"
+                          >
+                            OTT check failed · Retry
+                          </button>
+                        );
+                      }
+                      const label = ott.status === 'streaming'
+                        ? 'Streaming in India'
+                        : ott.status === 'rent_buy'
+                          ? 'Rent / Buy'
+                          : ott.status === 'digital_scheduled'
+                            ? 'Digital release scheduled'
+                            : ott.status === 'digital_release_known'
+                              ? 'Digital date recorded'
+                              : 'OTT not confirmed';
+                      const badgeClass = ott.status === 'streaming'
+                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                        : ott.status === 'rent_buy'
+                          ? 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+                          : ott.status === 'digital_scheduled'
+                            ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                            : 'border-slate-700 bg-slate-800 text-slate-300';
+                      return (
+                        <div className="mt-2 space-y-1.5">
+                          <span className={'inline-flex rounded-md border px-1.5 py-1 text-[10px] font-semibold ' + badgeClass}>
+                            {label}
+                          </span>
+                          {ott.theatricalReleaseDate && (
+                            <p className="text-[10px] text-slate-400">India theatrical release: {formatPublished(ott.theatricalReleaseDate)}</p>
+                          )}
+                          {ott.digitalReleaseDate && (
+                            <p className="text-[10px] text-slate-400">Digital release: {formatPublished(ott.digitalReleaseDate)}</p>
+                          )}
+                          {ott.streamingProviders.length > 0 && (
+                            <p className="text-[10px] leading-relaxed text-slate-400">
+                              <span className="text-slate-300">Stream:</span> {providerNames(ott.streamingProviders)}
+                            </p>
+                          )}
+                          {ott.rentProviders.length > 0 && (
+                            <p className="text-[10px] leading-relaxed text-slate-400">
+                              <span className="text-slate-300">Rent:</span> {providerNames(ott.rentProviders)}
+                            </p>
+                          )}
+                          {ott.buyProviders.length > 0 && (
+                            <p className="text-[10px] leading-relaxed text-slate-400">
+                              <span className="text-slate-300">Buy:</span> {providerNames(ott.buyProviders)}
+                            </p>
+                          )}
+                          <a
+                            href={ott.providerLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-[10px] text-cyan-300 hover:text-cyan-200"
+                          >
+                            Provider details <ExternalLink className="h-3 w-3" />
+                          </a>
+                          {ott.stale && <p className="text-[10px] text-amber-300">Showing cached availability.</p>}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  {movie.overview && (
+                    <p className="line-clamp-3 text-[11px] leading-relaxed text-slate-400">{movie.overview}</p>
+                  )}
+                  <button
+                    type="button"
+                    disabled={isSearching || movieTorrentSearchLoading}
+                    onClick={() => {
+                      setResolutionFilter(null);
+                      setSizeSort(null);
+                      setTimeSort(null);
+                      setReleaseYearSort(null);
+                      void searchMovieTorrents(movie);
+                    }}
+                    className="mt-auto w-full rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 disabled:opacity-50"
+                  >
+                    {movieTorrentSearchLoading && movieTorrentSearchTitle === movie.title + (movie.year ? ' ' + movie.year : '')
+                      ? <><Loader2 className="mr-1.5 inline h-3.5 w-3.5 animate-spin" />Searching…</>
+                      : <><Download className="mr-1.5 inline h-3.5 w-3.5" />Prepare</>}
+                  </button>
+                </div>
+              </article>
+              );
+            })}
+          </div>
+
+          {streamingOnly && ottPendingCount > 0 && (
+            <div className="rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-400">
+              Checking OTT availability in India for {ottPendingCount} more title{ottPendingCount === 1 ? '' : 's'}…
+            </div>
+          )}
+          {streamingOnly && visibleMovieCatalogueItems.length === 0 && ottPendingCount === 0 && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900 px-4 py-5 text-sm text-slate-400">
+              No titles on this page have confirmed streaming availability in India. Provider data can be incomplete; try another page or turn off this filter.
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
+            <button
+              type="button"
+              disabled={isSearching || movieCatalogue.page <= 1}
+              onClick={() => void openMovieCatalogue(movieCatalogue.catalogue, movieCatalogueSearchText, movieCatalogue.page - 1)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-300 hover:border-cyan-500 disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <span className="text-xs text-slate-500">Browse all pages to explore older releases too</span>
+            <button
+              type="button"
+              disabled={isSearching || movieCatalogue.page >= movieCatalogue.totalPages}
+              onClick={() => void openMovieCatalogue(movieCatalogue.catalogue, movieCatalogueSearchText, movieCatalogue.page + 1)}
+              className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
+
+          <div className="flex flex-col items-start gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-3 sm:flex-row sm:items-center">
+            <a href="https://www.themoviedb.org/" target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-2">
+              <img
+                src="https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_1-5bdc75aaebeb75dc7ae79426ddd9be3b2be1e342510f8202baf6bffa71d7f5c4.svg"
+                alt="The Movie Database (TMDB)"
+                className="h-7 w-7 object-contain"
+              />
+              <span className="text-xs font-bold text-slate-300">The Movie Database (TMDB)</span>
+            </a>
+            <p className="text-[10px] leading-relaxed text-slate-500">
+              This product uses the TMDB API but is not endorsed or certified by TMDB.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {movieTorrentPickerGroups && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3 sm:p-5"
+          onMouseDown={event => { if (event.target === event.currentTarget) setMovieTorrentPickerGroups(null); }}
+        >
+          <section role="dialog" aria-modal="true" aria-labelledby="movie-torrent-picker-title" className="flex max-h-[84vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl">
+            <header className="flex items-start justify-between gap-3 border-b border-slate-800 px-4 py-3">
+              <div className="min-w-0">
+                <h2 id="movie-torrent-picker-title" className="text-sm font-bold text-slate-100">Choose a torrent release</h2>
+                <p className="mt-1 truncate text-xs text-slate-400">{movieTorrentSearchTitle} · {movieTorrentPickerGroups.length} matching releases</p>
+                <p className="mt-1 text-[10px] text-slate-500">List view · qualities are combined within each release</p>
+              </div>
+              <button type="button" onClick={() => setMovieTorrentPickerGroups(null)} className="shrink-0 rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white" aria-label="Close torrent picker"><X className="h-4 w-4" /></button>
+            </header>
+            <div className="min-h-0 flex-1 divide-y divide-slate-800 overflow-y-auto">
+              {movieTorrentPickerGroups.map(group => {
+                const preferred = group.variants[0];
+                const qualityNames = group.variants.slice(0, 4).map(variant => torrentQualityDetails(variant).label);
+                return (
+                  <div key={group.key} className="flex items-center gap-3 px-4 py-3 hover:bg-slate-900/80">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-semibold leading-snug text-slate-100">{group.title}</div>
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+                        <span className="font-semibold text-emerald-400">▲ {Number(preferred.seeders) || 0} seeders</span>
+                        <span className="font-semibold text-amber-400">▼ {Number(preferred.leechers) || 0} peers</span>
+                        <span className="text-slate-300">{formatBytes(Number(preferred.size) || 0)}</span>
+                        {preferred.indexer && <span className="text-slate-500">{preferred.indexer}</span>}
+                      </div>
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        {group.variants.length} quality option{group.variants.length === 1 ? '' : 's'} · {qualityNames.join(', ')}{group.variants.length > 4 ? ', …' : ''}
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => selectMovieTorrentGroup(group)} className="shrink-0 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400">
+                      Select
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <footer className="border-t border-slate-800 px-4 py-2.5 text-[10px] text-slate-500">
+              Select a release to see its full card and quality picker without leaving the movie catalogue.
+            </footer>
+          </section>
+        </div>
+      )}
+
       {results.length > 0 && (
         <div className="space-y-2">
           <div className="rounded-xl border border-slate-800 bg-slate-900 px-2.5 py-2.5">
@@ -562,40 +2129,67 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               <span className="shrink-0 px-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">Filters</span>
               <button type="button" onClick={() => setResolutionFilter(current => current === '720p' ? null : '720p')} className={resolutionFilter === '720p' ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '720p'}>720p</button>
               <button type="button" onClick={() => setResolutionFilter(current => current === '1080p' ? null : '1080p')} className={resolutionFilter === '1080p' ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={resolutionFilter === '1080p'}>1080p</button>
-              <button type="button" onClick={() => setSizeSort(current => current === null ? 'asc' : current === 'asc' ? 'desc' : null)} className={sizeSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(sizeSort)}>Size {sizeSort === 'asc' ? '↑' : sizeSort === 'desc' ? '↓' : ''}</button>
-              <button type="button" onClick={() => setTimeSort(current => current === null ? 'desc' : current === 'desc' ? 'asc' : null)} className={timeSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(timeSort)}>Time {timeSort === 'desc' ? '↓' : timeSort === 'asc' ? '↑' : ''}</button>
+              <button type="button" onClick={() => { setReleaseYearSort(null); setSizeSort(current => current === null ? 'asc' : current === 'asc' ? 'desc' : null); }} className={sizeSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(sizeSort)} title="Sort by torrent size">Size {sizeSort === 'asc' ? '↑' : sizeSort === 'desc' ? '↓' : ''}</button>
+              <button type="button" onClick={() => { setReleaseYearSort(null); setTimeSort(current => current === null ? 'desc' : current === 'desc' ? 'asc' : null); }} className={timeSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(timeSort)} title="Sort by torrent upload date">Time {timeSort === 'desc' ? '↓' : timeSort === 'asc' ? '↑' : ''}</button>
+              <button type="button" onClick={() => { setSizeSort(null); setTimeSort(null); setReleaseYearSort(current => current === null ? 'newest' : current === 'newest' ? 'oldest' : null); }} className={releaseYearSort ? 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-cyan-500 text-slate-950 shadow-[0_0_14px_rgba(34,211,238,0.45)]' : 'shrink-0 rounded-lg px-3 py-2 text-xs font-bold bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'} aria-pressed={Boolean(releaseYearSort)} title="Sort movie cards by release year: newest first, oldest first, then default ranking">{releaseYearSort === 'newest' ? 'Year ↓ Newest' : releaseYearSort === 'oldest' ? 'Year ↑ Oldest' : 'Year'}</button>
             </div>
           </div>
 
           <div className="flex items-center justify-between gap-2 px-1">
             <div className="text-xs text-slate-400">
-              {sortedResults.length} of {results.length} result{results.length === 1 ? '' : 's'}
+              {groupedResults.length} titles · {sortedResults.length} torrent options
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 sm:block sm:rounded-2xl sm:border sm:border-slate-800 sm:overflow-hidden sm:bg-slate-900 sm:divide-y sm:divide-slate-800/80">
-            {sortedResults.map((result, index) => (
+          <div
+            className="grid grid-cols-2 gap-2 sm:block sm:rounded-2xl sm:border sm:border-slate-800 sm:overflow-hidden sm:bg-slate-900 sm:divide-y sm:divide-slate-800/80 lg:grid lg:grid-cols-6 lg:gap-[22px] lg:w-full lg:max-w-none lg:mx-0 lg:p-0 lg:border-0 lg:bg-transparent lg:divide-y-0 lg:overflow-visible"
+          >
+            {groupedResults.map((group, index) => {
+              const selectedKey = selectedQualityByGroup[group.key];
+              const result = group.variants.find(variant => torrentResultKey(variant) === selectedKey) || group.variants[0];
+              const posterResult = group.posterResult;
+              return (
               <div
-                key={result.guid || result.infoHash || (result.title + '-' + index)}
-                className="min-w-0 rounded-xl border border-slate-800 bg-slate-900 p-2 hover:bg-slate-800/80 transition sm:rounded-none sm:border-0 sm:bg-transparent sm:p-2 sm:px-4 sm:py-4"
+                key={group.key || (group.title + '-' + index)}
+                className={[
+                  'relative min-w-0 rounded-xl border border-slate-800 bg-slate-900 p-2 hover:bg-slate-800/80 transition sm:rounded-none sm:border-0 sm:bg-transparent sm:p-2 sm:px-4 sm:py-4 lg:flex lg:flex-col lg:self-start lg:h-fit lg:rounded-[14px] lg:border lg:border-slate-800 lg:bg-slate-900 lg:p-0 lg:hover:-translate-y-1 lg:hover:border-slate-700',
+                  fullTorrentTitleKey === posterKeyFor(result) ? 'z-50' : 'z-0'
+                ].join(' ')}
               >
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-start gap-2 sm:gap-3">
-                      <div className="relative w-full sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden border border-slate-800 bg-slate-950 shadow-md">
-                        {posterUrlFor(result) ? (
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 lg:flex-col lg:items-stretch lg:gap-0">
+                  <div className="min-w-0 flex-1 lg:w-full">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-start gap-2 sm:gap-3 lg:flex-col lg:gap-0">
+                      <div className="relative w-full sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden border border-slate-800 bg-slate-950 shadow-md lg:w-full lg:rounded-none lg:border-0 lg:shadow-none">
+                        {posterUrlFor(posterResult) ? (
                           <>
                             <img
-                              src={posterUrlFor(result)}
-                              alt={result.mediaTitle || result.title}
+                              src={posterUrlFor(posterResult)}
+                              alt={group.title}
                               loading="lazy"
                               className="w-full h-full object-cover"
+                              onLoad={(event) => {
+                                const key = posterKeyFor(posterResult);
+                                posterLoadedRef.current.add(key);
+                                event.currentTarget.style.display = '';
+                                event.currentTarget.parentElement?.querySelector('[data-poster-placeholder="true"]')?.classList.add('hidden');
+                              }}
                               onError={(event) => {
+                                const key = posterKeyFor(posterResult);
+                                posterLoadedRef.current.delete(key);
                                 event.currentTarget.style.display = 'none';
                                 event.currentTarget.parentElement?.querySelector('[data-poster-placeholder="true"]')?.classList.remove('hidden');
+
+                                if (
+                                  !posterBackgroundQueuedRef.current.has(key) &&
+                                  !posterOverrides[key]
+                                ) {
+                                  posterBackgroundQueuedRef.current.add(key);
+                                  posterBackgroundQueueRef.current.unshift({ key, result: posterResult });
+                                  startPosterBackgroundWorkers();
+                                }
                               }}
                             />
-                            <div data-poster-placeholder="true" className="hidden absolute inset-0 items-center justify-center bg-slate-950 text-slate-700">
+                            <div data-poster-placeholder="true" className="hidden absolute inset-0 flex items-center justify-center bg-slate-950 text-slate-500">
                               <Film className="w-7 h-7" />
                             </div>
                           </>
@@ -605,74 +2199,104 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                           </div>
                         )}
 
-                        {result.rating != null && Number(result.rating) > 0 && (
-                          <div className="absolute left-1.5 bottom-1.5 inline-flex items-center gap-1 rounded-md bg-black/80 px-1.5 py-1 text-[10px] font-bold text-amber-300">
-                            <Star className="w-3 h-3 fill-current" />
-                            {Number(result.rating).toFixed(1)}
+                        {result.seeders > 0 && (
+                          <div className="absolute left-2 top-2 inline-flex items-center gap-1 rounded-md bg-black/80 px-2 py-1 text-[10px] font-bold text-emerald-400">
+                            <Users className="w-3 h-3" />
+                            {result.seeders}
+                          </div>
+                        )}
+
+                        {result.indexer && (
+                          <div
+                            className="absolute right-2 top-2 max-w-[70%] truncate rounded-md bg-black/75 px-2 py-1 text-[10px] font-medium text-slate-300"
+                            title={result.indexer}
+                          >
+                            {result.indexer}
+                          </div>
+                        )}
+
+                        {extractedQuality(result) && (
+                          <div className="absolute left-2 bottom-2 rounded-md border border-cyan-400/30 bg-slate-950/85 px-2 py-1 text-[10px] font-bold text-cyan-300">
+                            {extractedQuality(result)}
                           </div>
                         )}
                       </div>
 
-                      <div className="min-w-0 flex-1">
+                      <div className="min-w-0 flex-1 lg:w-full lg:flex-none lg:p-3">
                         <div className="flex items-start gap-2">
-                          <div className="hidden sm:flex p-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 shrink-0">
+                          <div className="hidden sm:flex lg:hidden p-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 shrink-0">
                             <Database className="w-3.5 h-3.5 text-cyan-400" />
                           </div>
-                          <div className="min-w-0">
-                            <h3 className="text-[11px] leading-4 sm:text-sm font-semibold text-slate-100 line-clamp-2">
-                              {result.mediaTitle || result.title}
-                            </h3>
-                            {result.mediaTitle && result.title && result.mediaTitle.trim().toLowerCase() !== result.title.trim().toLowerCase() ? (
-                              <div
-                                className="hidden sm:block mt-0.5 text-[10px] text-slate-500 line-clamp-1"
-                                title={result.title}
-                              >
-                                {result.title}
-                              </div>
-                            ) : null}
+                          <div className="relative min-w-0 flex-1 z-10">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const fullTitle = fullTorrentTitleFor(result);
+                                showFullTorrentTitleBubble({
+                                  ...result,
+                                  title: fullTitle || result.title
+                                });
+                              }}
+                              className="block w-full text-left text-[11px] leading-4 sm:text-sm font-semibold text-slate-100 line-clamp-2 hover:text-cyan-300 transition cursor-pointer"
+                              title="Click to view full torrent name"
+                              aria-label="View full torrent name"
+                            >
+                              {group.title}
+                            </button>
 
-                            <div className="flex flex-wrap items-center gap-x-1.5 sm:gap-x-3 gap-y-1 mt-1.5 text-[9px] sm:text-[11px]">
-                              {result.year ? <span className="font-semibold text-slate-300">{result.year}</span> : null}
-                              {result.rating != null && Number(result.rating) > 0 ? (
-                                <span className="inline-flex items-center gap-1 text-amber-300">
-                                  <Star className="w-3 h-3 fill-current" />
-                                  {Number(result.rating).toFixed(1)}
-                                </span>
-                              ) : null}
-                              {extractedQuality(result) ? (
-                                <span className="rounded-md border border-cyan-400/20 bg-cyan-400/5 px-1.5 py-0.5 text-cyan-300">
-                                  {extractedQuality(result)}
-                                </span>
-                              ) : null}
-                              {result.indexer ? <span className="text-slate-500">{result.indexer}</span> : null}
+                            <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[10px] sm:text-xs">
+                              <span className="font-semibold text-emerald-400">▲ {Number(result.seeders) || 0} seeders</span>
+                              <span className="font-semibold text-amber-400">▼ {Number(result.leechers) || 0} peers</span>
+                              {group.year && <span className="text-slate-500">{group.year}</span>}
                             </div>
 
-                            {Array.isArray(result.genres) && result.genres.length > 0 && (
-                              <div className="hidden sm:flex flex-wrap gap-1.5 mt-2">
-                                {result.genres.slice(0, 3).map(genre => (
-                                  <span key={genre} className="rounded-full bg-slate-800/80 px-2 py-0.5 text-[9px] font-semibold text-slate-400">
-                                    {genre}
-                                  </span>
-                                ))}
-                              </div>
+                            {group.variants.length > 1 && (
+                              <select
+                                aria-label={`Choose quality for ${group.title}`}
+                                value={torrentResultKey(result)}
+                                onChange={(event) => setSelectedQualityByGroup(previous => ({
+                                  ...previous,
+                                  [group.key]: event.target.value
+                                }))}
+                                className="mt-2 w-full min-w-0 rounded-lg border border-slate-800 bg-slate-950 px-2 py-2 text-[10px] sm:text-xs font-medium text-slate-200 outline-none focus:border-cyan-500"
+                                title="Choose quality and torrent source"
+                              >
+                                {group.variants.map(variant => {
+                                  const quality = torrentQualityDetails(variant);
+                                  const provider = String(variant.indexer || '').trim();
+                                  const size = formatBytes(Number(variant.size) || 0);
+                                  const seeds = Number(variant.seeders) || 0;
+                                  return (
+                                    <option key={torrentResultKey(variant)} value={torrentResultKey(variant)}>
+                                      {quality.label} · {size} · ▲{seeds}{provider ? ` · ${provider}` : ''}
+                                    </option>
+                                  );
+                                })}
+                              </select>
                             )}
 
-                            <div className="flex flex-wrap items-center gap-x-1.5 sm:gap-3 gap-y-0.5 mt-2 text-[9px] sm:text-xs text-slate-400">
-                              <span className="font-mono text-slate-300">{formatBytes(result.size)}</span>
-                              <span className="flex items-center gap-1 text-emerald-400">
-                                <Users className="w-3.5 h-3.5" />
-                                {result.seeders} seeders
-                              </span>
-                              <span className="text-slate-500">{result.leechers} leechers</span>
-                              {result.publishDate ? <span className="hidden sm:inline text-slate-600">{formatPublished(result.publishDate)}</span> : null}
-                            </div>
+                            {fullTorrentTitleKey === posterKeyFor(result) && fullTorrentTitle && (
+                              <div
+                                role="status"
+                                aria-live="polite"
+                                className={[
+                                  'absolute bottom-full left-0 mb-1.5 z-50 w-max max-w-[min(460px,calc(100vw-24px))] rounded-xl border border-cyan-400/25 bg-slate-950/95 px-3 py-2 text-[11px] leading-4 font-medium text-slate-100 shadow-xl transition-all duration-[450ms] ease-out whitespace-normal break-all',
+                                  fullTorrentTitleFading
+                                    ? 'translate-y-1 opacity-0'
+                                    : 'translate-y-0 opacity-100'
+                                ].join(' ')}
+                              >
+                                {fullTorrentTitle}
+                                <span className="absolute left-4 top-full h-2.5 w-2.5 -translate-y-1 rotate-45 border-r border-b border-cyan-400/25 bg-slate-950/95" />
+                              </div>
+                            )}
                           </div>
                         </div>
-                      </div>
-                    </div>
-                  </div>
+                        <div className="mt-2 flex items-center justify-between gap-2">
+                          <span className="shrink-0 font-mono text-[10px] sm:text-[11px] text-slate-300">
+                            {formatBytes(result.size)}
+                          </span>
 
-                  <div className="flex items-center justify-end gap-2 shrink-0 sm:min-w-[126px]">
                     {(() => {
                       const source = result.magnetUrl || result.downloadUrl || result.sourceUrl;
                       const torrentKey = result.infoHash || source || result.title;
@@ -685,7 +2309,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       if (preparedFiles.length > 0 && primaryFile) {
                         const isPlaying = playingTorrentKey === torrentKey;
                         return (
-                          <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto">
+                          <div className="min-w-0 max-w-full flex flex-wrap items-center justify-end gap-1.5">
                             <button
                               type="button"
                               disabled={isPlaying}
@@ -698,19 +2322,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                                   setPlayingTorrentKey(current => current === torrentKey ? null : current);
                                 }
                               }}
-                              className="px-2 py-1.5 rounded-lg bg-emerald-400 text-slate-950 font-bold text-xs hover:bg-emerald-300 transition flex items-center gap-1 disabled:opacity-70 disabled:cursor-wait"
+                              className="shrink-0 px-2 py-1.5 rounded-lg bg-emerald-400 text-slate-950 font-bold text-xs hover:bg-emerald-300 transition flex items-center gap-1 disabled:opacity-70 disabled:cursor-wait whitespace-nowrap"
                               title={isPlaying ? "Opening stream…" : "Play from Seedr"}
                             >
                               {isPlaying
                                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                 : <Play className="w-3.5 h-3.5" />}
-                              <span className="hidden sm:inline">{isPlaying ? 'Loading…' : 'Play'}</span>
                             </button>
 
                             <button
                               type="button"
                               onClick={() => api.openSeedrFileDownload(primaryFile.id, primaryFile.name)}
-                              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
+                              className="shrink-0 p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
                               title="Download file"
                               aria-label="Download file"
                             >
@@ -732,7 +2355,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                                   setPrepareError('Could not copy the download link.');
                                 }
                               }}
-                              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-400 transition disabled:opacity-60"
+                              className="shrink-0 p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-400 transition disabled:opacity-60"
                               title="Copy download link"
                               aria-label="Copy download link"
                             >
@@ -745,7 +2368,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       }
 
                       return (
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="min-w-0 max-w-full flex flex-wrap items-center justify-end gap-1.5">
                           <button
                             type="button"
                             disabled={!source || isPreparing}
@@ -782,39 +2405,37 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                                 }
                                 setPrepareWaitOpen(false);
                               } catch (error: any) {
-                                setPrepareError(String(error?.message || 'Could not prepare this torrent.'));
+                                const message = String(error?.message || 'Could not prepare this torrent.');
+                                // Replacing an in-progress Seedr torrent intentionally rejects
+                                // the previous waiter; don't show that as a failure for the new pick.
+                                if (!message.toLowerCase().includes('cancelled by another selection')) {
+                                  setPrepareError(message);
+                                }
                               } finally {
                                 window.clearTimeout(longWaitTimer);
                                 setPreparingTorrentKey(current => current === torrentKey ? null : current);
                               }
                             }}
-                            className="w-full sm:w-auto px-2 py-1.5 sm:px-3.5 sm:py-2 rounded-lg sm:rounded-xl bg-cyan-500 hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 text-xs font-bold flex items-center gap-1.5 transition"
+                            className="shrink-0 px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-60 disabled:cursor-not-allowed text-slate-950 text-[11px] font-bold transition"
                           >
-                            {isPreparing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                            <span>{isPreparing ? 'Preparing…' : 'Prepare'}</span>
+                            {isPreparing ? 'Preparing…' : 'Prepare'}
                           </button>
-                          {isPreparing && onCancelPrepare && (
-                            <button
-                              type="button"
-                              onClick={() => void onCancelPrepare()}
-                              className="px-2 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-300 hover:bg-rose-500/20 text-[10px] font-bold transition"
-                              title="Cancel preparation"
-                            >
-                              Cancel
-                            </button>
-                          )}
                         </div>
                       );
                     })()}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
 
-      {!isSearching && searched && sortedResults.length === 0 && !error && (
+      {!movieCatalogue && !isSearching && searched && groupedResults.length === 0 && !error && (
         <div className="py-14 text-center rounded-2xl bg-slate-900 border border-slate-800">
           <Search className="w-10 h-10 text-slate-700 mx-auto mb-3" />
           <h3 className="text-sm font-bold text-slate-300">
