@@ -21,6 +21,85 @@ export interface TorrentSearchResult {
   quality?: string;
 }
 
+
+export interface MarvelCatalogueResponse {
+  status: 'idle' | 'building' | 'ready' | 'failed';
+  results: TorrentSearchResult[];
+  completed: number;
+  total: number;
+  resultCount?: number;
+  builtAt?: string;
+  error?: string;
+}
+
+export type MovieCatalogueKey =
+  | 'marvel'
+  | 'dc-live-action'
+  | 'dc-animated'
+  | 'latest-hollywood'
+  | 'latest-bollywood'
+  | 'popular-hollywood'
+  | 'popular-bollywood'
+  | 'trending-hollywood'
+  | 'trending-bollywood';
+
+export interface MovieCatalogueItem {
+  id: number | string;
+  title: string;
+  year?: number | null;
+  releaseDate?: string;
+  overview?: string;
+  posterUrl?: string;
+  backdropUrl?: string;
+  rating?: number;
+  genres?: number[];
+  source?: string;
+}
+
+export interface MovieCataloguePage {
+  catalogue: MovieCatalogueKey;
+  provider: string;
+  page: number;
+  totalPages: number;
+  totalResults: number;
+  releasedOnly?: boolean;
+  results: MovieCatalogueItem[];
+  attribution?: string;
+}
+
+
+export type MovieOttStatus =
+  | 'streaming'
+  | 'rent_buy'
+  | 'digital_scheduled'
+  | 'digital_release_known'
+  | 'not_confirmed';
+
+export interface MovieOttProvider {
+  providerId?: number | string | null;
+  name: string;
+  logoUrl?: string;
+  webUrl?: string;
+}
+
+export interface MovieOttAvailability {
+  movieId: number;
+  region: string;
+  status: MovieOttStatus;
+  streamingProviders: MovieOttProvider[];
+  rentProviders: MovieOttProvider[];
+  buyProviders: MovieOttProvider[];
+  theatricalReleaseDate?: string | null;
+  digitalReleaseDate?: string | null;
+  providerLink: string;
+  checkedAt: string;
+  source: string;
+  providerAttribution: string;
+  attribution: string;
+  stale?: boolean;
+  cacheWarning?: string;
+}
+
 import {
   TorrentItem,
   TorrentFileItem,
@@ -34,26 +113,13 @@ import {
   QbtSettings
 } from '../types/index.ts';
 
-// The frontend and API are served by the same Render service in the
-// all-in-one deployment. Keep an optional VITE_API_URL override for local
-// development or an external API, but default to the current browser origin.
-// Prefer an explicit API URL when one is configured. If the frontend is
-// served from the all-in-one Render service, same-origin is correct. If the
-// frontend is hosted separately (for example an older Vercel deployment),
-// never accidentally point API/media requests at the static frontend host.
+// Home is a VPS-only all-in-one deployment: the browser talks directly
+// to the same origin on the Oracle VPS for both the React UI and FastAPI.
+// Keep VITE_API_URL only as an optional override for local development.
 const configuredApiBase = String(import.meta.env.VITE_API_URL || '').trim();
-const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
-const isSeparateVercelHost =
-  currentHost.endsWith('.vercel.app') ||
-  currentHost === 'vercel.app' ||
-  currentHost.includes('.vercel.');
 export const API_BASE = (
   configuredApiBase ||
-  (isSeparateVercelHost
-    ? 'https://new-test-dmkr.onrender.com'
-    : typeof window !== 'undefined'
-      ? window.location.origin
-      : 'https://new-test-dmkr.onrender.com')
+  (typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:10000')
 ).replace(/\/+$/, '');
 const makeSeedrError = (data: any, body: string, status: number, fallback: string) => {
   const error = new Error(
@@ -91,6 +157,92 @@ const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
 };
 
 export const api = {
+  async getMarvelCatalogue(signal?: AbortSignal): Promise<MarvelCatalogueResponse> {
+    const res = await fetch(API_BASE + '/api/catalogue/marvel', {
+      signal,
+      credentials: 'include',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw new Error(data?.detail || data?.error || body || ('Marvel catalogue failed (HTTP ' + res.status + ')'));
+    }
+    return data as MarvelCatalogueResponse;
+  },
+
+  async getCatalogue(key: string, signal?: AbortSignal): Promise<MarvelCatalogueResponse> {
+    const res = await fetch(API_BASE + '/api/catalogue/extra/' + encodeURIComponent(key), {
+      signal,
+      credentials: 'include',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw new Error(data?.detail || data?.error || body || ('Movie catalogue failed (HTTP ' + res.status + ')'));
+    }
+    return data as MarvelCatalogueResponse;
+  },
+
+  async getMovieCatalogue(
+    key: MovieCatalogueKey,
+    page = 1,
+    releasedOnly = true,
+    signal?: AbortSignal,
+  ): Promise<MovieCataloguePage> {
+    const params = new URLSearchParams({
+      page: String(Math.min(Math.max(page, 1), 500)),
+      released_only: String(releasedOnly),
+    });
+    const res = await fetch(API_BASE + '/api/movies/catalogue/' + encodeURIComponent(key) + '?' + params.toString(), {
+      signal,
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw new Error(data?.detail || data?.error || body || ('Movie catalogue failed (HTTP ' + res.status + ')'));
+    }
+    return data as MovieCataloguePage;
+  },
+
+  async clearTmdbMovieCaches(): Promise<{ status: string; cacheTypes?: string[]; refetchRequired?: boolean }> {
+    const res = await fetch(API_BASE + '/api/movies/catalogue/cache/clear', {
+      method: 'POST',
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw new Error(data?.detail || data?.error || body || ('TMDB cache clear failed (HTTP ' + res.status + ')'));
+    }
+    return data;
+  },
+
+  async getMovieOttAvailability(
+    movieId: number,
+    region = 'IN',
+    signal?: AbortSignal,
+  ): Promise<MovieOttAvailability> {
+    const params = new URLSearchParams({ region: region.toUpperCase() });
+    const res = await fetch(
+      API_BASE + '/api/movies/ott/' + encodeURIComponent(String(movieId)) + '?' + params.toString(),
+      { signal, credentials: 'include', cache: 'no-store' },
+    );
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw new Error(data?.detail || data?.error || body || ('OTT availability failed (HTTP ' + res.status + ')'));
+    }
+    return data as MovieOttAvailability;
+  },
+
   // Torrents (qBittorrent WebAPI)
   async searchTorrents(query: string, limit = 50, signal?: AbortSignal): Promise<TorrentSearchResult[]> {
     const params = new URLSearchParams({
@@ -131,6 +283,21 @@ export const api = {
     }
 
     return Array.isArray(data) ? data : (Array.isArray(data?.results) ? data.results : []);
+  },
+
+  async resolveSearchMagnet(infoUrl: string, indexer = ''): Promise<{ magnet: string; infoHash: string }> {
+    const res = await apiFetch('/api/search/resolve-magnet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ infoUrl, indexer })
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) {
+      throw new Error(data?.detail || data?.error || body || 'Could not resolve the magnet link.');
+    }
+    return data as { magnet: string; infoHash: string };
   },
 
   async addSearchTorrent(source: string, size: number, infoHash?: string, torrentName?: string): Promise<any> {
@@ -350,7 +517,8 @@ export const api = {
   async prepareSeedrMagnet(
     magnet: string,
     requiredBytes = 0,
-    torrentName?: string
+    torrentName?: string,
+    replaceTaskId?: number | string
   ): Promise<any> {
     const value = String(magnet || '');
     if (!value.trim().toLowerCase().startsWith('magnet:?')) {
@@ -364,6 +532,8 @@ export const api = {
         magnet: value,
         required_bytes: Math.max(0, Number(requiredBytes) || 0),
         auto_cleanup: true,
+        replace_active: true,
+        replace_task_id: replaceTaskId == null ? undefined : String(replaceTaskId),
         torrent_name: torrentName || undefined,
       })
     });
@@ -389,6 +559,7 @@ export const api = {
       seedrFolderName: data?.torrent_name || data?.name || data?.task?.name || torrentName || null,
       seedrFolderId: data?.folder_id ?? data?.folderId ?? data?.task?.folder_id ?? null,
       deletedFolders: Array.isArray(data?.deleted_folders) ? data.deleted_folders : [],
+      cancelledTasks: Array.isArray(data?.cancelled_tasks) ? data.cancelled_tasks : [],
     };
   },
 
@@ -494,11 +665,24 @@ export const api = {
     const value = String(pat || '').trim();
     if (!value) throw new Error('Enter your Seedr Personal Access Token.');
 
-    const res = await apiFetch('/api/seedr/connect/pat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pat: value }),
-    });
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+    let res: Response;
+    try {
+      res = await apiFetch('/api/seedr/connect/pat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat: value }),
+        signal: controller.signal,
+      });
+    } catch (error: any) {
+      if (error?.name === 'AbortError') {
+        throw new Error('Seedr connection timed out. The server could not validate the token in time; please retry.');
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
     const body = await res.text();
     let data: any = null;
     try { data = body ? JSON.parse(body) : null; } catch {}
@@ -771,14 +955,15 @@ export const api = {
     if (!res.ok) throw new Error(data?.error || body || 'Failed to delete Seedr folder');
   },
 
-  async deleteSeedrTask(taskId: number | string): Promise<void> {
+  async deleteSeedrTask(taskId: number | string): Promise<any> {
     const res = await apiFetch('/api/seedr/tasks/' + encodeURIComponent(String(taskId)), { method: 'DELETE' });
     const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
     if (!res.ok) {
-      let data: any = null;
-      try { data = body ? JSON.parse(body) : null; } catch {}
-      throw new Error(data?.error || body || 'Failed to delete Seedr task');
+      throw new Error(data?.error || data?.detail || body || 'Failed to delete Seedr task');
     }
+    return data || {};
   },
 
   async deleteSeedrFile(fileId: string): Promise<void> {
