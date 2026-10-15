@@ -512,11 +512,21 @@ def _fast_json_response(request: Request, memo_key: str, signature: Any, build) 
     return Response(entry[1], media_type="application/json", headers=headers)
 
 
-def _catalogue_group_key(item: dict[str, Any]) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(
+def _catalogue_group_key(item: dict[str, Any], index: int = 0) -> str:
+    title = re.sub(r"[^a-z0-9]+", "", str(
         item.get("catalogueTitle") or item.get("marvelCatalogueTitle")
         or item.get("mediaTitle") or item.get("title") or ""
     ).casefold())
+    if title:
+        return title
+    # Preserve grouping for rows that lack titles but carry a stable media/release ID.
+    for field in ("tmdbId", "tmdb_id", "movieId", "movie_id", "imdbId", "imdb_id",
+                  "infoHash", "info_hash", "magnet", "id"):
+        value = str(item.get(field) or "").strip().casefold()
+        if value:
+            return field + ":" + value
+    # Avoid treating all malformed/untitled rows as the same movie.
+    return "__untitled_row_" + str(index)
 
 
 def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) -> dict[str, Any]:
@@ -524,8 +534,8 @@ def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) 
     if page <= 0 or page_size <= 0:
         return payload
     groups: dict[str, list[dict[str, Any]]] = {}
-    for row in payload["results"]:
-        groups.setdefault(_catalogue_group_key(row), []).append(row)
+    for index, row in enumerate(payload["results"]):
+        groups.setdefault(_catalogue_group_key(row, index), []).append(row)
     keys = list(groups)
     total_pages = max(1, -(-len(keys) // page_size))
     start = (page - 1) * page_size
