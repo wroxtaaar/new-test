@@ -5,6 +5,7 @@ import contextvars
 import secrets
 from datetime import datetime, timezone
 from collections import deque
+import gzip
 import json
 import hashlib
 import logging
@@ -462,6 +463,45 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---- Fast catalogue serving -------------------------------------------------
+# Catalogue snapshots are several MB. Parse/normalise once per file version and
+# keep the serialized (and gzipped) response so each page view is a memory copy.
+_FILE_MEMO: dict[str, tuple[tuple[int, int], Any]] = {}
+_RESPONSE_MEMO: dict[str, tuple[Any, bytes, bytes]] = {}
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    try:
+        st = path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (0, 0)
+
+
+def _memoized_file_read(memo_key: str, path: Path, reader):
+    sig = _file_signature(path)
+    hit = _FILE_MEMO.get(memo_key)
+    if hit and hit[0] == sig:
+        return hit[1]
+    value = reader()
+    # The reader may rewrite the file after normalising; re-stat so we cache the final version.
+    _FILE_MEMO[memo_key] = (_file_signature(path), value)
+    return value
+
+
+def _fast_json_response(request: Request, memo_key: str, signature: Any, build) -> Response:
+    entry = _RESPONSE_MEMO.get(memo_key)
+    if entry is None or entry[0] != signature:
+        raw = json.dumps(build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        entry = (signature, raw, gzip.compress(raw, compresslevel=6))
+        _RESPONSE_MEMO[memo_key] = entry
+    headers = {"Cache-Control": "public, max-age=300", "Vary": "Accept-Encoding"}
+    if "gzip" in (request.headers.get("accept-encoding") or "").casefold():
+        headers["Content-Encoding"] = "gzip"
+        return Response(entry[2], media_type="application/json", headers=headers)
+    return Response(entry[1], media_type="application/json", headers=headers)
+
 
 def _seedr_empty_session() -> dict[str, Any]:
     now = time.time()
@@ -4963,6 +5003,10 @@ _marvel_catalogue_state: dict[str, Any] = {
 
 
 def _read_marvel_catalogue() -> dict[str, Any] | None:
+    return _memoized_file_read("marvel", MARVEL_CATALOGUE_PATH, _read_marvel_catalogue_uncached)
+
+
+def _read_marvel_catalogue_uncached() -> dict[str, Any] | None:
     try:
         payload = json.loads(MARVEL_CATALOGUE_PATH.read_text(encoding="utf-8"))
         if (
@@ -5040,6 +5084,11 @@ def _merge_bundled_marvel_catalogue_cache(
     snapshot. Merge only titles in the current curated list, while leaving the
     cache version old so the normal background refresh still runs.
     """
+    if payload and (
+        int(payload.get("version") or 0) >= MARVEL_CATALOGUE_VERSION
+        or int(payload.get("seedMigrationVersion") or 0) >= MARVEL_CATALOGUE_VERSION
+    ):
+        return payload
     seed_path = _CACHE_SEED_DIR / "marvel_catalogue.json"
     try:
         seed_payload = json.loads(seed_path.read_text(encoding="utf-8"))
@@ -6661,6 +6710,10 @@ _extra_catalogue_states: dict[str, dict[str, Any]] = {
 
 
 def _read_extra_catalogue(key: str) -> dict[str, Any] | None:
+    return _memoized_file_read("extra:" + key, _EXTRA_CATALOGUE_PATHS[key], lambda: _read_extra_catalogue_uncached(key))
+
+
+def _read_extra_catalogue_uncached(key: str) -> dict[str, Any] | None:
     path = _EXTRA_CATALOGUE_PATHS[key]
     config = _EXTRA_CATALOGUES[key]
     try:
@@ -9627,11 +9680,18 @@ async def api_backfill_marvel_ott(
 
 
 @app.get("/api/catalogue/extra/{catalogue_key}")
-async def api_extra_catalogue(catalogue_key: str):
+async def api_extra_catalogue(catalogue_key: str, request: Request):
     if catalogue_key not in _EXTRA_CATALOGUES:
         raise HTTPException(404, "Unknown catalogue")
     cached = _read_extra_catalogue(catalogue_key)
     _record_cache_event("extra_catalogue", "hit" if cached else "miss")
+    if cached and CACHE_ONLY_MODE:
+        return _fast_json_response(request, "extra:" + catalogue_key, _file_signature(_EXTRA_CATALOGUE_PATHS[catalogue_key]), lambda: {
+            "status": "ready", "builtAt": cached.get("builtAt"),
+            "completed": int(cached.get("titlesQueried") or 0), "total": int(cached.get("titlesQueried") or 0),
+            "resultCount": int(cached.get("resultCount") or len(cached["results"])),
+            "movieCount": int(cached.get("movieCount") or 0), "refreshing": False,
+            "results": cached["results"]})
     if catalogue_key == "classics" and cached:
         _schedule_classics_movie_ott_enrichment()
     await _ensure_extra_catalogue_refresh(catalogue_key)
@@ -9908,10 +9968,21 @@ async def api_search_saved_ott(titles: list[str] = Query(..., min_length=1, max_
 
 
 @app.get("/api/catalogue/marvel")
-async def api_marvel_catalogue():
+async def api_marvel_catalogue(request: Request):
     global _marvel_catalogue_task
     cached = _merge_bundled_marvel_catalogue_cache(_read_marvel_catalogue())
     _record_cache_event("marvel_catalogue", "hit" if cached else "miss")
+    if cached and CACHE_ONLY_MODE:
+        return _fast_json_response(request, "marvel-page", _file_signature(MARVEL_CATALOGUE_PATH), lambda: {
+            "status": "ready",
+            "builtAt": cached.get("builtAt"),
+            "completed": int(cached.get("titlesQueried") or len(MARVEL_MOVIE_SEARCHES)),
+            "total": int(cached.get("titlesQueried") or len(MARVEL_MOVIE_SEARCHES)),
+            "resultCount": int(cached.get("resultCount") or len(cached["results"])),
+            "movieCount": int(cached.get("movieCount") or 0),
+            "results": cached["results"],
+            "refreshing": False,
+        })
     if cached:
         # Keep the current cache available immediately while rebuilding it once
         # when its version predates the updated MCU film list.
