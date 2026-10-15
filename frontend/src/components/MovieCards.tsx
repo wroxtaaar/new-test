@@ -200,7 +200,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
   const showTmdb = !showImdb && tmdbRating != null && tmdbRating > 0;
   return (
     <MovieCatalogueCard className="transition hover:border-slate-700 hover:bg-slate-900/95">
-      <div data-movie-poster-slot="true" className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950">
+      <div data-movie-poster-slot="true" data-poster-waiting={!posterSrc ? "true" : "false"} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950">
         {posterSrc ? (
           <>
             <img
@@ -390,7 +390,7 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 lg:flex-col lg:items-stretch lg:gap-0">
         <div className="min-w-0 flex-1 lg:w-full">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-start gap-2 sm:gap-3 lg:flex-col lg:gap-0">
-            <div data-movie-poster-slot="true" className="relative w-full sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden border border-slate-800 bg-slate-950 shadow-md lg:w-full lg:rounded-none lg:border-0 lg:shadow-none">
+            <div data-movie-poster-slot="true" data-poster-waiting={!posterSrc ? "true" : "false"} className="relative w-full sm:w-24 shrink-0 aspect-[2/3] rounded-lg overflow-hidden border border-slate-800 bg-slate-950 shadow-md lg:w-full lg:rounded-none lg:border-0 lg:shadow-none">
               {posterSrc ? (
                 <>
                   <img
