@@ -32,6 +32,7 @@ export interface MovieCardProvider {
  */
 let highQualityPostersReady = false;
 const pendingHighQualityPosters = new Set<HTMLImageElement>();
+let highQualityUpgradeScheduled = false;
 
 function upgradeToHighQualityPoster(image: HTMLImageElement): void {
   if (!image.isConnected || image.dataset.highQualityTried) return;
@@ -39,22 +40,60 @@ function upgradeToHighQualityPoster(image: HTMLImageElement): void {
   const lowQualityPath = ['/t/p/w185/', '/t/p/w342/'].find(path => current.includes(path));
   if (!lowQualityPath) return;
   image.dataset.highQualityTried = 'true';
+  image.dataset.posterQuality = 'high-pending';
   image.src = current.replace(lowQualityPath, '/t/p/w780/');
 }
 
+function scheduleHighQualityPosterUpgrades(): void {
+  if (!highQualityPostersReady || highQualityUpgradeScheduled || pendingHighQualityPosters.size === 0) return;
+  highQualityUpgradeScheduled = true;
+
+  const run = () => {
+    highQualityUpgradeScheduled = false;
+    if (!highQualityPostersReady || pendingHighQualityPosters.size === 0) return;
+
+    // Upgrade posters already on screen first. Off-screen cards remain queued until
+    // visible or until the browser has idle time, avoiding a burst of large downloads.
+    const images = [...pendingHighQualityPosters].filter(image => image.isConnected);
+    images.sort((a, b) => {
+      const visible = (image: HTMLImageElement) => {
+        const rect = image.getBoundingClientRect();
+        return rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
+      };
+      return Number(visible(b)) - Number(visible(a));
+    });
+
+    const next = images[0];
+    if (!next) {
+      pendingHighQualityPosters.clear();
+      return;
+    }
+    pendingHighQualityPosters.delete(next);
+    upgradeToHighQualityPoster(next);
+
+    // One high-resolution poster per idle turn; keep details/UI responsive.
+    window.setTimeout(scheduleHighQualityPosterUpgrades, 180);
+  };
+
+  const idleWindow = window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number };
+  if (idleWindow.requestIdleCallback) idleWindow.requestIdleCallback(run, { timeout: 1200 });
+  else window.setTimeout(run, 250);
+}
+
 export function requestHighQualityPoster(image: HTMLImageElement): void {
-  if (highQualityPostersReady) upgradeToHighQualityPoster(image);
-  else pendingHighQualityPosters.add(image);
+  if (image.dataset.posterQuality === 'low-loaded' || image.complete) {
+    pendingHighQualityPosters.add(image);
+    scheduleHighQualityPosterUpgrades();
+  } else {
+    pendingHighQualityPosters.add(image);
+  }
 }
 
 /** Call with false while a page is still loading info, true once it has settled. */
 export function setHighQualityPostersReady(ready: boolean): void {
   highQualityPostersReady = ready;
   if (!ready) return;
-  const images = [...pendingHighQualityPosters];
-  pendingHighQualityPosters.clear();
-  // Stagger so the upgrades don't all hit the network at once.
-  images.forEach((image, index) => window.setTimeout(() => upgradeToHighQualityPoster(image), index * 120));
+  scheduleHighQualityPosterUpgrades();
 }
 
 type PosterEventHandler = (event: React.SyntheticEvent<HTMLImageElement>) => void;
@@ -126,6 +165,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
               onClick={onPosterClick}
               onLoad={event => {
                       const image = event.currentTarget;
+                      image.dataset.posterQuality = 'low-loaded';
                       onPosterLoad(event);
                       requestHighQualityPoster(image);
                     }}
@@ -296,6 +336,7 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                     onClick={onPosterClick}
                     onLoad={event => {
                       const image = event.currentTarget;
+                      image.dataset.posterQuality = 'low-loaded';
                       onPosterLoad(event);
                       requestHighQualityPoster(image);
                     }}
