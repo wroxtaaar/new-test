@@ -4630,13 +4630,33 @@ async def _tmdb_poster_lookup(title: str, year: str = "") -> str | None:
         logger.debug("TMDB poster lookup failed for '%s (%s)': %s", clean_title, clean_year, type(exc).__name__)
     return None
 
+_BUNDLED_POSTERS: dict[str, str] | None = None
+
+
+def _bundled_poster(clean_title: str, clean_year: str) -> str | None:
+    """Poster URLs harvested from the bundled caches (no network)."""
+    global _BUNDLED_POSTERS
+    if _BUNDLED_POSTERS is None:
+        loaded: dict[str, str] = {}
+        try:
+            for title, year, url in json.loads((_CACHE_SEED_DIR / "poster_map.json").read_text(encoding="utf-8")):
+                loaded.setdefault(f"{_poster_normalize_title(title)}|{year}", url)
+        except (OSError, ValueError, TypeError):
+            pass
+        _BUNDLED_POSTERS = loaded
+    return _BUNDLED_POSTERS.get(f"{_poster_normalize_title(clean_title)}|{clean_year}")
+
+
 async def _poster_lookup_uncached(clean_title: str, clean_year: str, cache_key: str) -> str | None:
     if CACHE_ONLY_MODE:
-        return None
+        bundled = _bundled_poster(clean_title, clean_year)
+        if bundled:
+            _poster_cache[cache_key] = (time.time(), bundled)
+            return bundled
     now = time.time()
     # Prefer TMDB's year-filtered movie results to prevent a similarly named
     # title from supplying the wrong artwork. Other sources remain fallbacks.
-    poster = await _tmdb_poster_lookup(clean_title, clean_year)
+    poster = None if CACHE_ONLY_MODE else await _tmdb_poster_lookup(clean_title, clean_year)
 
     try:
         title_aliases = _poster_title_aliases(clean_title, clean_year)
