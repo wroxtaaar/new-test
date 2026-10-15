@@ -2654,7 +2654,13 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }
   };
 
+  const prepareClickIntentRef = useRef(false);
+
   const searchMovieTorrents = async (movie: MovieCatalogueItem) => {
+    // Torrent lookup and Prepare state are user-initiated only. Background cache/metadata
+    // work must never be able to open a Prepare card.
+    if (!prepareClickIntentRef.current) return;
+    prepareClickIntentRef.current = false;
     const titleQuery = movie.title + (movie.year ? ' ' + movie.year : '');
     movieTorrentSearchControllerRef.current?.abort();
     const controller = new AbortController();
@@ -3379,14 +3385,13 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   useEffect(() => {
     let quietTimer: number | undefined;
     const checkQuiet = () => {
-      const availabilityBusy = (Object.values(searchAvailabilityByGroup) as Array<{ status?: string }>).some(item => item?.status === 'loading');
-      const ottBusy = ottQueueRef.current.length > 0 || ottActiveWorkersRef.current > 0 ||
-        (Object.values(ottAvailability) as Array<{ status?: string }>).some(item => item?.status === 'loading');
-      // Low-quality posters still queued or actively resolving for the visible page count as work.
+      // High-resolution upgrades wait only for low-quality poster work on this page.
+      // IMDb, synopsis and OTT enrichment are deliberately independent and must not
+      // delay the poster-first experience.
       const visibleKeys = currentPagePosterKeys();
       const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key)) ||
         [...posterBackgroundActiveKeysRef.current].some(key => visibleKeys.has(key));
-      if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
+      if (!posterBusy) {
         setHighQualityPostersReady(true);
         return;
       }
@@ -4209,7 +4214,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   overview={movie.overview || 'No synopsis available from TMDB for this title.'}
                   posterSrc={lowQualityPosterUrl(cataloguePosterOverride(movie) || movie.posterUrl || '')}
                   posterAlt={movie.title}
-                  onPosterClick={() => { if (!isSearching && !movieTorrentSearchLoading) void searchMovieTorrents(movie); }}
+                  onPosterClick={() => { if (!isSearching && !movieTorrentSearchLoading) { prepareClickIntentRef.current = true; void searchMovieTorrents(movie); } }}
                   onPosterLoad={event => {
                     // Preserve the exact URL that made this catalogue poster visible.
                     cataloguePosterUrlsRef.current[String(movie.id)] = event.currentTarget.currentSrc || event.currentTarget.src;
