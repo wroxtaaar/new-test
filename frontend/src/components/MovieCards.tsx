@@ -39,7 +39,11 @@ function normalizeLowQualityPosterUrl(value: string): string {
   if (!url) return '';
   try {
     const parsed = new URL(url, window.location.origin);
-    if (parsed.hostname === 'image.tmdb.org') {
+    // Catalogue poster URLs are resolved by the backend. Explicitly request the
+    // small same-origin image variant instead of allowing a redirect to w500.
+    if (parsed.pathname.replace(/\/+$/, '') === '/api/poster') {
+      parsed.searchParams.set('size', 'w185');
+    } else if (parsed.hostname === 'image.tmdb.org') {
       parsed.pathname = parsed.pathname.replace(
         /\/t\/p\/(?:original|w780|w500|w342|w300|w200|w185|w154|w92)\//,
         '/t/p/w185/',
@@ -54,6 +58,20 @@ function normalizeLowQualityPosterUrl(value: string): string {
 function upgradeToHighQualityPoster(image: HTMLImageElement): void {
   if (!image.isConnected || image.dataset.highQualityTried) return;
   const current = image.currentSrc || image.src;
+  try {
+    const parsed = new URL(current, window.location.origin);
+    if (parsed.pathname.replace(/\/+$/, '') === '/api/poster') {
+      // Keep the upgrade on the same-origin proxy so the browser never has to
+      // request a third-party image host directly.
+      image.dataset.highQualityTried = 'true';
+      image.dataset.posterQuality = 'high-pending';
+      parsed.searchParams.set('size', 'w780');
+      image.src = parsed.toString();
+      return;
+    }
+  } catch {
+    // Fall through to the direct TMDB URL handling below.
+  }
   if (!current.includes('image.tmdb.org') || !/\/t\/p\/w185\//.test(current)) return;
   image.dataset.highQualityTried = 'true';
   image.dataset.posterQuality = 'high-pending';
@@ -201,9 +219,21 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
                     }}
                     onError={event => {
                       const image = event.currentTarget;
-                      if (image.dataset.highQualityTried === 'true' && image.src.includes('/t/p/w780/')) {
-                        image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
-                        return;
+                      if (image.dataset.highQualityTried === 'true') {
+                        try {
+                          const parsed = new URL(image.currentSrc || image.src, window.location.origin);
+                          if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
+                            parsed.searchParams.set('size', 'w185');
+                            image.src = parsed.toString();
+                            return;
+                          }
+                        } catch {
+                          // Use the direct URL fallback below.
+                        }
+                        if (image.src.includes('/t/p/w780/')) {
+                          image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
+                          return;
+                        }
                       }
                       onPosterError(event);
                     }}
