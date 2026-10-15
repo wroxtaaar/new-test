@@ -205,7 +205,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
           <>
             <img
               data-movie-poster-stage="true"
-              src={normalizeLowQualityPosterUrl(posterSrc)
+              src={normalizeLowQualityPosterUrl(posterSrc)}
               alt={posterAlt}
               loading="eager"
               fetchPriority="high"
