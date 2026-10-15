@@ -4826,11 +4826,21 @@ def _poster_url_for_size(poster_url: str, size: str) -> str:
         host = (parts.hostname or "").casefold()
         path = parts.path
         if host == "image.tmdb.org":
-            path = re.sub(r"/t/p/(?:original|w\\d+)/", f"/t/p/{size}/", path)
+            # Replace the TMDB size segment without depending on a fragile regex.
+            marker = "/t/p/"
+            marker_index = path.find(marker)
+            if marker_index >= 0:
+                size_start = marker_index + len(marker)
+                slash_index = path.find("/", size_start)
+                if slash_index >= 0:
+                    path = path[:size_start] + size + path[slash_index:]
         elif host.endswith("media-amazon.com") or host == "images-na.ssl-images-amazon.com":
-            path = re.sub(r"\\._V1_\\.[^.]+$", f"._V1_UX{width}_.jpg", path)
+            marker = "_V1_"
+            marker_index = path.find(marker)
+            if marker_index >= 0:
+                path = path[:marker_index] + f"_V1_UX{width}_.jpg"
         elif "mzstatic.com" in host:
-            path = re.sub(r"\\d+x\\d+bb", f"{width}x{width}bb", path)
+            path = re.sub(r"[0-9]+x[0-9]+bb", f"{width}x{width}bb", path)
         return parts._replace(path=path).geturl()
     except Exception:
         return url
