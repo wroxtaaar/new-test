@@ -4638,7 +4638,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                           {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
-                              image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                              image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
+                              return;
+                            }
+                            // TMDB can return a stale/missing poster path. Retry through
+                            // the same-origin title/year poster resolver before showing a blank card.
+                            if (image.dataset.posterFallbackTried !== 'true') {
+                              image.dataset.posterFallbackTried = 'true';
+                              const params = new URLSearchParams({ title: show.title, size: 'w185' });
+                              if (show.year) params.set('year', String(show.year));
+                              image.src = '/api/poster?' + params.toString();
                               return;
                             }
                             image.style.display = 'none';
@@ -4695,7 +4704,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
-                              image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                              image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
+                              return;
+                            }
+                            // TMDB can return a stale/missing poster path. Retry through
+                            // the same-origin title/year poster resolver before showing a blank card.
+                            if (image.dataset.posterFallbackTried !== 'true') {
+                              image.dataset.posterFallbackTried = 'true';
+                              const params = new URLSearchParams({ title: show.title, size: 'w185' });
+                              if (show.year) params.set('year', String(show.year));
+                              image.src = '/api/poster?' + params.toString();
                               return;
                             }
                             image.style.display = 'none';
@@ -4749,7 +4767,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                           {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
-                              image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                              image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
+                              return;
+                            }
+                            // TMDB can return a stale/missing poster path. Retry through
+                            // the same-origin title/year poster resolver before showing a blank card.
+                            if (image.dataset.posterFallbackTried !== 'true') {
+                              image.dataset.posterFallbackTried = 'true';
+                              const params = new URLSearchParams({ title: show.title, size: 'w185' });
+                              if (show.year) params.set('year', String(show.year));
+                              image.src = '/api/poster?' + params.toString();
                               return;
                             }
                             image.style.display = 'none';
@@ -4788,7 +4815,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                           {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
-                              image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                              image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
+                              return;
+                            }
+                            // TMDB can return a stale/missing poster path. Retry through
+                            // the same-origin title/year poster resolver before showing a blank card.
+                            if (image.dataset.posterFallbackTried !== 'true') {
+                              image.dataset.posterFallbackTried = 'true';
+                              const params = new URLSearchParams({ title: show.title, size: 'w185' });
+                              if (show.year) params.set('year', String(show.year));
+                              image.src = '/api/poster?' + params.toString();
                               return;
                             }
                             image.style.display = 'none';
