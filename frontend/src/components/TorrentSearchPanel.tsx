@@ -2675,6 +2675,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // Prefer active swarms, but don't let missing seeder metadata hide every
       // release. The regular search can display results from indexers that do
       // not report seed counts reliably.
+      const minSeedrFriendlySize = searchLimits.minSizeMb * 1024 * 1024;
       const maxSeedrFriendlySize = searchLimits.maxSizeGb * 1024 * 1024 * 1024;
       const lowQualityRelease = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
       // Indexers often return loose keyword matches. Keep a result only when the
@@ -2697,7 +2698,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             String(result.downloadUrl || '').trim() ||
             String(result.sourceUrl || '').trim()
           );
-          if (!hasSource || size > maxSeedrFriendlySize) return false;
+          if (!hasSource || size < minSeedrFriendlySize || size > maxSeedrFriendlySize) return false;
           if (requireActiveSeeders && (!Number.isFinite(seeders) || seeders <= 0)) return false;
           return !lowQualityRelease.test(String(result.title || '') + ' ' + String(result.quality || ''));
         });
@@ -3083,6 +3084,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             let rows = await api.searchTorrents(query, 50);
             if (!rows.length && movie.title) rows = await api.searchTorrents(movie.title, 50);
             const expectedTitle = normalizeGroupTitle(movie.title);
+            const minSize = searchLimits.minSizeMb * 1024 * 1024;
             const maxSize = searchLimits.maxSizeGb * 1024 * 1024 * 1024;
             const lowQuality = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
             const usable = rows.filter(result => {
@@ -3091,7 +3093,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               const size = Number(result.size) || 0;
               const hasSource = Boolean(result.magnetUrl || result.downloadUrl || result.sourceUrl);
               return expectedTitle && (title.includes(expectedTitle) || mediaTitle.includes(expectedTitle))
-                && hasSource && size <= maxSize
+                && hasSource && size >= minSize && size <= maxSize
                 && !lowQuality.test(String(result.title || '') + ' ' + String(result.quality || ''));
             });
             const groups = groupTorrentResults(usable);
@@ -3121,7 +3123,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       const size = Number(result.size) || 0;
       const seeders = Number(result.seeders);
       if (!Number.isFinite(seeders) || seeders <= 0) return false;
-      if (size > maxSeedrFriendlySize) return false;
+      if (size < minSeedrFriendlySize || size > maxSeedrFriendlySize) return false;
       const releaseText = `${String(result.title || '')} ${String(result.quality || '')}`;
       const qualityText = `${String(result.quality || '')} ${String(result.title || '')}`;
       if (/(?:^|[^a-z0-9])3[ ._-]*d(?:$|[^a-z0-9])/i.test(qualityText)) return false;
