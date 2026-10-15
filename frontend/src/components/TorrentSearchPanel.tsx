@@ -921,6 +921,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const franchisePageGenerationRef = useRef(0);
   const franchiseLoadedPagesRef = useRef(new Map<CachedFranchiseSearchMode, Set<number>>());
   const [franchiseGridPage, setFranchiseGridPage] = useState(1);
+  // While Get cards are mounting and their low-resolution posters settle, queue
+  // the explicit Prepare click without starting torrent/cache/network work.
+  const prepareBuildPendingRef = useRef(false);
   const previousPosterPageRef = useRef(1);
   const [posterFirstPageReady, setPosterFirstPageReady] = useState(false);
   const posterFirstPageReadyRef = useRef(false);
@@ -2581,7 +2584,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const searchMovieTorrents = async (movie: MovieCatalogueItem) => {
     // Torrent lookup and Prepare state are user-initiated only. Background cache/metadata
     // work must never be able to open a Prepare card.
-    if (!prepareClickIntentRef.current || !prepareTraceIdRef.current) {
+    if (!prepareClickIntentRef.current || !prepareTraceIdRef.current || prepareBuildPendingRef.current) {
       console.warn('[PREPARE_TRACE]', JSON.stringify({
         event: 'blocked-prepare-search',
         title: movie.title,
@@ -2592,7 +2595,28 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       return;
     }
     const traceId = prepareTraceIdRef.current;
+    prepareBuildPendingRef.current = true;
+
+    // The Get-card grid owns the first render pass. Do not start Prepare-card
+    // state changes, cache reads, torrent lookups, or poster work until every
+    // visible Get-card poster has loaded/failed (with the existing bounded fallback).
+    // This leaves the clicked movie as a Get card while the rest of the page finishes.
+    const getCardStageStartedAt = Date.now();
+    while (!posterFirstPageReadyRef.current) {
+      if (!prepareClickIntentRef.current || prepareTraceIdRef.current !== traceId) {
+        prepareBuildPendingRef.current = false;
+        return;
+      }
+      if (Date.now() - getCardStageStartedAt >= 9000) break;
+      await new Promise<void>(resolve => window.setTimeout(resolve, 50));
+    }
+    if (!prepareClickIntentRef.current || prepareTraceIdRef.current !== traceId) {
+      prepareBuildPendingRef.current = false;
+      return;
+    }
+    prepareBuildPendingRef.current = false;
     prepareClickIntentRef.current = false;
+
     console.info('[PREPARE_TRACE]', JSON.stringify({
       event: 'prepare-search-start',
       traceId,
@@ -3602,6 +3626,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   useLayoutEffect(() => {
     prepareClickIntentRef.current = false;
     prepareTraceIdRef.current = null;
+    prepareBuildPendingRef.current = false;
     setExpandedSearchGroupKey(null);
     movieTorrentSearchControllerRef.current?.abort();
     movieTorrentSearchControllerRef.current = null;
@@ -4280,7 +4305,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie))}
                   posterAlt={movie.title}
                   onPosterClick={() => {
-                    if (isSearching || movieTorrentSearchLoading) return;
+                    if (isSearching || movieTorrentSearchLoading || prepareBuildPendingRef.current) return;
                     const traceId = `prep-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
                     prepareClickIntentRef.current = true;
                     prepareTraceIdRef.current = traceId;
