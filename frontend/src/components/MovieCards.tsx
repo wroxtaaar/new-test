@@ -214,18 +214,19 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
               onClick={onPosterClick}
               onLoad={event => {
                       const image = event.currentTarget;
-                      image.dataset.posterQuality = 'low-loaded';
+                      image.dataset.posterQuality = image.dataset.highQualityTried === 'true' ? 'high-loaded' : 'low-loaded';
                       onPosterLoad(event);
                       requestHighQualityPoster(image);
                     }}
                     onError={event => {
                       const image = event.currentTarget;
-                      image.dataset.posterQuality = 'low-error';
+                      const previousSrc = image.src;
                       if (image.dataset.highQualityTried === 'true') {
                         try {
                           const parsed = new URL(image.src || image.currentSrc, window.location.origin);
                           if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
                             parsed.searchParams.set('size', 'w185');
+                            image.dataset.posterQuality = 'low-retrying';
                             image.src = parsed.toString();
                             return;
                           }
@@ -233,11 +234,13 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
                           // Use the direct URL fallback below.
                         }
                         if (image.src.includes('/t/p/w780/')) {
+                          image.dataset.posterQuality = 'low-retrying';
                           image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
                           return;
                         }
                       }
                       onPosterError(event);
+                      image.dataset.posterQuality = image.src !== previousSrc ? 'low-retrying' : 'low-failed';
                     }}
             />
             <div data-poster-placeholder="true" onClick={onPosterClick} className="hidden cursor-pointer absolute inset-0 flex items-center justify-center text-slate-600">
@@ -402,18 +405,19 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                     onClick={onPosterClick}
                     onLoad={event => {
                       const image = event.currentTarget;
-                      image.dataset.posterQuality = 'low-loaded';
+                      image.dataset.posterQuality = image.dataset.highQualityTried === 'true' ? 'high-loaded' : 'low-loaded';
                       onPosterLoad(event);
                       requestHighQualityPoster(image);
                     }}
                     onError={event => {
                       const image = event.currentTarget;
-                      image.dataset.posterQuality = 'low-error';
+                      const previousSrc = image.src;
                       if (image.dataset.highQualityTried === 'true') {
                         try {
                           const parsed = new URL(image.src || image.currentSrc, window.location.origin);
                           if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
                             parsed.searchParams.set('size', 'w185');
+                            image.dataset.posterQuality = 'low-retrying';
                             image.src = parsed.toString();
                             return;
                           }
@@ -421,11 +425,13 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                           // Use the direct TMDB fallback below.
                         }
                         if (image.src.includes('/t/p/w780/')) {
+                          image.dataset.posterQuality = 'low-retrying';
                           image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
                           return;
                         }
                       }
                       onPosterError(event);
+                      image.dataset.posterQuality = image.src !== previousSrc ? 'low-retrying' : 'low-failed';
                     }}
                   />
                   <div data-poster-placeholder="true" onClick={onPosterClick} className="hidden cursor-pointer absolute inset-0 flex items-center justify-center bg-slate-950 text-slate-500">
