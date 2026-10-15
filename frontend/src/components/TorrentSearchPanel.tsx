@@ -841,6 +841,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const movieTorrentSearchControllerRef = useRef<AbortController | null>(null);
   const movieTorrentSearchGenerationRef = useRef(0);
   const prepareClickIntentRef = useRef(false);
+  const prepareTraceIdRef = useRef<string | null>(null);
   // Keep per-title torrent results and grouped quality variants in memory across
   // catalogue switches, so reopening a Bollywood/Hollywood movie uses the same
   // already-resolved details as Marvel instead of repeating provider searches.
@@ -2630,8 +2631,25 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const searchMovieTorrents = async (movie: MovieCatalogueItem) => {
     // Torrent lookup and Prepare state are user-initiated only. Background cache/metadata
     // work must never be able to open a Prepare card.
-    if (!prepareClickIntentRef.current) return;
+    if (!prepareClickIntentRef.current || !prepareTraceIdRef.current) {
+      console.warn('[PREPARE_TRACE]', JSON.stringify({
+        event: 'blocked-prepare-search',
+        title: movie.title,
+        year: movie.year || null,
+        reason: 'missing-explicit-click-intent',
+        at: new Date().toISOString(),
+      }));
+      return;
+    }
+    const traceId = prepareTraceIdRef.current;
     prepareClickIntentRef.current = false;
+    console.info('[PREPARE_TRACE]', JSON.stringify({
+      event: 'prepare-search-start',
+      traceId,
+      title: movie.title,
+      year: movie.year || null,
+      at: new Date().toISOString(),
+    }));
     setExpandedSearchGroupKey(null);
     const titleQuery = movie.title + (movie.year ? ' ' + movie.year : '');
     movieTorrentSearchControllerRef.current?.abort();
@@ -2683,6 +2701,15 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           };
           return score(b) - score(a);
         })[0];
+        console.info('[PREPARE_TRACE]', JSON.stringify({
+          event: 'prepare-card-open',
+          traceId,
+          source: 'prebuilt-cache',
+          title: movie.title,
+          year: movie.year || null,
+          variants: selectedGroup.variants.length,
+          at: new Date().toISOString(),
+        }));
         setSelectedMovieTorrentQualityByGroup({ [selectedGroup.key]: torrentResultKey(selectedGroup.variants[0]) });
         setMovieTorrentPreviewGroup(selectedGroup);
         setMovieTorrentPreviewCatalogueId(String(movie.id));
@@ -2702,9 +2729,29 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // devices and avoids re-running indexer searches for prebuilt titles.
       try {
         const params = new URLSearchParams({ title: movie.title, year: String(movie.year || '') });
+        console.info('[PREPARE_TRACE]', JSON.stringify({
+          event: 'prebuilt-request',
+          traceId,
+          title: movie.title,
+          year: movie.year || null,
+          at: new Date().toISOString(),
+        }));
         const response = await fetch(API_BASE + '/api/regional-movies/prebuilt?' + params.toString(), {
-          signal: controller.signal, credentials: 'include', cache: 'no-store',
+          signal: controller.signal,
+          credentials: 'include',
+          cache: 'no-store',
+          headers: {
+            'X-Prepare-Intent': 'explicit-card-click',
+            'X-Prepare-Trace': traceId,
+          },
         });
+        console.info('[PREPARE_TRACE]', JSON.stringify({
+          event: 'prebuilt-response',
+          traceId,
+          status: response.status,
+          ok: response.ok,
+          at: new Date().toISOString(),
+        }));
         if (response.ok) {
           const cached = await response.json();
           const rows = cached?.torrentDetails?.results;
@@ -2836,6 +2883,15 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           return score;
         };
         const group = [...catalogueGroups].sort((a, b) => groupScore(b) - groupScore(a))[0];
+        console.info('[PREPARE_TRACE]', JSON.stringify({
+          event: 'prepare-card-open',
+          traceId,
+          source: 'live-torrent-search',
+          title: movie.title,
+          year: movie.year || null,
+          variants: group.variants.length,
+          at: new Date().toISOString(),
+        }));
         setSelectedMovieTorrentQualityByGroup({ [group.key]: torrentResultKey(group.variants[0]) });
         setMovieTorrentPreviewGroup(group);
         setMovieTorrentPreviewCatalogueId(String(movie.id));
@@ -3524,6 +3580,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // cancel any stale lookup so its late result cannot reopen the old card.
   useLayoutEffect(() => {
     prepareClickIntentRef.current = false;
+    prepareTraceIdRef.current = null;
+    setExpandedSearchGroupKey(null);
     movieTorrentSearchControllerRef.current?.abort();
     movieTorrentSearchControllerRef.current = null;
     movieTorrentSearchGenerationRef.current += 1;
@@ -4200,7 +4258,20 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   overview={movie.overview || 'No synopsis available from TMDB for this title.'}
                   posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie))}
                   posterAlt={movie.title}
-                  onPosterClick={() => { if (!isSearching && !movieTorrentSearchLoading) { prepareClickIntentRef.current = true; void searchMovieTorrents(movie); } }}
+                  onPosterClick={() => {
+                    if (isSearching || movieTorrentSearchLoading) return;
+                    const traceId = `prep-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+                    prepareClickIntentRef.current = true;
+                    prepareTraceIdRef.current = traceId;
+                    console.info('[PREPARE_TRACE]', JSON.stringify({
+                      event: 'explicit-card-click',
+                      traceId,
+                      title: movie.title,
+                      year: movie.year || null,
+                      at: new Date().toISOString(),
+                    }));
+                    void searchMovieTorrents(movie);
+                  }}
                   onPosterLoad={event => {
                     // Preserve the exact URL that made this catalogue poster visible.
                     cataloguePosterUrlsRef.current[String(movie.id)] = event.currentTarget.currentSrc || event.currentTarget.src;
