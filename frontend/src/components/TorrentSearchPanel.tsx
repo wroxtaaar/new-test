@@ -2264,7 +2264,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         if (catalogue.status !== 'ready' || !Array.isArray(catalogue.results)) {
           throw new Error(catalogue.error || 'Could not load the first catalogue page.');
         }
-        data = catalogue.results.slice(0, CATALOGUE_PAGE_SIZE);
+        data = catalogue.results;
         const totalCataloguePages = Number(catalogue.totalPages) || 1;
         const expectedTitles = Number(catalogue.totalMovies) || (totalCataloguePages * CATALOGUE_PAGE_SIZE);
         setCatalogueExpectedTitles(totalCataloguePages > 1 ? expectedTitles : 0);
@@ -3136,7 +3136,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (catalogue.status !== 'ready' || !Array.isArray(catalogue.results)) {
         throw new Error(catalogue.error || ('Could not load page ' + page + ' of the catalogue.'));
       }
-      const pageRows = catalogue.results.slice(0, franchiseGridPageSize);
+      const pageRows = catalogue.results;
       setResults(previous => {
         const byKey = new Map<string, TorrentSearchResult>();
         [...previous, ...pageRows].forEach(row => {
