@@ -11744,7 +11744,14 @@ async def api_search_metadata_batch(
 
 
 @app.get("/api/search")
-async def api_search(q: str = Query(..., min_length=1), limit: int = Query(50, ge=1, le=50)):
+async def api_search(request: Request, q: str = Query(..., min_length=1), limit: int = Query(50, ge=1, le=50)):
+    prepare_intent = request.headers.get("x-prepare-intent", "missing")
+    prepare_trace = request.headers.get("x-prepare-trace", "missing")
+    if prepare_intent != "missing" or prepare_trace != "missing":
+        logger.info(
+            "PREPARE_TRACE event=live-search-request intent=%s trace=%s query=%r",
+            prepare_intent, prepare_trace, q,
+        )
     # Live torrent-provider access is explicitly scoped to this user-triggered endpoint.
     token = _MANUAL_TORRENT_SEARCH.set(True)
     try:
@@ -11757,10 +11764,18 @@ REGIONAL_MOVIE_PREBUILT_CACHE_PATH = Path(os.getenv("REGIONAL_MOVIE_PREBUILT_CAC
 
 @app.get("/api/regional-movies/prebuilt")
 async def api_regional_movie_prebuilt(
+    request: Request,
     title: str = Query(..., min_length=1, max_length=200),
     year: str = Query("", max_length=4),
 ):
     """Serve precomputed regional catalogue and torrent details from persistent VPS JSON."""
+    prepare_intent = request.headers.get("x-prepare-intent", "missing")
+    prepare_trace = request.headers.get("x-prepare-trace", "missing")
+    logger.info(
+        "PREPARE_TRACE event=prebuilt-request intent=%s trace=%s title=%r year=%s referer=%r",
+        prepare_intent, prepare_trace, title, year, request.headers.get("referer", ""),
+    )
+
     def cache_title_key(value: Any) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
@@ -11780,9 +11795,19 @@ async def api_regional_movie_prebuilt(
         entry = matches[0] if len(matches) == 1 else None
     if not isinstance(entry, dict):
         _record_cache_event("regional_movie_prebuilt", "miss")
+        logger.info(
+            "PREPARE_TRACE event=prebuilt-result intent=%s trace=%s cache=miss title=%r year=%s",
+            prepare_intent, prepare_trace, title, year,
+        )
         return {"status": "not_cached", "movie": None, "torrentDetails": None,
                 "builtAt": payload.get("builtAt")}
     _record_cache_event("regional_movie_prebuilt", "hit")
+    cached_details = entry.get("torrentDetails")
+    cached_rows = cached_details.get("results") if isinstance(cached_details, dict) else cached_details
+    logger.info(
+        "PREPARE_TRACE event=prebuilt-result intent=%s trace=%s cache=hit cached_variants=%s title=%r year=%s",
+        prepare_intent, prepare_trace, len(cached_rows) if isinstance(cached_rows, list) else 0, title, year,
+    )
 
     # Apply the current size window to saved torrent results at read time too.
     # This filters old snapshots without mutating the persistent cache file.
