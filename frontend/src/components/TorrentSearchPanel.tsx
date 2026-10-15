@@ -1590,6 +1590,22 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }
   };
 
+  // Append poster jobs without resetting the queue (used when more catalogue pages stream in).
+  const enqueuePosterBackgroundJobs = (items: TorrentSearchResult[]) => {
+    for (const result of items) {
+      const key = posterKeyFor(result);
+      if (!key || posterBackgroundQueuedRef.current.has(key)) continue;
+      const cachedPoster = cachedPosterForTitle(result);
+      if (cachedPoster) {
+        setPosterOverrides(prev => (prev[key] === cachedPoster ? prev : { ...prev, [key]: cachedPoster }));
+        continue;
+      }
+      posterBackgroundQueuedRef.current.add(key);
+      posterBackgroundQueueRef.current.push({ key, result });
+    }
+    startPosterBackgroundWorkers();
+  };
+
   const posterUrlFor = (result: TorrentSearchResult) =>
     lowQualityPosterUrl(posterOverrides[posterKeyFor(result)] || '');
 
@@ -2232,7 +2248,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 const additions = next.results.filter(row => !seenKeys.has(torrentResultKey(row)));
                 return additions.length ? [...previous, ...additions] : previous;
               });
-              startPosterBackgroundSearch(next.results);
+              enqueuePosterBackgroundJobs(next.results);
             }
             catalogueRowsMemo.set(searchMode, accumulated);
             setCatalogueExpectedTitles(0);
@@ -3331,21 +3347,38 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // Staged loading: every new result set starts with low-bandwidth thumbnails.
   // High-quality upgrades remain paused until the card metadata/ratings/availability
   // queues have settled (the quiet effect below opens the high-quality stage).
+  // Page-by-page staging: whenever the visible page changes, its jobs jump the queue and
+  // the high-quality stage closes again until that page has no work left.
+  const currentPagePosterKeys = () => new Set(
+    groupedResults
+      .slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize)
+      .map(group => posterKeyFor(group.posterResult))
+  );
+
   useEffect(() => {
     setHighQualityPostersReady(false);
-  }, [movieCatalogue, groupedResults]);
+    const visibleKeys = currentPagePosterKeys();
+    // Visible cards first; everything else keeps its relative order behind them.
+    posterBackgroundQueueRef.current = [
+      ...posterBackgroundQueueRef.current.filter(job => visibleKeys.has(job.key)),
+      ...posterBackgroundQueueRef.current.filter(job => !visibleKeys.has(job.key)),
+    ];
+  }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
     const quiet = window.setTimeout(() => {
       const availabilityBusy = (Object.values(searchAvailabilityByGroup) as Array<{ status?: string }>).some(item => item?.status === 'loading');
       const ottBusy = ottQueueRef.current.length > 0 || ottActiveWorkersRef.current > 0 ||
         (Object.values(ottAvailability) as Array<{ status?: string }>).some(item => item?.status === 'loading');
-      if (!availabilityBusy && !ottBusy && imdbInFlightRef.current === 0) {
+      // Low-quality posters still being resolved for the visible page also count as work.
+      const visibleKeys = currentPagePosterKeys();
+      const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key));
+      if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
         setHighQualityPostersReady(true);
       }
     }, 1500);
     return () => window.clearTimeout(quiet);
-  }, [ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults]);
+  }, [ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults, franchiseGridPage, posterOverrides]);
 
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
@@ -3373,6 +3406,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // Cards whose title has no saved metadata match still get a rating: look them up by
       // their own title/year, plus the TMDB id the catalogue row already carries.
       ...groupedResults
+        .slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize)
         .filter(group => !episodeSeriesTitle(group.title))
         .map(group => {
           const withId = group.variants.find(variant => Number((variant as any).tmdbId) > 0) as any;
@@ -3454,7 +3488,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }).finally(() => {
       imdbInFlightRef.current = Math.max(0, imdbInFlightRef.current - 1);
     });
-  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick]);
+  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick, franchiseGridPage]);
 
   const clearTmdbCacheAndReload = async () => {
     const currentCatalogue = movieCatalogue;

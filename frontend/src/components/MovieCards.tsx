@@ -114,7 +114,13 @@ export function requestHighQualityPoster(image: HTMLImageElement): void {
 /** Call with false while a page is still loading info, true once it has settled. */
 export function setHighQualityPostersReady(ready: boolean): void {
   highQualityPostersReady = ready;
-  if (!ready) return;
+  if (!ready) {
+    // Drop images from a page the user already left.
+    for (const image of [...pendingHighQualityPosters]) {
+      if (!image.isConnected) pendingHighQualityPosters.delete(image);
+    }
+    return;
+  }
   scheduleHighQualityPosterUpgrades();
 }
 
