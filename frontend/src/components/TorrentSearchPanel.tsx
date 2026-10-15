@@ -2185,9 +2185,14 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           'dc-animated': 'DC animated',
           classics: 'Classics'
         };
-        let catalogue = searchMode === 'marvel'
-          ? await api.getMarvelCatalogue(controller.signal)
-          : await api.getCatalogue(searchMode, controller.signal);
+        // Fetch the first page of movies quickly, then stream the rest in the
+        // background. Servers without paging support ignore the parameters and
+        // return the full catalogue in one response.
+        const CATALOGUE_PAGE_SIZE = 24;
+        const fetchCataloguePage = (page: number) => searchMode === 'marvel'
+          ? api.getMarvelCatalogue(controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE })
+          : api.getCatalogue(searchMode, controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE });
+        let catalogue = await fetchCataloguePage(1);
         while (catalogue.status === 'building' || catalogue.status === 'idle') {
           if (generation !== searchGenerationRef.current) return;
           setCatalogueBuildProgress(
@@ -2196,14 +2201,29 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             ' searches completed. Results will be cached for future visitors.'
           );
           await new Promise<void>(resolve => window.setTimeout(resolve, 2200));
-          catalogue = searchMode === 'marvel'
-            ? await api.getMarvelCatalogue(controller.signal)
-            : await api.getCatalogue(searchMode, controller.signal);
+          catalogue = await fetchCataloguePage(1);
         }
         if (catalogue.status !== 'ready') {
           throw new Error(catalogue.error || ('Could not load the ' + (labels[searchMode] || 'movie') + ' catalogue.'));
         }
         data = catalogue.results;
+        const totalCataloguePages = Number((catalogue as { totalPages?: number }).totalPages) || 1;
+        if (totalCataloguePages > 1) {
+          void (async () => {
+            for (let page = 2; page <= totalCataloguePages; page += 1) {
+              if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
+              const next = await fetchCataloguePage(page);
+              if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
+              if (next.status !== 'ready' || !Array.isArray(next.results)) return;
+              setResults(previous => {
+                const seenKeys = new Set(previous.map(row => torrentResultKey(row)));
+                const additions = next.results.filter(row => !seenKeys.has(torrentResultKey(row)));
+                return additions.length ? [...previous, ...additions] : previous;
+              });
+              startPosterBackgroundSearch(next.results);
+            }
+          })().catch(() => { /* The first page is already visible; later pages retry on the next visit. */ });
+        }
         setCatalogueBuildProgress(catalogue.refreshing ? 'Showing cached results while the catalogue refresh runs in the background.' : '');
 
         // Keep existing cached cards visible, then swap in the enriched MCU cache

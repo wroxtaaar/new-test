@@ -367,8 +367,8 @@ export const api = {
     return data;
   },
 
-  async getMarvelCatalogue(signal?: AbortSignal): Promise<MarvelCatalogueResponse> {
-    const res = await fetch(API_BASE + '/api/catalogue/marvel', {
+  async getMarvelCatalogue(signal?: AbortSignal, paging?: { page: number; pageSize: number }): Promise<MarvelCatalogueResponse> {
+    const res = await fetch(API_BASE + '/api/catalogue/marvel' + (paging ? '?page=' + paging.page + '&page_size=' + paging.pageSize : ''), {
       signal,
       credentials: 'include',
     });
@@ -381,8 +381,8 @@ export const api = {
     return data as MarvelCatalogueResponse;
   },
 
-  async getCatalogue(key: string, signal?: AbortSignal): Promise<MarvelCatalogueResponse> {
-    const res = await fetch(API_BASE + '/api/catalogue/extra/' + encodeURIComponent(key), {
+  async getCatalogue(key: string, signal?: AbortSignal, paging?: { page: number; pageSize: number }): Promise<MarvelCatalogueResponse> {
+    const res = await fetch(API_BASE + '/api/catalogue/extra/' + encodeURIComponent(key) + (paging ? '?page=' + paging.page + '&page_size=' + paging.pageSize : ''), {
       signal,
       credentials: 'include',
     });

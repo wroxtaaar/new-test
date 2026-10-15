@@ -503,6 +503,28 @@ def _fast_json_response(request: Request, memo_key: str, signature: Any, build) 
     return Response(entry[1], media_type="application/json", headers=headers)
 
 
+def _catalogue_group_key(item: dict[str, Any]) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(
+        item.get("catalogueTitle") or item.get("marvelCatalogueTitle")
+        or item.get("mediaTitle") or item.get("title") or ""
+    ).casefold())
+
+
+def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) -> dict[str, Any]:
+    """Slice a catalogue by movie (all torrent rows of a title stay together)."""
+    if page <= 0 or page_size <= 0:
+        return payload
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in payload["results"]:
+        groups.setdefault(_catalogue_group_key(row), []).append(row)
+    keys = list(groups)
+    total_pages = max(1, -(-len(keys) // page_size))
+    start = (page - 1) * page_size
+    rows = [row for key in keys[start:start + page_size] for row in groups[key]]
+    return {**payload, "results": rows, "page": page, "pageSize": page_size,
+            "totalPages": total_pages, "totalMovies": len(keys)}
+
+
 def _seedr_empty_session() -> dict[str, Any]:
     now = time.time()
     return {
@@ -9680,18 +9702,18 @@ async def api_backfill_marvel_ott(
 
 
 @app.get("/api/catalogue/extra/{catalogue_key}")
-async def api_extra_catalogue(catalogue_key: str, request: Request):
+async def api_extra_catalogue(catalogue_key: str, request: Request, page: int = Query(0, ge=0), page_size: int = Query(0, ge=0, le=200)):
     if catalogue_key not in _EXTRA_CATALOGUES:
         raise HTTPException(404, "Unknown catalogue")
     cached = _read_extra_catalogue(catalogue_key)
     _record_cache_event("extra_catalogue", "hit" if cached else "miss")
     if cached and CACHE_ONLY_MODE:
-        return _fast_json_response(request, "extra:" + catalogue_key, _file_signature(_EXTRA_CATALOGUE_PATHS[catalogue_key]), lambda: {
+        return _fast_json_response(request, "extra:%s:%d:%d" % (catalogue_key, page, page_size), _file_signature(_EXTRA_CATALOGUE_PATHS[catalogue_key]), lambda: _page_catalogue_payload({
             "status": "ready", "builtAt": cached.get("builtAt"),
             "completed": int(cached.get("titlesQueried") or 0), "total": int(cached.get("titlesQueried") or 0),
             "resultCount": int(cached.get("resultCount") or len(cached["results"])),
             "movieCount": int(cached.get("movieCount") or 0), "refreshing": False,
-            "results": cached["results"]})
+            "results": cached["results"]}, page, page_size))
     if catalogue_key == "classics" and cached:
         _schedule_classics_movie_ott_enrichment()
     await _ensure_extra_catalogue_refresh(catalogue_key)
@@ -9968,12 +9990,12 @@ async def api_search_saved_ott(titles: list[str] = Query(..., min_length=1, max_
 
 
 @app.get("/api/catalogue/marvel")
-async def api_marvel_catalogue(request: Request):
+async def api_marvel_catalogue(request: Request, page: int = Query(0, ge=0), page_size: int = Query(0, ge=0, le=200)):
     global _marvel_catalogue_task
     cached = _merge_bundled_marvel_catalogue_cache(_read_marvel_catalogue())
     _record_cache_event("marvel_catalogue", "hit" if cached else "miss")
     if cached and CACHE_ONLY_MODE:
-        return _fast_json_response(request, "marvel-page", _file_signature(MARVEL_CATALOGUE_PATH), lambda: {
+        return _fast_json_response(request, "marvel-page:%d:%d" % (page, page_size), _file_signature(MARVEL_CATALOGUE_PATH), lambda: _page_catalogue_payload({
             "status": "ready",
             "builtAt": cached.get("builtAt"),
             "completed": int(cached.get("titlesQueried") or len(MARVEL_MOVIE_SEARCHES)),
@@ -9982,7 +10004,7 @@ async def api_marvel_catalogue(request: Request):
             "movieCount": int(cached.get("movieCount") or 0),
             "results": cached["results"],
             "refreshing": False,
-        })
+        }, page, page_size))
     if cached:
         # Keep the current cache available immediately while rebuilding it once
         # when its version predates the updated MCU film list.
