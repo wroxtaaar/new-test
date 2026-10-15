@@ -1120,7 +1120,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         try {
           const availability = await api.getMovieOttAvailability(Number(movieId), 'IN');
           if (lookupGeneration === ottLookupGenerationRef.current) {
-            setOttState(movieId, availability);
+            const current = ottAvailabilityRef.current[movieId];
+            const providerCount = (value: any) =>
+              (Array.isArray(value?.streamingProviders) ? value.streamingProviders.length : 0) +
+              (Array.isArray(value?.rentProviders) ? value.rentProviders.length : 0) +
+              (Array.isArray(value?.buyProviders) ? value.buyProviders.length : 0);
+            // A page-specific refresh can return an empty/incomplete response.
+            // Never let it erase provider names already hydrated from the saved catalogue.
+            if (providerCount(availability) === 0 && providerCount(current) > 0) {
+              setOttState(movieId, current);
+            } else {
+              setOttState(movieId, availability);
+            }
           }
         } catch (error: any) {
           if (lookupGeneration === ottLookupGenerationRef.current) {
@@ -1160,14 +1171,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       const movieId = String(movie.id);
       if (!/^\d+$/.test(movieId)) continue;
       ottKnownMoviesRef.current.set(movieId, movie);
-      if (ottQueuedIdsRef.current.has(movieId)) continue;
       const existing = next[movieId];
       const isRetry = retryErrors && (!existing || existing.status === 'error' || existing.status === 'loading');
-      if (existing && !isRetry && ottLiveCheckedRef.current.has(movieId)) continue;
 
-      // The backend merges the already-enriched Marvel/DC catalogue data into
-      // these cards. Render it immediately; when it has no provider names, also
-      // re-check live below so missing streaming info fills itself in.
+      // Hydrate saved provider data before checking whether a live lookup is
+      // already queued. This matters when revisiting a page while a request for
+      // the same title is still in flight.
       let state = existing && !isRetry ? existing : undefined;
       const saved = movie.ottAvailability;
       if (!state && saved && typeof saved === 'object') {
@@ -1200,6 +1209,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         next[movieId] = state;
         changed = true;
       }
+
+      if (ottQueuedIdsRef.current.has(movieId)) continue;
+      if (existing && !isRetry && ottLiveCheckedRef.current.has(movieId)) continue;
 
       const checkedMs = Date.parse(String((state as any)?.checkedAt || ''));
       const savedIsFreshMiss = !!state && state.status !== 'loading' && state.status !== 'error' &&
