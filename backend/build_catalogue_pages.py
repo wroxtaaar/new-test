@@ -21,10 +21,23 @@ SOURCES = {
 }
 
 
-def group_key(item):
-    return re.sub(r"[^a-z0-9]+", "", str(
+def group_key(item, index=0):
+    """Return a stable title key, without collapsing unrelated untitled rows."""
+    title = re.sub(r"[^a-z0-9]+", "", str(
         item.get("catalogueTitle") or item.get("marvelCatalogueTitle")
         or item.get("mediaTitle") or item.get("title") or "").casefold())
+    if title:
+        return title
+
+    # Some legacy rows have no display title but still carry a stable media/release ID.
+    for field in ("tmdbId", "tmdb_id", "movieId", "movie_id", "imdbId", "imdb_id",
+                  "infoHash", "info_hash", "magnet", "id"):
+        value = str(item.get(field) or "").strip().casefold()
+        if value:
+            return field + ":" + value
+
+    # Never group every malformed row under the same empty-string key.
+    return "__untitled_row_" + str(index)
 
 
 def main():
@@ -35,8 +48,8 @@ def main():
         payload = json.loads(path.read_text(encoding="utf-8"))
         rows = [r for r in payload.get("results", []) if isinstance(r, dict)]
         groups = {}
-        for row in rows:
-            groups.setdefault(group_key(row), []).append(row)
+        for index, row in enumerate(rows):
+            groups.setdefault(group_key(row, index), []).append(row)
         keys = list(groups)
         total_pages = max(1, -(-len(keys) // PAGE_SIZE))
         out = SEED / "pages" / key

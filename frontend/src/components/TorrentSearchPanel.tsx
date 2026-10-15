@@ -1308,6 +1308,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const posterBackgroundQueueRef = useRef<Array<{ key: string; result: TorrentSearchResult }>>([]);
   const posterBackgroundQueuedRef = useRef(new Set<string>());
   const posterBackgroundActiveRef = useRef(0);
+  // Track the keys currently being resolved; queued-only checks miss active jobs.
+  const posterBackgroundActiveKeysRef = useRef(new Set<string>());
   const posterBackgroundGenerationRef = useRef(0);
   const posterBackgroundAttemptsRef = useRef(new Map<string, number>());
   // Avoid repeating an identical failed poster request for every quality/variant
@@ -1501,6 +1503,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
       posterBackgroundQueuedRef.current.delete(job.key);
       posterBackgroundActiveRef.current += 1;
+      posterBackgroundActiveKeysRef.current.add(job.key);
 
       void (async () => {
         try {
@@ -1545,6 +1548,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             }, 45000);
           }
         } finally {
+          posterBackgroundActiveKeysRef.current.delete(job.key);
           posterBackgroundActiveRef.current = Math.max(
             0,
             posterBackgroundActiveRef.current - 1
@@ -1562,6 +1566,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     posterBackgroundGenerationRef.current += 1;
     posterBackgroundQueueRef.current = [];
     posterBackgroundQueuedRef.current.clear();
+    posterBackgroundActiveKeysRef.current.clear();
     posterBackgroundAttemptsRef.current.clear();
     posterLoadedRef.current.clear();
 
@@ -3366,18 +3371,27 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
-    const quiet = window.setTimeout(() => {
+    let quietTimer: number | undefined;
+    const checkQuiet = () => {
       const availabilityBusy = (Object.values(searchAvailabilityByGroup) as Array<{ status?: string }>).some(item => item?.status === 'loading');
       const ottBusy = ottQueueRef.current.length > 0 || ottActiveWorkersRef.current > 0 ||
         (Object.values(ottAvailability) as Array<{ status?: string }>).some(item => item?.status === 'loading');
-      // Low-quality posters still being resolved for the visible page also count as work.
+      // Low-quality posters still queued or actively resolving for the visible page count as work.
       const visibleKeys = currentPagePosterKeys();
-      const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key));
+      const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key)) ||
+        [...posterBackgroundActiveKeysRef.current].some(key => visibleKeys.has(key));
       if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
         setHighQualityPostersReady(true);
+        return;
       }
-    }, 1500);
-    return () => window.clearTimeout(quiet);
+      // A busy check must retry; otherwise the high-quality stage can remain paused
+      // forever when the final worker finishes without causing another React render.
+      quietTimer = window.setTimeout(checkQuiet, 300);
+    };
+    quietTimer = window.setTimeout(checkQuiet, 1500);
+    return () => {
+      if (quietTimer !== undefined) window.clearTimeout(quietTimer);
+    };
   }, [ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults, franchiseGridPage, posterOverrides]);
 
   // IMDb ratings are fetched independently after cards have rendered.
