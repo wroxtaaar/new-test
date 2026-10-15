@@ -3329,32 +3329,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
-    let quietTimer: number | undefined;
-    const checkQuiet = () => {
-      if (!posterFirstPageReady) {
-        setHighQualityPostersReady(false);
-        quietTimer = window.setTimeout(checkQuiet, 100);
-        return;
-      }
-      const availabilityBusy = (Object.values(searchAvailabilityByGroup) as Array<{ status?: string }>)
-        .some(item => item?.status === 'loading');
-      const ottBusy = ottQueueRef.current.length > 0 || ottActiveWorkersRef.current > 0 ||
-        (Object.values(ottAvailability) as Array<{ status?: string }>)
-          .some(item => item?.status === 'loading');
-      const visibleKeys = currentPagePosterKeys();
-      const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key)) ||
-        [...posterBackgroundActiveKeysRef.current].some(key => visibleKeys.has(key));
-      if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
-        setHighQualityPostersReady(true);
-        return;
-      }
-      quietTimer = window.setTimeout(checkQuiet, 250);
-    };
-    quietTimer = window.setTimeout(checkQuiet, 100);
-    return () => {
-      if (quietTimer !== undefined) window.clearTimeout(quietTimer);
-    };
-  }, [posterFirstPageReady, ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults, franchiseGridPage, posterOverrides]);
+    // Poster stages are independent from metadata enrichment. As soon as every
+    // visible card's low-resolution poster has loaded or reached its fallback,
+    // allow high-resolution upgrades for this page. IMDb/OTT/synopsis lookups
+    // continue in the background and cannot hold the poster stage closed.
+    setHighQualityPostersReady(posterFirstPageReady);
+  }, [posterFirstPageReady, movieCatalogue, groupedResults, franchiseGridPage]);
 
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
