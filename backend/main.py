@@ -39,6 +39,16 @@ from cache_diagnostics import (
     _upstream_endpoint_group,
 )
 
+_TRUTHY = {"1", "true", "yes", "on"}
+# Cache-only deployments (e.g. Render free without provider keys) must never
+# call TMDB/Watchmode/OMDb/poster providers; prefilled sections read the bundled cache.
+CACHE_ONLY_MODE = (
+    os.getenv("CACHE_ONLY_MODE", "false").strip().casefold() in _TRUTHY
+    or os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in _TRUTHY
+)
+
+
+
 APP_NAME = "Torrent Studio API"
 logger = logging.getLogger("torrent-studio")
 
@@ -109,7 +119,7 @@ async def _watchmode_get(path: str, *, params: dict[str, Any] | None = None,
     timeout: httpx.Timeout | float = 10.0, auth_header: bool = True) -> httpx.Response | None:
     """Rotate keys when available, but honor Watchmode's shared rate-limit cooldown."""
     global _WATCHMODE_RATE_LIMITED_UNTIL
-    if not WATCHMODE_API_KEYS:
+    if CACHE_ONLY_MODE or not WATCHMODE_API_KEYS:
         return None
     # Watchmode rate limits and monthly credits are plan/account governed. Once any
     # credential receives 429, pause all credentials in this process instead of
@@ -4550,6 +4560,8 @@ async def _tmdb_poster_lookup(title: str, year: str = "") -> str | None:
     return None
 
 async def _poster_lookup_uncached(clean_title: str, clean_year: str, cache_key: str) -> str | None:
+    if CACHE_ONLY_MODE:
+        return None
     now = time.time()
     # Prefer TMDB's year-filtered movie results to prevent a similarly named
     # title from supplying the wrong artwork. Other sources remain fallbacks.
@@ -7717,7 +7729,7 @@ def _streaming_availability_provider_rows(rows: list[dict[str, Any]], accepted_t
 async def _tmdb_fetch_movie_ott_availability(movie_id: int, region: str) -> dict[str, Any]:
     # Render serves OTT availability from the bundled/persistent cache only.
     # Never spend provider API quota refreshing streaming information at runtime.
-    if os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in {"1", "true", "yes", "on"}:
+    if CACHE_ONLY_MODE:
         cached = _tmdb_ott_cache.get((movie_id, region.upper()))
         if cached and isinstance(cached[1], dict):
             _record_cache_event("ott", "cache_only_memory_hit")
@@ -7874,6 +7886,8 @@ async def _tmdb_fetch_movie_ott_availability(movie_id: int, region: str) -> dict
     }
 
 async def _tmdb_get_json(path: str, params: dict[str, Any] | None = None, *, request_timeout: float = 12.0) -> dict[str, Any]:
+    if CACHE_ONLY_MODE:
+        raise HTTPException(status_code=503, detail="Cache-only mode: live TMDB lookups are disabled.")
     credentials = [("bearer", token) for token in TMDB_READ_ACCESS_TOKENS] + [("api_key", key) for key in TMDB_API_KEYS]
     if not credentials:
         raise HTTPException(status_code=503, detail="TMDB credentials are not configured. Set TMDB_API_KEYS and/or TMDB_READ_ACCESS_TOKENS.")
@@ -8336,7 +8350,7 @@ def _save_persistent_tv_catalogue(path: Path, payload: dict[str, Any]) -> None:
 
 async def _tv_streaming_providers(tmdb_id: int) -> list[dict[str, Any]]:
     """Resolve India streaming/rent/buy providers for one TMDB TV series."""
-    if os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in {"1", "true", "yes", "on"}:
+    if CACHE_ONLY_MODE:
         _record_cache_event("tv_streaming_availability", "cache_only_miss_blocked")
         return []
     _record_cache_event("tv_streaming_availability", "live_provider_lookup")
@@ -9402,7 +9416,7 @@ async def api_tmdb_movie_ott_availability(
     if stale_payload is not None and not force:
         _record_cache_event("ott", "stale_hit")
         task = _tmdb_ott_inflight.get(cache_key)
-        if task is None or task.done():
+        if not CACHE_ONLY_MODE and (task is None or task.done()):
             async def refresh_stale_ott_cache():
                 try:
                     payload = await _tmdb_fetch_movie_ott_availability(movie_id, region)
@@ -9495,7 +9509,7 @@ async def _resolve_marvel_tmdb_movie_id(title: str, year: int) -> tuple[int | No
 
     # Render's OTT cache-only mode must not resolve unknown movie IDs over TMDB.
     # The reviewed manifest above remains the allowed offline ID source.
-    if os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in {"1", "true", "yes", "on"}:
+    if CACHE_ONLY_MODE:
         _record_cache_event("marvel_ott_backfill", "cache_only_id_miss_blocked")
         return None, "cache_only_no_saved_id"
 
@@ -9701,7 +9715,7 @@ async def _enrich_classics_movie_ott_cache() -> None:
 
                     # In cache-only mode, a missing OTT entry must not fan out into
                     # Watchmode/TMDB title-search calls just to obtain an ID for a backfill.
-                    if os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in {"1", "true", "yes", "on"}:
+                    if CACHE_ONLY_MODE:
                         _record_cache_event("classics_ott_enrichment", "cache_only_miss_skipped")
                         return
 
@@ -10038,7 +10052,7 @@ async def _fallback_tvmaze_search(query: str, timeout: httpx.Timeout) -> list[di
 async def _fallback_omdb_search(query: str, timeout: httpx.Timeout) -> list[dict[str, Any]]:
     """OMDb metadata fallback; OMDb does not provide streaming availability."""
     keys = _split_env_keys(os.getenv("OMDB_API_KEYS", ""), os.getenv("OMDB_API_KEY", ""))
-    if not keys:
+    if CACHE_ONLY_MODE or not keys:
         return []
     target = _availability_normalize_title(query)
     for key in keys:
@@ -10107,7 +10121,7 @@ async def _api_search_availability_impl(q: str) -> dict[str, Any]:
         return cached[1]
 
     _record_cache_event("availability_search", "miss")
-    if os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in {"1", "true", "yes", "on"}:
+    if CACHE_ONLY_MODE:
         # This endpoint previously searched Watchmode/TMDB directly, bypassing the
         # movie-ID OTT cache-only guard. Reuse saved, title-matched OTT enrichment.
         try:
@@ -11264,6 +11278,14 @@ async def _get_imdb_rating_record(
     cache_key = _imdb_rating_cache_key(title, year, normalized_type)
     cached = _load_imdb_rating_cache().get(cache_key)
     now = int(time.time())
+    if CACHE_ONLY_MODE:
+        # Never call OMDb/TMDB; serve whatever is stored, however old.
+        _record_cache_event("imdb_rating", "hit" if cached else "miss")
+        return cached or {
+            "status": "unavailable", "title": title, "year": year or None,
+            "mediaType": normalized_type, "cacheKey": cache_key,
+            "reason": "Not in bundled cache",
+        }
     # A miss recorded before a TMDB id was available deserves one retry with the id.
     if (
         cached
@@ -11710,7 +11732,7 @@ async def api_cache_report():
         "status": "ok",
         "measurementStartedAt": datetime.fromtimestamp(_CACHE_DIAGNOSTICS_STARTED_AT, timezone.utc).isoformat(),
         "measurementScope": "This worker process only; counters reset on worker restart and are not aggregated across Render instances.",
-        "ottCacheOnly": os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in {"1", "true", "yes", "on"},
+        "ottCacheOnly": CACHE_ONLY_MODE,
         "uptimeSeconds": max(0, int(now - _CACHE_DIAGNOSTICS_STARTED_AT)),
         "cacheEvents": cache_events,
         "cacheUseSummary": cache_use_summary,
