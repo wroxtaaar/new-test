@@ -825,7 +825,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // The live search, posters, OTT lookups and metadata prefetch keep running independently.
   const [expandedSearchGroupKey, setExpandedSearchGroupKey] = useState<string | null>(null);
   const [movieTorrentPreviewGroup, setMovieTorrentPreviewGroup] = useState<TorrentQualityGroup | null>(null);
+  // A TMDB ID alone is not unique across catalogue views. Scope a Prepare
+  // preview to the exact catalogue item the user clicked.
   const [movieTorrentPreviewCatalogueId, setMovieTorrentPreviewCatalogueId] = useState<string | null>(null);
+  const catalogueMovieIdentity = (movie: MovieCatalogueItem, catalogueKey?: string | null) =>
+    [String(catalogueKey || 'catalogue'), String(movie.id), normalizeGroupTitle(movie.title), String(movie.year || '')].join('|');
   // Preserve the exact poster URL from the catalogue card the user clicked.
   // The selected inline card must keep using that same source, even while the
   // catalogue list re-renders or torrent metadata is substituted.
@@ -2632,7 +2636,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const generation = ++movieTorrentSearchGenerationRef.current;
 
     setMovieTorrentSearchTitle(titleQuery);
-    setMovieTorrentPreviewCatalogueId(String(movie.id));
+    setMovieTorrentPreviewCatalogueId(catalogueMovieIdentity(movie, movieCatalogue?.catalogue));
     setMovieTorrentPreviewPosterUrl(
       cataloguePosterUrlsRef.current[String(movie.id)] || cataloguePosterSource(movie)
     );
@@ -2686,7 +2690,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         }));
         setSelectedMovieTorrentQualityByGroup({ [selectedGroup.key]: torrentResultKey(selectedGroup.variants[0]) });
         setMovieTorrentPreviewGroup(selectedGroup);
-        setMovieTorrentPreviewCatalogueId(String(movie.id));
+        setMovieTorrentPreviewCatalogueId(catalogueMovieIdentity(movie, movieCatalogue?.catalogue));
         if (!/^(popular|trending|latest)-(bollywood|hollywood)$/.test(String(movieCatalogue?.catalogue || ''))) {
           startPosterBackgroundSearch(selectedGroup.variants);
         }
@@ -2868,7 +2872,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         }));
         setSelectedMovieTorrentQualityByGroup({ [group.key]: torrentResultKey(group.variants[0]) });
         setMovieTorrentPreviewGroup(group);
-        setMovieTorrentPreviewCatalogueId(String(movie.id));
+        setMovieTorrentPreviewCatalogueId(catalogueMovieIdentity(movie, movieCatalogue?.catalogue));
         setMovieTorrentPickerGroups(null);
       }
     } catch (error: any) {
@@ -4161,7 +4165,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               // where the same title appears under a different catalogue record.
               const previewMatchesMovie =
                 movieTorrentPreviewCatalogueId !== null &&
-                movieTorrentPreviewCatalogueId === String(movie.id);
+                movieTorrentPreviewCatalogueId === catalogueMovieIdentity(movie, movieCatalogue.catalogue);
               const previewGroup = previewMatchesMovie ? movieTorrentPreviewGroup : null;
               const isPunisherSpecial = /punisher.*one last kill|one last kill.*punisher/i.test(String(movie.title || ''));
               const movieImdb = imdbRatingsByKey[imdbRatingKey(movie.title, movie.year)] ||
