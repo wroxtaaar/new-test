@@ -4038,11 +4038,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           )}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 lg:gap-4">
             {visibleMovieCatalogueItems.map(movie => {
-              // Keep the selected torrent preview attached to the movie that
-              // initiated the search. Some catalogue sources normalize IDs
-              // differently between the card and torrent-picker state, so use
-              // the exact searched title/year as a safe fallback.
-              // Prepare state belongs to the exact catalogue item that was clicked.
+              // Keep the selected torrent preview attached only to the exact
+              // catalogue item the user clicked. Never reuse it by title alone.
               // A title match alone can leak an old Prepare card into another section
               // where the same title appears under a different catalogue record.
               const previewMatchesMovie =
