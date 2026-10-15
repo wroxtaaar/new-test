@@ -534,6 +534,29 @@ def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) 
             "totalPages": total_pages, "totalMovies": len(keys)}
 
 
+_PREBUILT_PAGE_SIZE = 18
+_PREBUILT_PAGE_MEMO: dict[str, bytes] = {}
+
+
+def _prebuilt_catalogue_page(request: Request, key: str, page: int, page_size: int) -> Response | None:
+    """Serve a build-time pre-split catalogue page without parsing the big file."""
+    if page <= 0 or page_size != _PREBUILT_PAGE_SIZE:
+        return None
+    memo_key = f"{key}:{page}"
+    blob = _PREBUILT_PAGE_MEMO.get(memo_key)
+    if blob is None:
+        try:
+            blob = (_CACHE_SEED_DIR / "pages" / key / f"{page}.json.gz").read_bytes()
+        except OSError:
+            return None
+        _PREBUILT_PAGE_MEMO[memo_key] = blob
+    headers = {"Cache-Control": "public, max-age=300", "Vary": "Accept-Encoding"}
+    if "gzip" in (request.headers.get("accept-encoding") or "").casefold():
+        headers["Content-Encoding"] = "gzip"
+        return Response(blob, media_type="application/json", headers=headers)
+    return Response(gzip.decompress(blob), media_type="application/json", headers=headers)
+
+
 def _seedr_empty_session() -> dict[str, Any]:
     now = time.time()
     return {
@@ -9734,6 +9757,10 @@ async def api_backfill_marvel_ott(
 async def api_extra_catalogue(catalogue_key: str, request: Request, page: int = Query(0, ge=0), page_size: int = Query(0, ge=0, le=200)):
     if catalogue_key not in _EXTRA_CATALOGUES:
         raise HTTPException(404, "Unknown catalogue")
+    if CACHE_ONLY_MODE:
+        prebuilt = _prebuilt_catalogue_page(request, catalogue_key, page, page_size)
+        if prebuilt is not None:
+            return prebuilt
     cached = _read_extra_catalogue(catalogue_key)
     _record_cache_event("extra_catalogue", "hit" if cached else "miss")
     if cached and CACHE_ONLY_MODE:
@@ -10021,6 +10048,10 @@ async def api_search_saved_ott(titles: list[str] = Query(..., min_length=1, max_
 @app.get("/api/catalogue/marvel")
 async def api_marvel_catalogue(request: Request, page: int = Query(0, ge=0), page_size: int = Query(0, ge=0, le=200)):
     global _marvel_catalogue_task
+    if CACHE_ONLY_MODE:
+        prebuilt = _prebuilt_catalogue_page(request, "marvel", page, page_size)
+        if prebuilt is not None:
+            return prebuilt
     cached = _merge_bundled_marvel_catalogue_cache(_read_marvel_catalogue())
     _record_cache_event("marvel_catalogue", "hit" if cached else "miss")
     if cached and CACHE_ONLY_MODE:
