@@ -3491,12 +3491,55 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
-    // Poster stages are independent from metadata enrichment. As soon as every
-    // visible card's low-resolution poster has loaded or reached its fallback,
-    // allow high-resolution upgrades for this page. IMDb/OTT/synopsis lookups
-    // continue in the background and cannot hold the poster stage closed.
-    setHighQualityPostersReady(posterFirstPageReady);
-  }, [posterFirstPageReady, movieCatalogue, groupedResults, franchiseGridPage]);
+    let timer: number | undefined;
+    let cancelled = false;
+    const startedAt = Date.now();
+    let settledSince: number | null = null;
+
+    // Keep every card on the low-resolution poster until the entire visible page
+    // has completed its metadata pass. This is page-level staging, not per-card:
+    // one card must never jump to w780 while another card is still filling in.
+    setHighQualityPostersReady(false);
+    if (!posterFirstPageReady) return;
+
+    const checkPageDetails = () => {
+      if (cancelled) return;
+      const start = (franchiseGridPage - 1) * franchiseGridPageSize;
+      const pageMovies = visibleMovieCatalogueItems.slice(start, start + franchiseGridPageSize);
+      const ottSettled = pageMovies.every(movie => {
+        const status = ottAvailability[String(movie.id)]?.status;
+        return status != null && status !== 'loading';
+      });
+      const metadataSettled = ottSettled && imdbInFlightRef.current === 0;
+      const now = Date.now();
+
+      if (metadataSettled) {
+        if (settledSince == null) settledSince = now;
+        // Allow state updates from the last metadata response to paint before
+        // opening the shared high-resolution poster queue.
+        if (now - settledSince >= 650) {
+          setHighQualityPostersReady(true);
+          return;
+        }
+      } else {
+        settledSince = null;
+      }
+
+      // Providers/IMDb can be unavailable upstream. Do not leave thumbnails
+      // permanently low-res: after 25 seconds, release the page as a whole.
+      if (now - startedAt >= 25000) {
+        setHighQualityPostersReady(true);
+        return;
+      }
+      timer = window.setTimeout(checkPageDetails, 200);
+    };
+
+    timer = window.setTimeout(checkPageDetails, 200);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [posterFirstPageReady, movieCatalogue, visibleMovieCatalogueItems, ottAvailability, groupedResults, searchMetadata, imdbRatingsByKey, franchiseGridPage, imdbRetryTick]);
 
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
