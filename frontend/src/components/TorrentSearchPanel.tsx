@@ -3114,7 +3114,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, []);
 
   const sortedResults = useMemo(() => {
-    // Use the shared root search_limits.json settings.
+    // Use the shared root search_limits.json settings. Keep both bounds local
+    // to this memo: the manual-search handler has its own separate scope.
+    const minSeedrFriendlySize = searchLimits.minSizeMb * 1024 * 1024;
     const maxSeedrFriendlySize = searchLimits.maxSizeGb * 1024 * 1024 * 1024;
     // Exclude theatrical/unfinished releases regardless of provider. Keep the
     // tokens bounded so words such as "timestamp" are not mistaken for TS.
