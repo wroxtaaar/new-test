@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Search,
   X,
@@ -906,6 +906,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
   const [classicsContentTab, setClassicsContentTab] = useState<ClassicsContentTab>('movies');
   const [franchiseGridPage, setFranchiseGridPage] = useState(1);
+  const [posterFirstPageReady, setPosterFirstPageReady] = useState(false);
+  const posterFirstPageReadyRef = useRef(false);
   const [catalogueExpectedTitles, setCatalogueExpectedTitles] = useState(0);
   const franchiseGridPageSize = 18;
   const renderFranchisePagination = (total: number) => total > franchiseGridPageSize ? <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2"><button type="button" disabled={franchiseGridPage <= 1} onClick={() => setFranchiseGridPage(page => Math.max(1, page - 1))} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40">← Previous</button><span className="text-xs text-slate-400">Page {franchiseGridPage} of {Math.max(1, Math.ceil(total / franchiseGridPageSize))} · {total} titles</span><button type="button" disabled={franchiseGridPage >= Math.ceil(total / franchiseGridPageSize)} onClick={() => setFranchiseGridPage(page => Math.min(Math.ceil(total / franchiseGridPageSize), page + 1))} className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-40">Next →</button></div> : null;
@@ -2044,6 +2046,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
   const runSearch = async (event?: React.FormEvent, searchOverride?: string, searchMode?: 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'classics') => {
     event?.preventDefault();
+    setFranchiseGridPage(1);
+    posterFirstPageReadyRef.current = false;
+    setPosterFirstPageReady(false);
     setIsPresetCatalogueAction(Boolean(searchMode));
     setIsMarvelEnglishResults(searchMode === 'marvel');
     setIsDcLiveActionEnglishResults(searchMode === 'dc-live-action');
@@ -3005,6 +3010,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     page = 1,
     onlyReleased = releasedOnly,
   ) => {
+    setFranchiseGridPage(1);
+    posterFirstPageReadyRef.current = false;
+    setPosterFirstPageReady(false);
     movieTorrentSearchControllerRef.current?.abort();
     movieTorrentSearchGenerationRef.current += 1;
     setMovieTorrentSearchLoading(false);
@@ -3050,12 +3058,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           })),
         };
         setMovieCatalogue(basicPage);
-        queueOttLookups(basicPage.results);
         setCatalogueBuildProgress('');
         void api.getMovieCatalogue(key, page, onlyReleased, undefined, 5, false).then(fullPage => {
           if (generation !== searchGenerationRef.current) return;
           setMovieCatalogue(fullPage);
-          queueOttLookups(fullPage.results);
         }).catch(error => {
           if (generation === searchGenerationRef.current) {
             setError(String(error?.message || 'Could not load full catalogue details.'));
@@ -3066,7 +3072,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       const data = await api.getMovieCatalogue(key, page, onlyReleased, controller.signal);
       if (generation !== searchGenerationRef.current) return;
       setMovieCatalogue(data);
-      queueOttLookups(data.results);
       setCatalogueBuildProgress('');
     } catch (err: any) {
       if (generation !== searchGenerationRef.current) return;
