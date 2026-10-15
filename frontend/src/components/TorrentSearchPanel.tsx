@@ -3577,10 +3577,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (cancelled) return;
       const start = (franchiseGridPage - 1) * franchiseGridPageSize;
       const pageMovies = visibleMovieCatalogueItems.slice(start, start + franchiseGridPageSize);
-      const ottSettled = pageMovies.every(movie => {
-        const status = ottAvailability[String(movie.id)]?.status;
-        return status != null && status !== 'loading';
-      });
+      const pageGroups = groupedResults.slice(start, start + franchiseGridPageSize);
+      const ottSettled = activeFranchiseSearchMode
+        ? pageGroups.every(group => {
+            const state = searchAvailabilityByGroup[group.key];
+            return state != null && state.status !== 'loading';
+          })
+        : pageMovies.every(movie => {
+            const status = ottAvailability[String(movie.id)]?.status;
+            return status != null && status !== 'loading';
+          });
       const metadataSettled = ottSettled && imdbInFlightRef.current === 0;
       const now = Date.now();
 
@@ -3610,7 +3616,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [posterFirstPageReady, movieCatalogue, visibleMovieCatalogueItems, ottAvailability, groupedResults, searchMetadata, imdbRatingsByKey, franchiseGridPage, imdbRetryTick]);
+  }, [posterFirstPageReady, movieCatalogue, visibleMovieCatalogueItems, ottAvailability, groupedResults, searchMetadata, imdbRatingsByKey, searchAvailabilityByGroup, activeFranchiseSearchMode, franchiseGridPage, imdbRetryTick]);
 
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
