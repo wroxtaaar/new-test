@@ -780,7 +780,6 @@ function groupTorrentResults(results: TorrentSearchResult[]): TorrentQualityGrou
 }
 
 // Fully loaded catalogue rows per section, kept for the session so revisits are instant.
-const catalogueRowsMemo = new Map<string, TorrentSearchResult[]>();
 
 export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], seedrDeletedFolderIds = [], onPlaySeedrFile }) => {
   const [query, setQuery] = useState('');
@@ -916,13 +915,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [marvelContentTab, setMarvelContentTab] = useState<RegionalContentTab>(null);
   type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
   const [classicsContentTab, setClassicsContentTab] = useState<ClassicsContentTab>('movies');
+  type CachedFranchiseSearchMode = 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'classics';
+  const [activeFranchiseSearchMode, setActiveFranchiseSearchMode] = useState<CachedFranchiseSearchMode | null>(null);
+  const franchisePageRequestRef = useRef<AbortController | null>(null);
+  const franchisePageGenerationRef = useRef(0);
+  const franchiseLoadedPagesRef = useRef(new Map<CachedFranchiseSearchMode, Set<number>>());
   const [franchiseGridPage, setFranchiseGridPage] = useState(1);
   const previousPosterPageRef = useRef(1);
   const [posterFirstPageReady, setPosterFirstPageReady] = useState(false);
   const posterFirstPageReadyRef = useRef(false);
   const [catalogueExpectedTitles, setCatalogueExpectedTitles] = useState(0);
   const franchiseGridPageSize = 18;
-  const renderFranchisePagination = (total: number) => total > franchiseGridPageSize ? <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2"><button type="button" disabled={franchiseGridPage <= 1} onClick={() => setFranchiseGridPage(page => Math.max(1, page - 1))} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40">← Previous</button><span className="text-xs text-slate-400">Page {franchiseGridPage} of {Math.max(1, Math.ceil(total / franchiseGridPageSize))} · {total} titles</span><button type="button" disabled={franchiseGridPage >= Math.ceil(total / franchiseGridPageSize)} onClick={() => setFranchiseGridPage(page => Math.min(Math.ceil(total / franchiseGridPageSize), page + 1))} className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-40">Next →</button></div> : null;
+  const renderFranchisePagination = (total: number) => total > franchiseGridPageSize ? <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2"><button type="button" disabled={franchiseGridPage <= 1} onClick={() => navigateFranchisePage(Math.max(1, franchiseGridPage - 1))} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40">← Previous</button><span className="text-xs text-slate-400">Page {franchiseGridPage} of {Math.max(1, Math.ceil(total / franchiseGridPageSize))} · {total} titles</span><button type="button" disabled={franchiseGridPage >= Math.ceil(total / franchiseGridPageSize)} onClick={() => navigateFranchisePage(Math.min(Math.ceil(total / franchiseGridPageSize), franchiseGridPage + 1))} className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-40">Next →</button></div> : null;
   type RegionalCatalogueGroup = 'bollywood' | 'hollywood';
   type RegionalCatalogueMode = 'popular' | 'trending' | 'latest';
   const [openRegionalCatalogueMenu, setOpenRegionalCatalogueMenu] = useState<RegionalCatalogueGroup | null>(null);
@@ -2059,6 +2063,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const runSearch = async (event?: React.FormEvent, searchOverride?: string, searchMode?: 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'classics') => {
     event?.preventDefault();
     setFranchiseGridPage(1);
+    setActiveFranchiseSearchMode(searchMode || null);
+    franchisePageRequestRef.current?.abort();
+    franchisePageRequestRef.current = null;
+    franchisePageGenerationRef.current += 1;
+    franchiseLoadedPagesRef.current.clear();
     posterFirstPageReadyRef.current = false;
     setPosterFirstPageReady(false);
     setIsPresetCatalogueAction(Boolean(searchMode));
@@ -2236,94 +2245,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         const fetchCataloguePage = (page: number) => searchMode === 'marvel'
           ? api.getMarvelCatalogue(controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE })
           : api.getCatalogue(searchMode, controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE });
-        const memoizedRows = catalogueRowsMemo.get(searchMode);
-        let catalogue = memoizedRows
-          ? ({ status: 'ready', results: memoizedRows, completed: 0, total: 0 } as MarvelCatalogueResponse)
-          : await fetchCataloguePage(1);
-        while (catalogue.status === 'building' || catalogue.status === 'idle') {
-          if (generation !== searchGenerationRef.current) return;
-          setCatalogueBuildProgress(
-            'Building shared ' + (labels[searchMode] || 'movie') + ' catalogue: ' +
-            catalogue.completed + ' of ' + catalogue.total +
-            ' searches completed. Results will be cached for future visitors.'
-          );
-          await new Promise<void>(resolve => window.setTimeout(resolve, 2200));
-          catalogue = await fetchCataloguePage(1);
-        }
-        if (catalogue.status !== 'ready') {
-          throw new Error(catalogue.error || ('Could not load the ' + (labels[searchMode] || 'movie') + ' catalogue.'));
-        }
-        data = catalogue.results;
-        const totalCataloguePages = memoizedRows ? 1 : (Number(catalogue.totalPages) || 1);
-        const expectedTitles = Number(catalogue.totalMovies) || 0;
-        if (expectedTitles > 0 && totalCataloguePages > 1) setCatalogueExpectedTitles(expectedTitles);
-        if (totalCataloguePages > 1) {
-          void (async () => {
-            const accumulated = [...catalogue.results];
-            for (let page = 2; page <= totalCataloguePages; page += 1) {
-              if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
-              const next = await fetchCataloguePage(page);
-              if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
-              if (next.status !== 'ready' || !Array.isArray(next.results)) return;
-              accumulated.push(...next.results);
-              setResults(previous => {
-                const seenKeys = new Set(previous.map(row => torrentResultKey(row)));
-                const additions = next.results.filter(row => !seenKeys.has(torrentResultKey(row)));
-                return additions.length ? [...previous, ...additions] : previous;
-              });
-            }
-            catalogueRowsMemo.set(searchMode, accumulated);
-            setCatalogueExpectedTitles(0);
-          })().catch(() => { /* The first page is already visible; later pages retry on the next visit. */ });
-        } else if (!memoizedRows && !catalogue.refreshing) {
-          catalogueRowsMemo.set(searchMode, [...catalogue.results]);
-        }
-        setCatalogueBuildProgress(catalogue.refreshing ? 'Showing cached results while the catalogue refresh runs in the background.' : '');
-
-        // Keep existing cached cards visible, then swap in the enriched MCU cache
-        // as soon as the server-side background rebuild completes.
-        if (searchMode === 'marvel' && catalogue.refreshing) {
-          void (async () => {
-            let refreshedCatalogue = catalogue;
-            while (
-              refreshedCatalogue.refreshing &&
-              generation === searchGenerationRef.current &&
-              !controller.signal.aborted
-            ) {
-              await new Promise<void>(resolve => window.setTimeout(resolve, 2500));
-              if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
-              refreshedCatalogue = await api.getMarvelCatalogue(controller.signal);
-            }
-            if (
-              generation !== searchGenerationRef.current ||
-              controller.signal.aborted ||
-              refreshedCatalogue.status !== 'ready' ||
-              refreshedCatalogue.refreshing
-            ) return;
-
-            const refreshedRows = [...refreshedCatalogue.results].sort((a, b) => {
-              const aIdentity = torrentMediaIdentity(a);
-              const bIdentity = torrentMediaIdentity(b);
-              const aYear = Number.parseInt(aIdentity.year, 10) || 0;
-              const bYear = Number.parseInt(bIdentity.year, 10) || 0;
-              if (aYear !== bYear) return bYear - aYear;
-              const titleOrder = aIdentity.normalized.localeCompare(
-                bIdentity.normalized,
-                undefined,
-                { numeric: true },
-              );
-              if (titleOrder !== 0) return titleOrder;
-              return (Number(b.seeders) || 0) - (Number(a.seeders) || 0);
-            });
-            setResults(refreshedRows);
-            setSearched(true);
-            setCatalogueBuildProgress('');
-          })().catch(error => {
-            if (generation === searchGenerationRef.current && !controller.signal.aborted) {
-              setCatalogueBuildProgress('Showing the existing cached catalogue; refresh will retry on a later visit.');
-            }
-          });
-        }
+        data = Array.isArray(catalogue.results) ? catalogue.results.slice(0, CATALOGUE_PAGE_SIZE) : [];
+        const totalCataloguePages = Number(catalogue.totalPages) || 1;
+        const expectedTitles = Number(catalogue.totalMovies) || (totalCataloguePages * CATALOGUE_PAGE_SIZE);
+        setCatalogueExpectedTitles(totalCataloguePages > 1 ? expectedTitles : 0);
+        franchiseLoadedPagesRef.current.set(searchMode, new Set([1]));
+        setCatalogueBuildProgress(
+          catalogue.refreshing
+            ? 'Showing the cached first page; newer catalogue data will be used on a later visit.'
+            : ''
+        );
       } else {
         const livePromise = api.searchTorrents(trimmed, 50, controller.signal);
         // Do not make live torrent results wait for the seven catalogue lookups.
@@ -3072,6 +3003,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     onlyReleased = releasedOnly,
   ) => {
     setFranchiseGridPage(1);
+    setActiveFranchiseSearchMode(null);
+    franchisePageRequestRef.current?.abort();
+    franchisePageRequestRef.current = null;
+    franchisePageGenerationRef.current += 1;
     posterFirstPageReadyRef.current = false;
     setPosterFirstPageReady(false);
     movieTorrentSearchControllerRef.current?.abort();
@@ -3151,6 +3086,73 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       }
     }
   };
+
+  async function loadCachedFranchisePage(mode: CachedFranchiseSearchMode, page: number): Promise<void> {
+    const loaded = franchiseLoadedPagesRef.current.get(mode);
+    if (loaded?.has(page)) return;
+    franchisePageRequestRef.current?.abort();
+    const controller = new AbortController();
+    franchisePageRequestRef.current = controller;
+    const generation = ++franchisePageGenerationRef.current;
+    setIsSearching(true);
+    setError('');
+    setCatalogueBuildProgress(`Loading page ${page} of the ${mode.replace(/-/g, ' ')} catalogue…`);
+    try {
+      const fetchPage = () => mode === 'marvel'
+        ? api.getMarvelCatalogue(controller.signal, { page, pageSize: franchiseGridPageSize })
+        : api.getCatalogue(mode, controller.signal, { page, pageSize: franchiseGridPageSize });
+      let catalogue = await fetchPage();
+      let attempts = 0;
+      while ((catalogue.status === 'building' || catalogue.status === 'idle') && attempts < 8) {
+        if (generation !== franchisePageGenerationRef.current || controller.signal.aborted) return;
+        setCatalogueBuildProgress(
+          'Building shared ' + mode.replace(/-/g, ' ') + ' catalogue: ' +
+          catalogue.completed + ' of ' + catalogue.total + ' searches completed.'
+        );
+        await new Promise<void>(resolve => window.setTimeout(resolve, 2200));
+        attempts += 1;
+        catalogue = await fetchPage();
+      }
+      if (generation !== franchisePageGenerationRef.current || controller.signal.aborted) return;
+      if (catalogue.status !== 'ready' || !Array.isArray(catalogue.results)) {
+        throw new Error(catalogue.error || ('Could not load page ' + page + ' of the catalogue.'));
+      }
+      const pageRows = catalogue.results.slice(0, franchiseGridPageSize);
+      setResults(previous => {
+        const byKey = new Map<string, TorrentSearchResult>();
+        [...previous, ...pageRows].forEach(row => {
+          const key = torrentResultKey(row);
+          if (!byKey.has(key)) byKey.set(key, row);
+        });
+        return Array.from(byKey.values());
+      });
+      const nowLoaded = franchiseLoadedPagesRef.current.get(mode) || new Set<number>();
+      nowLoaded.add(page);
+      franchiseLoadedPagesRef.current.set(mode, nowLoaded);
+      const totalTitles = Number(catalogue.totalMovies) || Number(catalogue.total) || 0;
+      if (totalTitles > 0) setCatalogueExpectedTitles(totalTitles);
+      setSearched(true);
+      setCatalogueBuildProgress(
+        catalogue.refreshing
+          ? 'Showing cached catalogue results; a refreshed page will appear on a later visit.'
+          : ''
+      );
+    } catch (error: any) {
+      if (controller.signal.aborted || generation !== franchisePageGenerationRef.current) return;
+      setError(String(error?.message || 'Could not load this catalogue page.'));
+      setCatalogueBuildProgress('');
+    } finally {
+      if (generation === franchisePageGenerationRef.current) {
+        setIsSearching(false);
+        if (franchisePageRequestRef.current === controller) franchisePageRequestRef.current = null;
+      }
+    }
+  }
+
+  function navigateFranchisePage(page: number): void {
+    setFranchiseGridPage(page);
+    if (activeFranchiseSearchMode) void loadCachedFranchisePage(activeFranchiseSearchMode, page);
+  }
 
   const sortedResults = useMemo(() => {
     // Use the shared root search_limits.json settings. Keep both bounds local
