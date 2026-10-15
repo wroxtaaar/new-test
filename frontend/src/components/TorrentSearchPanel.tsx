@@ -5103,7 +5103,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               );
             })}
           </div>
-          {renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
           </>
           )}
         </div>
