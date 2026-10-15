@@ -5267,6 +5267,9 @@ def _extra_result_matches_language(item: dict[str, Any], language: str | None) -
 
 
 async def _build_marvel_catalogue() -> None:
+    if CACHE_ONLY_MODE:
+        logger.info("CACHE_ONLY_MODE: skipped Marvel catalogue build; using bundled snapshot.")
+        return
     global _marvel_catalogue_retry_after
     semaphore = asyncio.Semaphore(_MARVEL_CATALOGUE_CONCURRENCY)
     poster_semaphore = asyncio.Semaphore(2)
@@ -6790,6 +6793,9 @@ def _extra_item_release_date(item: dict[str, Any]) -> str:
 
 
 async def _build_extra_catalogue(key: str) -> None:
+    if CACHE_ONLY_MODE:
+        logger.info("CACHE_ONLY_MODE: skipped build for extra catalogue %s", key)
+        return
     config = _EXTRA_CATALOGUES[key]
     state = _extra_catalogue_states[key]
     fixed_mode = config["mode"] == "fixed"
@@ -9750,6 +9756,8 @@ async def _enrich_classics_movie_ott_cache() -> None:
 
 def _schedule_classics_movie_ott_enrichment() -> None:
     global _classics_ott_enrichment_task
+    if CACHE_ONLY_MODE:
+        return
     if _classics_ott_enrichment_task is None or _classics_ott_enrichment_task.done():
         _classics_ott_enrichment_task = asyncio.create_task(_enrich_classics_movie_ott_cache())
 
