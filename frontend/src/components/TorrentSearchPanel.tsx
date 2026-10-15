@@ -916,6 +916,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
   const [classicsContentTab, setClassicsContentTab] = useState<ClassicsContentTab>('movies');
   const [franchiseGridPage, setFranchiseGridPage] = useState(1);
+  const previousPosterPageRef = useRef(1);
   const [posterFirstPageReady, setPosterFirstPageReady] = useState(false);
   const posterFirstPageReadyRef = useRef(false);
   const [catalogueExpectedTitles, setCatalogueExpectedTitles] = useState(0);
@@ -1589,7 +1590,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
     for (const result of items) {
       const key = posterKeyFor(result);
-      if (!key || posterBackgroundQueuedRef.current.has(key)) continue;
+      if (!key || posterBackgroundQueuedRef.current.has(key) || posterBackgroundActiveKeysRef.current.has(key)) continue;
 
       // Reuse title/year artwork across different torrent releases and searches.
       const cachedPoster = cachedPosterForTitle(result);
@@ -2187,7 +2188,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               });
               setSearched(true);
               // Keep poster resolution independent of the search response.
-              startPosterBackgroundSearch(matches);
             }
             return response;
           }))).then(responses => {
@@ -2217,7 +2217,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             return Array.from(byKey.values());
           });
           setSearched(true);
-          startPosterBackgroundSearch(cached);
         });
       }
 
@@ -2271,7 +2270,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 const additions = next.results.filter(row => !seenKeys.has(torrentResultKey(row)));
                 return additions.length ? [...previous, ...additions] : previous;
               });
-              enqueuePosterBackgroundJobs(next.results);
             }
             catalogueRowsMemo.set(searchMode, accumulated);
             setCatalogueExpectedTitles(0);
@@ -2318,7 +2316,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             });
             setResults(refreshedRows);
             setSearched(true);
-            startPosterBackgroundSearch(refreshedRows);
             setCatalogueBuildProgress('');
           })().catch(error => {
             if (generation === searchGenerationRef.current && !controller.signal.aborted) {
@@ -2381,7 +2378,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       });
       setSearched(true);
       if (searchMode) setIsSearching(false);
-      startPosterBackgroundSearch(data);
 
       // Keep OTT discovery off the initial render path. The card grid must first give
       // every poster on the current page a chance to load at low resolution.
@@ -2636,6 +2632,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     // work must never be able to open a Prepare card.
     if (!prepareClickIntentRef.current) return;
     prepareClickIntentRef.current = false;
+    setExpandedSearchGroupKey(null);
     const titleQuery = movie.title + (movie.year ? ' ' + movie.year : '');
     movieTorrentSearchControllerRef.current?.abort();
     const controller = new AbortController();
@@ -3292,16 +3289,32 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   );
 
   useLayoutEffect(() => {
-    // Close the high-resolution and metadata stages before the next page paints.
+    // Close high-resolution upgrades before the next page paints. Cancel queued
+    // artwork work for the old page so only the newly visible page keeps loading.
     posterFirstPageReadyRef.current = false;
     setPosterFirstPageReady(false);
     setHighQualityPostersReady(false);
+    if (previousPosterPageRef.current !== franchiseGridPage) {
+      previousPosterPageRef.current = franchiseGridPage;
+      posterBackgroundGenerationRef.current += 1;
+      posterBackgroundQueueRef.current = [];
+      posterBackgroundQueuedRef.current.clear();
+      posterBackgroundAttemptsRef.current.clear();
+      posterBackgroundActiveKeysRef.current.clear();
+    }
     const visibleKeys = currentPagePosterKeys();
-    posterBackgroundQueueRef.current = [
-      ...posterBackgroundQueueRef.current.filter(job => visibleKeys.has(job.key)),
-      ...posterBackgroundQueueRef.current.filter(job => !visibleKeys.has(job.key)),
-    ];
+    posterBackgroundQueueRef.current = posterBackgroundQueueRef.current.filter(job => visibleKeys.has(job.key));
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
+
+  useEffect(() => {
+    // Resolve poster sources only for cards on the page currently being viewed.
+    // Page 2+ artwork waits until the user navigates to that page.
+    const start = (franchiseGridPage - 1) * franchiseGridPageSize;
+    const visibleItems = groupedResults
+      .slice(start, start + franchiseGridPageSize)
+      .flatMap(group => group.variants);
+    if (visibleItems.length > 0) enqueuePosterBackgroundJobs(visibleItems);
+  }, [groupedResults, franchiseGridPage]);
 
   useEffect(() => {
     let posterCheckTimer: number | undefined;
