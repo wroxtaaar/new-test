@@ -3371,19 +3371,27 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
-    const quiet = window.setTimeout(() => {
+    let quietTimer: number | undefined;
+    const checkQuiet = () => {
       const availabilityBusy = (Object.values(searchAvailabilityByGroup) as Array<{ status?: string }>).some(item => item?.status === 'loading');
       const ottBusy = ottQueueRef.current.length > 0 || ottActiveWorkersRef.current > 0 ||
         (Object.values(ottAvailability) as Array<{ status?: string }>).some(item => item?.status === 'loading');
-      // Low-quality posters still being resolved for the visible page also count as work.
+      // Low-quality posters still queued or actively resolving for the visible page count as work.
       const visibleKeys = currentPagePosterKeys();
       const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key)) ||
         [...posterBackgroundActiveKeysRef.current].some(key => visibleKeys.has(key));
       if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
         setHighQualityPostersReady(true);
+        return;
       }
-    }, 1500);
-    return () => window.clearTimeout(quiet);
+      // A busy check must retry; otherwise the high-quality stage can remain paused
+      // forever when the final worker finishes without causing another React render.
+      quietTimer = window.setTimeout(checkQuiet, 300);
+    };
+    quietTimer = window.setTimeout(checkQuiet, 1500);
+    return () => {
+      if (quietTimer !== undefined) window.clearTimeout(quietTimer);
+    };
   }, [ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults, franchiseGridPage, posterOverrides]);
 
   // IMDb ratings are fetched independently after cards have rendered.
