@@ -79,16 +79,22 @@ function scheduleHighQualityPosterUpgrades(): void {
       return Number(visible(b)) - Number(visible(a));
     });
 
-    const next = images[0];
-    if (!next) {
-      pendingHighQualityPosters.clear();
+    if (images.length === 0) {
+      // Keep queued images registered: a section may still be mounting or swapping
+      // cards. A later poster load or ready-state transition will schedule them again.
       return;
     }
-    pendingHighQualityPosters.delete(next);
-    upgradeToHighQualityPoster(next);
 
-    // One high-resolution poster per idle turn; keep details/UI responsive.
-    window.setTimeout(scheduleHighQualityPosterUpgrades, 180);
+    // Upgrade a small batch each turn rather than serializing every poster. The old
+    // one-at-a-time 180ms queue made deep catalogues take many seconds to sharpen.
+    // Visible posters sort first; browser image caching prevents repeat transfers.
+    const batch = images.slice(0, 4);
+    for (const image of batch) {
+      pendingHighQualityPosters.delete(image);
+      upgradeToHighQualityPoster(image);
+    }
+
+    window.setTimeout(scheduleHighQualityPosterUpgrades, 50);
   };
 
   const idleWindow = window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number };
