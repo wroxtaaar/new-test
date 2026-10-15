@@ -3306,7 +3306,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       const settled = slots.length === 0 || slots.every(slot => {
         const image = slot.querySelector<HTMLImageElement>('img[data-movie-poster-stage="true"]');
         if (!image) return slot.dataset.posterWaiting !== 'true';
-        return image.dataset.posterQuality === 'low-loaded' || image.dataset.posterQuality === 'low-failed';
+        return ['low-loaded', 'high-loaded', 'low-failed'].includes(String(image.dataset.posterQuality || ''));
       });
       // A broken/unreachable poster must not block metadata forever; give the
       // visible thumbnails up to eight seconds before continuing with fallbacks.
