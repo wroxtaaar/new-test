@@ -4396,6 +4396,25 @@ def _poster_url_for_release(raw_title: str) -> str:
 
 def _canonical_catalogue_poster_url(item: dict[str, Any]) -> str:
     """Build a poster URL from canonical catalogue metadata, not a torrent filename."""
+    # Keep a known-good TMDB CDN URL when the catalogue already has one. The old
+    # rewrite replaced these working image URLs with a title-search endpoint that
+    # can return 404, leaving the whole poster area blank.
+    existing = str(item.get("posterUrl") or item.get("poster_url") or "").strip()
+    if existing:
+        try:
+            parts = urlsplit(existing)
+            if (
+                parts.scheme in {"http", "https"}
+                and (parts.hostname or "").casefold() == "image.tmdb.org"
+                and "/t/p/" in parts.path
+            ):
+                return existing
+        except Exception:
+            pass
+    poster_path = str(item.get("poster_path") or item.get("posterPath") or "").strip()
+    if poster_path.startswith("/"):
+        return "https://image.tmdb.org/t/p/w500" + poster_path
+
     title = str(
         item.get("marvelCatalogueTitle")
         or item.get("catalogueTitle")
@@ -4681,11 +4700,13 @@ def _bundled_poster(clean_title: str, clean_year: str) -> str | None:
 
 
 async def _poster_lookup_uncached(clean_title: str, clean_year: str, cache_key: str) -> str | None:
-    if CACHE_ONLY_MODE:
-        bundled = _bundled_poster(clean_title, clean_year)
-        if bundled:
-            _poster_cache[cache_key] = (time.time(), bundled)
-            return bundled
+    # Check the bundled poster index before any network lookup, even when live
+    # metadata is enabled. It contains verified TMDB poster URLs and avoids
+    # repeated title-search requests (or blank posters after upstream timeouts).
+    bundled = _bundled_poster(clean_title, clean_year)
+    if bundled:
+        _poster_cache[cache_key] = (time.time(), bundled)
+        return bundled
     now = time.time()
     # Prefer TMDB's year-filtered movie results to prevent a similarly named
     # title from supplying the wrong artwork. Other sources remain fallbacks.
