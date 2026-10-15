@@ -1343,8 +1343,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     return raw.startsWith('/') ? API_BASE + raw : raw;
   };
 
-  // Use w500 TMDB posters consistently across cards while keeping non-TMDB URLs unchanged.
-  const lowQualityPosterUrl = (value: unknown, size: 'w185' | 'w342' | 'w500' | 'w780' = 'w342') => {
+  // Load lightweight w185 thumbnails first; MovieCards upgrades them to w780 only
+  // after card metadata, ratings and OTT availability have settled.
+  const lowQualityPosterUrl = (value: unknown, size: 'w185' | 'w342' | 'w500' | 'w780' = 'w185') => {
     const url = String(value || '').trim();
     if (!url) return '';
     try {
@@ -3290,12 +3291,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     return () => controller.abort();
   }, [groupedResults]);
 
-  // Staged loading: when a new set of cards arrives, hold the large (w780) poster downloads
-  // until streaming info, IMDb ratings and the small posters are done (or a time cap passes).
+  // Staged loading: every new result set starts with low-bandwidth thumbnails.
+  // High-quality upgrades remain paused until the card metadata/ratings/availability
+  // queues have settled (the quiet effect below opens the high-quality stage).
   useEffect(() => {
     setHighQualityPostersReady(false);
-    const cap = window.setTimeout(() => setHighQualityPostersReady(true), 15000);
-    return () => window.clearTimeout(cap);
   }, [movieCatalogue, groupedResults]);
 
   useEffect(() => {
