@@ -402,9 +402,21 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                     }}
                     onError={event => {
                       const image = event.currentTarget;
-                      if (image.dataset.highQualityTried === 'true' && image.src.includes('/t/p/w780/')) {
-                        image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
-                        return;
+                      if (image.dataset.highQualityTried === 'true') {
+                        try {
+                          const parsed = new URL(image.currentSrc || image.src, window.location.origin);
+                          if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
+                            parsed.searchParams.set('size', 'w185');
+                            image.src = parsed.toString();
+                            return;
+                          }
+                        } catch {
+                          // Use the direct TMDB fallback below.
+                        }
+                        if (image.src.includes('/t/p/w780/')) {
+                          image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
+                          return;
+                        }
                       }
                       onPosterError(event);
                     }}
