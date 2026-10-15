@@ -15,7 +15,7 @@ import {
   Film,
   Maximize2
 } from 'lucide-react';
-import { api, API_BASE, ImdbRatingResult, MovieCatalogueItem, MovieCatalogueKey, MovieCataloguePage, MovieOttAvailability, MovieOttProvider, SearchMediaMetadata, TorrentSearchResult, TvCataloguePage } from '../api/client.ts';
+import { api, API_BASE, ImdbRatingResult, MarvelCatalogueResponse, MovieCatalogueItem, MovieCatalogueKey, MovieCataloguePage, MovieOttAvailability, MovieOttProvider, SearchMediaMetadata, TorrentSearchResult, TvCataloguePage } from '../api/client.ts';
 import { formatBytes } from '../utils/formatters.ts';
 import { MovieCompactCard, MoviePrepareCard, imdbTitleLink, setHighQualityPostersReady, type MovieCardProvider } from './MovieCards.tsx';
 import searchLimits from '../../search_limits.json';
@@ -770,6 +770,9 @@ function groupTorrentResults(results: TorrentSearchResult[]): TorrentQualityGrou
   return groups;
 }
 
+// Fully loaded catalogue rows per section, kept for the session so revisits are instant.
+const catalogueRowsMemo = new Map<string, TorrentSearchResult[]>();
+
 export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], seedrDeletedFolderIds = [], onPlaySeedrFile }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TorrentSearchResult[]>([]);
@@ -904,6 +907,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
   const [classicsContentTab, setClassicsContentTab] = useState<ClassicsContentTab>('movies');
   const [franchiseGridPage, setFranchiseGridPage] = useState(1);
+  const [catalogueExpectedTitles, setCatalogueExpectedTitles] = useState(0);
   const franchiseGridPageSize = 18;
   const renderFranchisePagination = (total: number) => total > franchiseGridPageSize ? <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2"><button type="button" disabled={franchiseGridPage <= 1} onClick={() => setFranchiseGridPage(page => Math.max(1, page - 1))} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40">← Previous</button><span className="text-xs text-slate-400">Page {franchiseGridPage} of {Math.max(1, Math.ceil(total / franchiseGridPageSize))} · {total} titles</span><button type="button" disabled={franchiseGridPage >= Math.ceil(total / franchiseGridPageSize)} onClick={() => setFranchiseGridPage(page => Math.min(Math.ceil(total / franchiseGridPageSize), page + 1))} className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-40">Next →</button></div> : null;
   type RegionalCatalogueGroup = 'bollywood' | 'hollywood';
@@ -2049,6 +2053,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     try {
       setIsSearching(true);
       setCatalogueBuildProgress('');
+      setCatalogueExpectedTitles(0);
       setMovieCatalogue(null);
       setShowRecentSearches(false);
       setError('');
@@ -2192,7 +2197,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         const fetchCataloguePage = (page: number) => searchMode === 'marvel'
           ? api.getMarvelCatalogue(controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE })
           : api.getCatalogue(searchMode, controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE });
-        let catalogue = await fetchCataloguePage(1);
+        const memoizedRows = catalogueRowsMemo.get(searchMode);
+        let catalogue = memoizedRows
+          ? ({ status: 'ready', results: memoizedRows, completed: 0, total: 0 } as MarvelCatalogueResponse)
+          : await fetchCataloguePage(1);
         while (catalogue.status === 'building' || catalogue.status === 'idle') {
           if (generation !== searchGenerationRef.current) return;
           setCatalogueBuildProgress(
@@ -2207,14 +2215,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           throw new Error(catalogue.error || ('Could not load the ' + (labels[searchMode] || 'movie') + ' catalogue.'));
         }
         data = catalogue.results;
-        const totalCataloguePages = Number((catalogue as { totalPages?: number }).totalPages) || 1;
+        const totalCataloguePages = memoizedRows ? 1 : (Number(catalogue.totalPages) || 1);
+        const expectedTitles = Number(catalogue.totalMovies) || 0;
+        if (expectedTitles > 0 && totalCataloguePages > 1) setCatalogueExpectedTitles(expectedTitles);
         if (totalCataloguePages > 1) {
           void (async () => {
+            const accumulated = [...catalogue.results];
             for (let page = 2; page <= totalCataloguePages; page += 1) {
               if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
               const next = await fetchCataloguePage(page);
               if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
               if (next.status !== 'ready' || !Array.isArray(next.results)) return;
+              accumulated.push(...next.results);
               setResults(previous => {
                 const seenKeys = new Set(previous.map(row => torrentResultKey(row)));
                 const additions = next.results.filter(row => !seenKeys.has(torrentResultKey(row)));
@@ -2222,7 +2234,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               });
               startPosterBackgroundSearch(next.results);
             }
+            catalogueRowsMemo.set(searchMode, accumulated);
+            setCatalogueExpectedTitles(0);
           })().catch(() => { /* The first page is already visible; later pages retry on the next visit. */ });
+        } else if (!memoizedRows && !catalogue.refreshing) {
+          catalogueRowsMemo.set(searchMode, [...catalogue.results]);
         }
         setCatalogueBuildProgress(catalogue.refreshing ? 'Showing cached results while the catalogue refresh runs in the background.' : '');
 
@@ -2325,6 +2341,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         return Array.from(byKey.values());
       });
       setSearched(true);
+      if (searchMode) setIsSearching(false);
       startPosterBackgroundSearch(data);
 
       // Use OTT data already embedded in enriched catalogue rows before scheduling any API lookups.
@@ -4530,7 +4547,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               })()}
             </section>
           )}
-          {renderFranchisePagination(groupedResults.length)}
+          {renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
           <div
             className="grid grid-cols-2 items-stretch gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 lg:rounded-2xl lg:border-0 lg:bg-transparent lg:gap-4 lg:w-full lg:max-w-none lg:mx-0 lg:p-0 lg:divide-y-0 lg:overflow-visible"
           >
@@ -4748,7 +4765,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               );
             })}
           </div>
-          {renderFranchisePagination(groupedResults.length)}
+          {renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
           </>
           )}
         </div>

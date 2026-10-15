@@ -31,6 +31,10 @@ export interface MarvelCatalogueResponse {
   builtAt?: string;
   error?: string;
   refreshing?: boolean;
+  page?: number;
+  pageSize?: number;
+  totalPages?: number;
+  totalMovies?: number;
 }
 
 export interface TvCatalogueItem {
