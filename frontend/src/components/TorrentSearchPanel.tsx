@@ -3196,8 +3196,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // typed. Merge their per-title metadata from the persistent VPS JSON rather
   // than relying only on a single broad TMDB search for the original query.
   useEffect(() => {
-    const titles = Array.from(new Set(groupedResults
-      .slice(0, 80)
+    if (!posterFirstPageReady) return;
+    const pageStart = (franchiseGridPage - 1) * franchiseGridPageSize;
+    const visibleGroups = groupedResults.slice(pageStart, pageStart + franchiseGridPageSize);
+    const titles = Array.from(new Set(visibleGroups
       .map(group => {
         const title = String(group.title || '').trim();
         const year = String(group.year || '').trim();
@@ -3227,13 +3229,15 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [groupedResults]);
+  }, [groupedResults, posterFirstPageReady, franchiseGridPage]);
 
   // Search TMDB by show name for episode-shaped torrent titles. A broad search for
   // the episode name (e.g. "Escape Plan") cannot resolve "The Rookie" or "NCIS: New Orleans".
   useEffect(() => {
-    const discoveredSeriesTitles = Array.from(new Set(groupedResults
-      .slice(0, 80)
+    if (!posterFirstPageReady) return;
+    const pageStart = (franchiseGridPage - 1) * franchiseGridPageSize;
+    const visibleGroups = groupedResults.slice(pageStart, pageStart + franchiseGridPageSize);
+    const discoveredSeriesTitles = Array.from(new Set(visibleGroups
       .map(group => episodeSeriesTitle(group.title))
       .filter((title): title is string => Boolean(title))))
       .slice(0, 12);
@@ -3266,7 +3270,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     });
 
     return () => controller.abort();
-  }, [groupedResults]);
+  }, [groupedResults, posterFirstPageReady, franchiseGridPage]);
 
   // Staged loading: every new result set starts with low-bandwidth thumbnails.
   // High-quality upgrades remain paused until the card metadata/ratings/availability
@@ -3279,10 +3283,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       .map(group => posterKeyFor(group.posterResult))
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Close the high-resolution and metadata stages before the next page paints.
+    posterFirstPageReadyRef.current = false;
+    setPosterFirstPageReady(false);
     setHighQualityPostersReady(false);
     const visibleKeys = currentPagePosterKeys();
-    // Visible cards first; everything else keeps its relative order behind them.
     posterBackgroundQueueRef.current = [
       ...posterBackgroundQueueRef.current.filter(job => visibleKeys.has(job.key)),
       ...posterBackgroundQueueRef.current.filter(job => !visibleKeys.has(job.key)),
@@ -3290,31 +3296,77 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
+    let posterCheckTimer: number | undefined;
+    let cancelled = false;
+    const startedAt = Date.now();
+    const checkVisiblePosterLoads = () => {
+      if (cancelled) return;
+      const slots = Array.from(document.querySelectorAll<HTMLElement>('[data-movie-poster-slot="true"]'))
+        .filter(slot => slot.isConnected && slot.getClientRects().length > 0);
+      const settled = slots.length === 0 || slots.every(slot => {
+        const image = slot.querySelector<HTMLImageElement>('img[data-movie-poster-stage="true"]');
+        if (!image) return slot.dataset.posterWaiting !== 'true';
+        return image.dataset.posterQuality === 'low-loaded' || image.dataset.posterQuality === 'low-failed';
+      });
+      // A broken/unreachable poster must not block metadata forever; give the
+      // visible thumbnails up to eight seconds before continuing with fallbacks.
+      if (settled || Date.now() - startedAt >= 8000) {
+        posterFirstPageReadyRef.current = true;
+        setPosterFirstPageReady(true);
+        if (movieCatalogue?.results?.length) {
+          const start = (franchiseGridPage - 1) * franchiseGridPageSize;
+          queueOttLookups(visibleMovieCatalogueItems.slice(start, start + franchiseGridPageSize));
+        }
+        return;
+      }
+      posterCheckTimer = window.setTimeout(checkVisiblePosterLoads, 80);
+    };
+    posterCheckTimer = window.setTimeout(checkVisiblePosterLoads, 0);
+    return () => {
+      cancelled = true;
+      if (posterCheckTimer !== undefined) window.clearTimeout(posterCheckTimer);
+    };
+  }, [movieCatalogue, groupedResults, franchiseGridPage]);
+
+  useEffect(() => {
     let quietTimer: number | undefined;
     const checkQuiet = () => {
-      // High-resolution upgrades wait only for low-quality poster work on this page.
-      // IMDb, synopsis and OTT enrichment are deliberately independent and must not
-      // delay the poster-first experience.
+      if (!posterFirstPageReady) {
+        setHighQualityPostersReady(false);
+        quietTimer = window.setTimeout(checkQuiet, 100);
+        return;
+      }
+      const availabilityBusy = (Object.values(searchAvailabilityByGroup) as Array<{ status?: string }>)
+        .some(item => item?.status === 'loading');
+      const ottBusy = ottQueueRef.current.length > 0 || ottActiveWorkersRef.current > 0 ||
+        (Object.values(ottAvailability) as Array<{ status?: string }>)
+          .some(item => item?.status === 'loading');
       const visibleKeys = currentPagePosterKeys();
       const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key)) ||
         [...posterBackgroundActiveKeysRef.current].some(key => visibleKeys.has(key));
-      if (!posterBusy) {
+      if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
         setHighQualityPostersReady(true);
         return;
       }
-      // A busy check must retry; otherwise the high-quality stage can remain paused
-      // forever when the final worker finishes without causing another React render.
-      quietTimer = window.setTimeout(checkQuiet, 300);
+      quietTimer = window.setTimeout(checkQuiet, 250);
     };
-    quietTimer = window.setTimeout(checkQuiet, 1500);
+    quietTimer = window.setTimeout(checkQuiet, 100);
     return () => {
       if (quietTimer !== undefined) window.clearTimeout(quietTimer);
     };
-  }, [ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults, franchiseGridPage, posterOverrides]);
+  }, [posterFirstPageReady, ottAvailability, imdbRatingsByKey, searchAvailabilityByGroup, searchMetadata, movieCatalogue, groupedResults, franchiseGridPage, posterOverrides]);
 
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
   useEffect(() => {
+    if (!posterFirstPageReady) return;
+    const visibleStart = (franchiseGridPage - 1) * franchiseGridPageSize;
+    const visibleGroupTitles = new Set(groupedResults
+      .slice(visibleStart, visibleStart + franchiseGridPageSize)
+      .map(group => normalizeSavedOttTitle(episodeSeriesTitle(group.title) || group.title)));
+    const visibleSearchMetadata = searchMetadata.filter(item =>
+      visibleGroupTitles.has(normalizeSavedOttTitle(item.title))
+    );
     const candidates = [
       ...visibleMovieCatalogueItems.slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize).flatMap(item => {
         const candidate = {
@@ -3329,7 +3381,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           ? [candidate, { ...candidate, mediaType: 'tv' as const }]
           : [candidate];
       }),
-      ...searchMetadata.map(item => ({
+      ...visibleSearchMetadata.map(item => ({
         title: String(item.title || '').trim(),
         year: item.year,
         tmdbId: Number(item.tmdbId || item.id) || undefined,
@@ -3420,7 +3472,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }).finally(() => {
       imdbInFlightRef.current = Math.max(0, imdbInFlightRef.current - 1);
     });
-  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick, franchiseGridPage]);
+  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick, franchiseGridPage, posterFirstPageReady]);
 
   const clearTmdbCacheAndReload = async () => {
     const currentCatalogue = movieCatalogue;
