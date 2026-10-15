@@ -11,6 +11,8 @@ services:
     healthCheckPath: /api/health
     autoDeployTrigger: commit
     envVars:
+      - key: CACHE_ONLY_MODE
+        value: "true"
       - key: SEEDR_API_TOKEN
         sync: false
       - key: SEEDR_SESSION_SECRET
