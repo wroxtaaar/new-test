@@ -4207,7 +4207,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   imdb={movieImdb}
                   tmdbRating={movie.rating}
                   overview={movie.overview || 'No synopsis available from TMDB for this title.'}
-                  posterSrc={lowQualityPosterUrl(cataloguePosterOverride(movie))}
+                  posterSrc={lowQualityPosterUrl(cataloguePosterOverride(movie) || movie.posterUrl || '')}
                   posterAlt={movie.title}
                   onPosterClick={() => { if (!isSearching && !movieTorrentSearchLoading) void searchMovieTorrents(movie); }}
                   onPosterLoad={event => {
