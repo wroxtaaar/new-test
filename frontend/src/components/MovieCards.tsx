@@ -26,9 +26,9 @@ export interface MovieCardProvider {
 }
 
 /**
- * Staged poster loading shared by every movie card: cards first show the small (w342)
- * poster; the large (w780) version is only requested once the page's streaming, IMDb
- * and other info has settled, so the user sees complete cards before heavy downloads.
+ * Staged poster loading shared by every movie card: cards first show the lightweight
+ * (w185) thumbnail. The large (w780) version is requested only after card metadata,
+ * ratings and availability have settled, keeping initial catalogue loading responsive.
  */
 let highQualityPostersReady = false;
 const pendingHighQualityPosters = new Set<HTMLImageElement>();
@@ -36,9 +36,10 @@ const pendingHighQualityPosters = new Set<HTMLImageElement>();
 function upgradeToHighQualityPoster(image: HTMLImageElement): void {
   if (!image.isConnected || image.dataset.highQualityTried) return;
   const current = image.currentSrc || image.src;
-  if (!current.includes('/t/p/w342/')) return;
+  const lowQualityPath = ['/t/p/w185/', '/t/p/w342/'].find(path => current.includes(path));
+  if (!lowQualityPath) return;
   image.dataset.highQualityTried = 'true';
-  image.src = current.replace('/t/p/w342/', '/t/p/w780/');
+  image.src = current.replace(lowQualityPath, '/t/p/w780/');
 }
 
 export function requestHighQualityPoster(image: HTMLImageElement): void {
