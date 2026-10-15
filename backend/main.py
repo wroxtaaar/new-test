@@ -11557,12 +11557,46 @@ async def api_regional_movie_prebuilt(
         return {"status": "not_cached", "movie": None, "torrentDetails": None,
                 "builtAt": payload.get("builtAt")}
     _record_cache_event("regional_movie_prebuilt", "hit")
+
+    # Apply the current size window to saved torrent results at read time too.
+    # This filters old snapshots without mutating the persistent cache file.
+    torrent_details = entry.get("torrentDetails")
+    if isinstance(torrent_details, dict):
+        filtered_details = dict(torrent_details)
+        cached_results = torrent_details.get("results")
+        if isinstance(cached_results, list):
+            kept_results = []
+            for result in cached_results:
+                if not isinstance(result, dict):
+                    continue
+                try:
+                    size_bytes = int(result.get("size") or 0)
+                except (TypeError, ValueError, OverflowError):
+                    size_bytes = 0
+                if MIN_SEARCH_RESULT_SIZE_BYTES <= size_bytes <= MAX_SEARCH_RESULT_SIZE_BYTES:
+                    kept_results.append(result)
+            filtered_details["results"] = kept_results
+            filtered_details["filteredOutBySize"] = len(cached_results) - len(kept_results)
+        torrent_details = filtered_details
+    elif isinstance(torrent_details, list):
+        kept_results = []
+        for result in torrent_details:
+            if not isinstance(result, dict):
+                continue
+            try:
+                size_bytes = int(result.get("size") or 0)
+            except (TypeError, ValueError, OverflowError):
+                size_bytes = 0
+            if MIN_SEARCH_RESULT_SIZE_BYTES <= size_bytes <= MAX_SEARCH_RESULT_SIZE_BYTES:
+                kept_results.append(result)
+        torrent_details = kept_results
+
     return {
         "status": "ready",
         "builtAt": payload.get("builtAt"),
         "movie": entry.get("movie"),
         "catalogues": entry.get("catalogues", []),
-        "torrentDetails": entry.get("torrentDetails"),
+        "torrentDetails": torrent_details,
     }
 
 
