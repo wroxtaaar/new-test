@@ -840,6 +840,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [selectedMovieTorrentQualityByGroup, setSelectedMovieTorrentQualityByGroup] = useState<Record<string, string>>({});
   const movieTorrentSearchControllerRef = useRef<AbortController | null>(null);
   const movieTorrentSearchGenerationRef = useRef(0);
+  const prepareClickIntentRef = useRef(false);
   // Keep per-title torrent results and grouped quality variants in memory across
   // catalogue switches, so reopening a Bollywood/Hollywood movie uses the same
   // already-resolved details as Marvel instead of repeating provider searches.
@@ -2630,8 +2631,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }
   };
 
-  const prepareClickIntentRef = useRef(false);
-
   const searchMovieTorrents = async (movie: MovieCatalogueItem) => {
     // Torrent lookup and Prepare state are user-initiated only. Background cache/metadata
     // work must never be able to open a Prepare card.
@@ -3507,6 +3506,32 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     return details.label === 'Other release' ? '' : details.label;
   };
 
+  // A prepared movie is an inline view, not persistent catalogue selection.
+  // Clear it before changing sections, subsections, filters or numbered pages;
+  // cancel any stale lookup so its late result cannot reopen the old card.
+  useLayoutEffect(() => {
+    prepareClickIntentRef.current = false;
+    movieTorrentSearchControllerRef.current?.abort();
+    movieTorrentSearchControllerRef.current = null;
+    movieTorrentSearchGenerationRef.current += 1;
+    setMovieTorrentSearchLoading(false);
+    setMovieTorrentPickerGroups(null);
+    setMovieTorrentPreviewGroup(null);
+    setMovieTorrentPreviewCatalogueId(null);
+    setMovieTorrentSearchError('');
+  }, [
+    activeTopSection,
+    marvelContentTab,
+    dcContentTab,
+    classicsContentTab,
+    regionalContentTabs,
+    regionalCatalogueModes,
+    franchiseGridPage,
+    marvelFilmFilter,
+    showMarvelWebSeries,
+    showDcWebSeries,
+  ]);
+
   return (
     <div className="space-y-2.5 sm:space-y-4">
       <div className="p-2.5 sm:p-5 rounded-xl sm:rounded-2xl bg-slate-900 border border-slate-800">
@@ -4017,9 +4042,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               // initiated the search. Some catalogue sources normalize IDs
               // differently between the card and torrent-picker state, so use
               // the exact searched title/year as a safe fallback.
+              // Prepare state belongs to the exact catalogue item that was clicked.
+              // A title match alone can leak an old Prepare card into another section
+              // where the same title appears under a different catalogue record.
               const previewMatchesMovie =
-                movieTorrentPreviewCatalogueId === String(movie.id) ||
-                movieTorrentSearchTitle === movie.title + (movie.year ? ' ' + movie.year : '');
+                movieTorrentPreviewCatalogueId !== null &&
+                movieTorrentPreviewCatalogueId === String(movie.id);
               const previewGroup = previewMatchesMovie ? movieTorrentPreviewGroup : null;
               const isPunisherSpecial = /punisher.*one last kill|one last kill.*punisher/i.test(String(movie.title || ''));
               const movieImdb = imdbRatingsByKey[imdbRatingKey(movie.title, movie.year)] ||
