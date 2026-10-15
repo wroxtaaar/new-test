@@ -4615,6 +4615,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               {groupedResults.length} titles · {sortedResults.length} torrent options
             </div>
           </div>
+          {!isSearching && renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
 
 
           {activeTopSection === 'classics' && classicsContentTab !== 'movies' ? (
@@ -4879,7 +4880,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               })()}
             </section>
           )}
-          {renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
+          {!isSearching && renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
           <div
             className="grid grid-cols-2 items-stretch gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 lg:rounded-2xl lg:border-0 lg:bg-transparent lg:gap-4 lg:w-full lg:max-w-none lg:mx-0 lg:p-0 lg:divide-y-0 lg:overflow-visible"
           >
