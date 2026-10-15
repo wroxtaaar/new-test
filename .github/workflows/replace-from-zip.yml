@@ -1,0 +1,53 @@
+name: Replace repository from Home ZIP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/replace-from-zip.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Home archive and replace repository contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="home-main.zip"
+          test -f "$ARCHIVE" || { echo "::error::Expected $ARCHIVE at repository root"; exit 1; }
+          WORK="$(mktemp -d)"
+          unzip -q "$ARCHIVE" -d "$WORK"
+          mapfile -t TOP_ITEMS < <(find "$WORK" -mindepth 1 -maxdepth 1 -print)
+          if [ "${#TOP_ITEMS[@]}" -eq 1 ] && [ -d "${TOP_ITEMS[0]}" ]; then
+            SOURCE="${TOP_ITEMS[0]}"
+          else
+            SOURCE="$WORK"
+          fi
+          test -n "$(find "$SOURCE" -mindepth 1 -maxdepth 1 -print -quit)" || { echo "::error::Archive extracted to an empty directory"; exit 1; }
+          if [ ! -f "$SOURCE/package.json" ] && [ ! -d "$SOURCE/frontend" ] && [ ! -d "$SOURCE/src" ]; then
+            echo "::error::Archive layout does not look like the Home project root"
+            find "$SOURCE" -mindepth 1 -maxdepth 2 -print | head -80
+            exit 1
+          fi
+          rsync -a --delete --exclude='.git/' "$SOURCE/" ./
+          rm -f "$ARCHIVE"
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            echo "No changes detected."
+          else
+            git commit -m "Replace new-test contents with Home project from ZIP"
+            git push origin HEAD:main
+          fi
+          rm -rf "$WORK"
