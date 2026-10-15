@@ -2795,6 +2795,36 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // title+year search yields nothing, retry the movie's plain title before
       // concluding that the provider has no releases.
       const titleOnlyQuery = String(movie.title || '').trim();
+      // If the shared regional cache has no entry, use any torrent matches
+      // already embedded in this catalogue item (Marvel/DC/other seeded
+      // catalogues). These are persisted catalogue data, not a live lookup.
+      if (!data || data.length === 0) {
+        const embeddedMatches = [
+          ...(Array.isArray(movie.torrentMatches) ? movie.torrentMatches : []),
+          ...(movie.torrentMatch ? [movie.torrentMatch] : []),
+        ];
+        if (embeddedMatches.length) {
+          data = embeddedMatches
+            .filter(match => Boolean(match && (match.magnetUrl || match.infoHash || match.infoUrl)))
+            .map((match, index): TorrentSearchResult => ({
+              guid: String(match.infoHash || match.magnetUrl || match.infoUrl || movie.title + '-' + index),
+              title: String(match.title || movie.title),
+              mediaTitle: movie.title,
+              size: Number(match.size) || 0,
+              seeders: Number(match.seeders) || 0,
+              leechers: Number(match.leechers) || 0,
+              indexer: match.indexer,
+              infoHash: match.infoHash,
+              magnetUrl: match.magnetUrl,
+              infoUrl: match.infoUrl,
+              sourceUrl: match.infoUrl,
+              year: movie.year,
+              posterUrl: movie.posterUrl,
+              quality: '',
+            }));
+        }
+      }
+
       // Do not retry a cache miss with a title-only live search. This UI is
       // deliberately cache-only; refreshes belong to the external cache builder.
 
