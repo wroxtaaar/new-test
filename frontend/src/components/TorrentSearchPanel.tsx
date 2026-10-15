@@ -2238,14 +2238,33 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           'dc-animated': 'DC animated',
           classics: 'Classics'
         };
-        // Fetch the first page of movies quickly, then stream the rest in the
-        // background. Servers without paging support ignore the parameters and
-        // return the full catalogue in one response.
-        const CATALOGUE_PAGE_SIZE = 18;
+        // Load only the current page initially. Later pages are fetched only when
+        // the user navigates to them, so opening a section does not warm the full catalogue.
+        const CATALOGUE_PAGE_SIZE = franchiseGridPageSize;
         const fetchCataloguePage = (page: number) => searchMode === 'marvel'
           ? api.getMarvelCatalogue(controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE })
           : api.getCatalogue(searchMode, controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE });
-        data = Array.isArray(catalogue.results) ? catalogue.results.slice(0, CATALOGUE_PAGE_SIZE) : [];
+
+        let catalogue = await fetchCataloguePage(1);
+        let catalogueAttempts = 0;
+        while (
+          (catalogue.status === 'building' || catalogue.status === 'idle') &&
+          catalogueAttempts < 8
+        ) {
+          if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
+          setCatalogueBuildProgress(
+            'Building shared ' + searchMode.replace(/-/g, ' ') + ' catalogue: ' +
+            catalogue.completed + ' of ' + catalogue.total + ' searches completed.'
+          );
+          await new Promise<void>(resolve => window.setTimeout(resolve, 2200));
+          catalogueAttempts += 1;
+          catalogue = await fetchCataloguePage(1);
+        }
+        if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
+        if (catalogue.status !== 'ready' || !Array.isArray(catalogue.results)) {
+          throw new Error(catalogue.error || 'Could not load the first catalogue page.');
+        }
+        data = catalogue.results.slice(0, CATALOGUE_PAGE_SIZE);
         const totalCataloguePages = Number(catalogue.totalPages) || 1;
         const expectedTitles = Number(catalogue.totalMovies) || (totalCataloguePages * CATALOGUE_PAGE_SIZE);
         setCatalogueExpectedTitles(totalCataloguePages > 1 ? expectedTitles : 0);
