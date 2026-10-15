@@ -34,14 +34,30 @@ let highQualityPostersReady = false;
 const pendingHighQualityPosters = new Set<HTMLImageElement>();
 let highQualityUpgradeScheduled = false;
 
+function normalizeLowQualityPosterUrl(value: string): string {
+  const url = String(value || '').trim();
+  if (!url) return '';
+  try {
+    const parsed = new URL(url, window.location.origin);
+    if (parsed.hostname === 'image.tmdb.org') {
+      parsed.pathname = parsed.pathname.replace(
+        /\/t\/p\/(?:original|w780|w500|w342|w300|w200|w185|w154|w92)\//,
+        '/t/p/w185/',
+      );
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 function upgradeToHighQualityPoster(image: HTMLImageElement): void {
   if (!image.isConnected || image.dataset.highQualityTried) return;
   const current = image.currentSrc || image.src;
-  const lowQualityPath = ['/t/p/w185/', '/t/p/w342/'].find(path => current.includes(path));
-  if (!lowQualityPath) return;
+  if (!current.includes('image.tmdb.org') || !/\/t\/p\/w185\//.test(current)) return;
   image.dataset.highQualityTried = 'true';
   image.dataset.posterQuality = 'high-pending';
-  image.src = current.replace(lowQualityPath, '/t/p/w780/');
+  image.src = current.replace('/t/p/w185/', '/t/p/w780/');
 }
 
 function scheduleHighQualityPosterUpgrades(): void {
@@ -158,7 +174,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
         {posterSrc ? (
           <>
             <img
-              src={posterSrc}
+              src={normalizeLowQualityPosterUrl(posterSrc)}
               alt={posterAlt}
               loading="lazy"
               className="h-full w-full object-cover cursor-pointer"
