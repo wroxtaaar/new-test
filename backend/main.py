@@ -43,10 +43,19 @@ from cache_diagnostics import (
 _TRUTHY = {"1", "true", "yes", "on"}
 # Cache-only deployments (e.g. Render free without provider keys) must never
 # call TMDB/Watchmode/OMDb/poster providers; prefilled sections read the bundled cache.
-CACHE_ONLY_MODE = (
-    os.getenv("CACHE_ONLY_MODE", "false").strip().casefold() in _TRUTHY
-    or os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in _TRUTHY
+_PROVIDER_KEY_ENV_NAMES = (
+    "TMDB_API_KEY", "TMDB_API_KEYS", "TMDB_READ_ACCESS_TOKEN", "TMDB_READ_ACCESS_TOKENS",
+    "WATCHMODE_API_KEY", "WATCHMODE_API_KEYS", "OMDB_API_KEY", "OMDB_API_KEYS",
 )
+_CACHE_ONLY_ENV = os.getenv("CACHE_ONLY_MODE", "").strip().casefold()
+if _CACHE_ONLY_ENV in _TRUTHY or os.getenv("OTT_CACHE_ONLY", "false").strip().casefold() in _TRUTHY:
+    CACHE_ONLY_MODE = True
+elif _CACHE_ONLY_ENV in {"0", "false", "no", "off"}:
+    CACHE_ONLY_MODE = False
+else:
+    # No explicit setting: a deployment without any provider key can only serve
+    # from the bundled cache, so behave as cache-only instead of failing live calls.
+    CACHE_ONLY_MODE = not any(os.getenv(name, "").strip() for name in _PROVIDER_KEY_ENV_NAMES)
 
 
 
