@@ -62,6 +62,15 @@ function cataloguePosterOverride(movie: { title?: string; year?: number | string
   return isTheCrow2024(movie) ? CROW_2024_POSTER_URL : String(movie.posterUrl || '').trim();
 }
 
+function cataloguePosterSource(movie: { title?: string; year?: number | string | null; posterUrl?: string | null }): string {
+  const known = cataloguePosterOverride(movie);
+  if (known) return known;
+  const params = new URLSearchParams({ title: String(movie.title || '').trim() });
+  if (movie.year) params.set('year', String(movie.year));
+  params.set('size', 'w185');
+  return '/api/poster?' + params.toString();
+}
+
 type MovieOttCardState = MovieOttAvailability | { status: 'loading' | 'error'; message?: string };
 
 type NexStreamEpisode = { episodeNumber: number; name: string; overview: string; airDate: string; still: string | null };
@@ -2637,7 +2646,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     setMovieTorrentSearchTitle(titleQuery);
     setMovieTorrentPreviewCatalogueId(String(movie.id));
     setMovieTorrentPreviewPosterUrl(
-      cataloguePosterUrlsRef.current[String(movie.id)] || String(movie.posterUrl || '').trim()
+      cataloguePosterUrlsRef.current[String(movie.id)] || cataloguePosterSource(movie)
     );
     setMovieTorrentSearchLoading(true);
     setMovieTorrentSearchError('');
@@ -4029,7 +4038,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 const posterOverride = cataloguePosterOverride(movie);
                 const cataloguePosterUrl = cataloguePosterUrlsRef.current[String(movie.id)] ||
                   (isTheCrow2024(movie) ? posterOverride : movieTorrentPreviewPosterUrl) ||
-                  posterOverride;
+                  posterOverride || cataloguePosterSource(movie);
                 const posterSrc = lowQualityPosterUrl(
                   cataloguePosterUrl ||
                   (isRegionalMoviePreview ? '' : posterUrlFor(previewGroup.posterResult) || previewGroup.posterResult?.posterUrl || '')
@@ -4061,7 +4070,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       const originalUrl = String(
                         movieTorrentPreviewPosterUrl ||
                         cataloguePosterUrlsRef.current[String(movie.id)] ||
-                        movie.posterUrl ||
+                        cataloguePosterSource(movie) ||
                         (isRegionalMoviePreview ? '' : previewGroup.posterResult?.posterUrl || '')
                       ).trim();
                       // The compact card retries the unmodified poster when the resized
@@ -4151,7 +4160,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   imdb={movieImdb}
                   tmdbRating={movie.rating}
                   overview={movie.overview || 'No synopsis available from TMDB for this title.'}
-                  posterSrc={lowQualityPosterUrl(cataloguePosterOverride(movie) || movie.posterUrl || '')}
+                  posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie))}
                   posterAlt={movie.title}
                   onPosterClick={() => { if (!isSearching && !movieTorrentSearchLoading) { prepareClickIntentRef.current = true; void searchMovieTorrents(movie); } }}
                   onPosterLoad={event => {
@@ -4162,7 +4171,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   }}
                   onPosterError={event => {
                     const image = event.currentTarget;
-                    const originalUrl = cataloguePosterOverride(movie);
+                    const originalUrl = cataloguePosterSource(movie);
                     // If the optimized w500 URL fails, retry the catalogue's
                     // original poster URL once before showing the placeholder.
                     if (originalUrl && image.dataset.originalFallbackTried !== 'true' && image.src !== new URL(originalUrl, window.location.origin).toString()) {
