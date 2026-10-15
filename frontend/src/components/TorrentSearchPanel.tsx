@@ -1356,6 +1356,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     if (!url) return '';
     try {
       const parsed = new URL(url, window.location.origin);
+      // Same-origin poster endpoints support explicit low/high variants. Set this
+      // before assigning src so cached redirect URLs can never bypass the thumbnail.
+      if (parsed.pathname.replace(/\/+$/, '') === '/api/poster') {
+        parsed.searchParams.set('size', size === 'w780' ? 'w780' : 'w185');
+        return parsed.toString();
+      }
       if (parsed.hostname !== 'image.tmdb.org') return url;
       parsed.pathname = parsed.pathname.replace(/\/t\/p\/(?:original|w780|w500|w185|w342|w300|w200|w154|w92)\//, '/t/p/' + size + '/');
       return parsed.toString();
