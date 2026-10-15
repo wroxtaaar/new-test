@@ -4637,7 +4637,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                         <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Play ${show.title} with NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
                           {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" onLoad={event => {
                             const image = event.currentTarget;
-                            if (!image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
+                            if (highQualityPostersReady && !image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
                               image.dataset.highQualityTried = 'true';
                               image.src = image.currentSrc.replace('/t/p/w342/', '/t/p/w780/');
                             }
@@ -4700,7 +4700,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Find ${show.title} on NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
                       {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" onLoad={event => {
                             const image = event.currentTarget;
-                            if (!image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
+                            if (highQualityPostersReady && !image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
                               image.dataset.highQualityTried = 'true';
                               image.src = image.currentSrc.replace('/t/p/w342/', '/t/p/w780/');
                             }
@@ -4760,7 +4760,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                         <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Find ${show.title} on NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
                           {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" onLoad={event => {
                             const image = event.currentTarget;
-                            if (!image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
+                            if (highQualityPostersReady && !image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
                               image.dataset.highQualityTried = 'true';
                               image.src = image.currentSrc.replace('/t/p/w342/', '/t/p/w780/');
                             }
@@ -4805,7 +4805,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                         <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Find ${show.title} on NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
                           {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" onLoad={event => {
                             const image = event.currentTarget;
-                            if (!image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
+                            if (highQualityPostersReady && !image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
                               image.dataset.highQualityTried = 'true';
                               image.src = image.currentSrc.replace('/t/p/w342/', '/t/p/w780/');
                             }
