@@ -132,7 +132,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
                     onError={event => {
                       const image = event.currentTarget;
                       if (image.dataset.highQualityTried === 'true' && image.src.includes('/t/p/w780/')) {
-                        image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                        image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
                         return;
                       }
                       onPosterError(event);
@@ -302,7 +302,7 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                     onError={event => {
                       const image = event.currentTarget;
                       if (image.dataset.highQualityTried === 'true' && image.src.includes('/t/p/w780/')) {
-                        image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                        image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
                         return;
                       }
                       onPosterError(event);
