@@ -4083,8 +4083,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 // or delayed and must not replace the movie's known poster.
                 const isRegionalMoviePreview = /^(popular|trending|latest)-(bollywood|hollywood)$/.test(String(movieCatalogue?.catalogue || ''));
                 const posterOverride = cataloguePosterOverride(movie);
-                const cataloguePosterUrl = (isTheCrow2024(movie) ? posterOverride : movieTorrentPreviewPosterUrl) ||
-                  (isTheCrow2024(movie) ? posterOverride : cataloguePosterUrlsRef.current[String(movie.id)]) ||
+                const cataloguePosterUrl = cataloguePosterUrlsRef.current[String(movie.id)] ||
+                  (isTheCrow2024(movie) ? posterOverride : movieTorrentPreviewPosterUrl) ||
                   posterOverride;
                 const posterSrc = lowQualityPosterUrl(
                   cataloguePosterUrl ||
@@ -4096,6 +4096,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     key={'movie-prepare-' + String(movie.id) + '-' + posterSrc}
                     posterSrc={posterSrc}
                     posterAlt={previewGroup.title}
+                    providers={(() => {
+                      const availability = ottAvailability[String(movie.id)];
+                      return availability && availability.status !== 'loading' && availability.status !== 'error'
+                        ? toCardProviders(uniqueOttProviders([
+                            ...(availability.streamingProviders || []),
+                            ...(availability.rentProviders || []),
+                            ...(availability.buyProviders || []),
+                          ]))
+                        : [];
+                    })()}
                     onPosterClick={closeMoviePrepareCard}
                     onPosterLoad={event => {
                       posterLoadedRef.current.add(posterKeyFor(previewGroup.posterResult));
@@ -4736,8 +4746,14 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 <MoviePrepareCard
                   key={group.key || (group.title + '-' + index)}
                   className="z-0"
-                  posterSrc={lowQualityPosterUrl(resolvedPosterUrl)}
+                  posterSrc={lowQualityPosterUrl(resolvedPosterUrl || posterOverrides[groupPosterKey] || posterResult?.posterUrl || '')}
                   posterAlt={group.title}
+                  providers={toCardProviders(uniqueOttProviders(
+                    (searchAvailabilityByGroup[group.key]?.matches || [])
+                      .filter(match => Array.isArray(match.providers) && match.providers.length > 0 &&
+                        normalizeSavedOttTitle(String(match.title || '')) === normalizeSavedOttTitle(episodeSeriesTitle(group.title) || group.title))
+                      .flatMap(match => match.providers)
+                  ))}
                   onPosterClick={() => setExpandedSearchGroupKey(null)}
                   onPosterLoad={event => {
                     const key = posterKeyFor(posterResult);
