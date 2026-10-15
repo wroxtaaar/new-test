@@ -3499,7 +3499,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     // Keep every card on the low-resolution poster until the entire visible page
     // has completed its metadata pass. This is page-level staging, not per-card:
     // one card must never jump to w780 while another card is still filling in.
-    setHighQualityPostersReady(false);
     if (!posterFirstPageReady) return;
 
     const checkPageDetails = () => {
