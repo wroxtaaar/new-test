@@ -9850,11 +9850,24 @@ async def api_extra_catalogue(catalogue_key: str, request: Request, page: int = 
     # For monthly catalogues, stale-but-useful data is returned immediately while
     # the refresh runs; first-ever builds report progress for the UI to poll.
     if cached:
-        return {"status": "ready", "builtAt": cached.get("builtAt"),
-                "completed": int(cached.get("titlesQueried") or 0), "total": int(cached.get("titlesQueried") or 0),
-                "resultCount": int(cached.get("resultCount") or len(cached["results"])),
-                "movieCount": int(cached.get("movieCount") or 0), "refreshing": bool(_extra_catalogue_tasks.get(catalogue_key) and not _extra_catalogue_tasks[catalogue_key].done()),
-                "results": cached["results"]}
+        response_payload = {
+            "status": "ready",
+            "builtAt": cached.get("builtAt"),
+            "completed": int(cached.get("titlesQueried") or 0),
+            "total": int(cached.get("titlesQueried") or 0),
+            "resultCount": int(cached.get("resultCount") or len(cached["results"])),
+            "movieCount": int(cached.get("movieCount") or 0),
+            "refreshing": bool(_extra_catalogue_tasks.get(catalogue_key) and not _extra_catalogue_tasks[catalogue_key].done()),
+            "results": cached["results"],
+        }
+        if page > 0 and page_size > 0:
+            return _fast_json_response(
+                request,
+                "extra:%s:%d:%d" % (catalogue_key, page, page_size),
+                _file_signature(_EXTRA_CATALOGUE_PATHS[catalogue_key]),
+                lambda: _page_catalogue_payload(response_payload, page, page_size),
+            )
+        return response_payload
     return {**state, "results": []}
 
 
@@ -10153,7 +10166,7 @@ async def api_marvel_catalogue(request: Request, page: int = Query(0, ge=0), pag
                         "error": "",
                     })
                     _marvel_catalogue_task = asyncio.create_task(_build_marvel_catalogue())
-        return {
+        response_payload = {
             "status": "ready",
             "builtAt": cached.get("builtAt"),
             "completed": int(cached.get("titlesQueried") or len(MARVEL_MOVIE_SEARCHES)),
@@ -10163,6 +10176,14 @@ async def api_marvel_catalogue(request: Request, page: int = Query(0, ge=0), pag
             "results": cached["results"],
             "refreshing": int(cached.get("version") or 0) < MARVEL_CATALOGUE_VERSION,
         }
+        if page > 0 and page_size > 0:
+            return _fast_json_response(
+                request,
+                "marvel-page:%d:%d" % (page, page_size),
+                _file_signature(MARVEL_CATALOGUE_PATH),
+                lambda: _page_catalogue_payload(response_payload, page, page_size),
+            )
+        return response_payload
 
     if _marvel_catalogue_task is None or _marvel_catalogue_task.done():
         if _marvel_catalogue_state.get("status") == "failed" and time.time() < _marvel_catalogue_retry_after:
