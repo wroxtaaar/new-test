@@ -2738,7 +2738,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         }
       } catch { /* The live search remains the fallback if the shared cache is unavailable. */ }
       if (generation !== movieTorrentSearchGenerationRef.current) return;
-      if (!data) data = await api.searchTorrents(titleQuery, 50, controller.signal, { id: traceId, intent: 'explicit-card-click' });
+      // Prefilled catalogues are cache-only. A missing VPS/GitHub-seeded
+      // cache entry must never trigger a live provider/indexer search, even
+      // after an explicit Get click. Cache refreshes happen in the separate
+      // VPS-to-GitHub workflow, not in the user's request path.
+      if (!data) data = [];
       if (generation !== movieTorrentSearchGenerationRef.current) return;
 
       // Prefer active swarms, but don't let missing seeder metadata hide every
@@ -2780,30 +2784,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // title+year search yields nothing, retry the movie's plain title before
       // concluding that the provider has no releases.
       const titleOnlyQuery = String(movie.title || '').trim();
-      if (
-        groups.length === 0 &&
-        titleOnlyQuery &&
-        titleOnlyQuery.toLowerCase() !== titleQuery.trim().toLowerCase()
-      ) {
-        try {
-          const titleOnlyResults = await api.searchTorrents(titleOnlyQuery, 50, controller.signal, { id: traceId, intent: 'explicit-card-click' });
-          if (generation !== movieTorrentSearchGenerationRef.current) return;
-          const seen = new Set<string>();
-          data = [...data, ...titleOnlyResults].filter(result => {
-            const key = String(
-              result.infoHash || result.magnetUrl || result.downloadUrl ||
-              result.sourceUrl || (String(result.title || '') + '|' + String(result.size || ''))
-            ).trim().toLowerCase();
-            if (!key || seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          });
-          groups = groupUsableResults(data, true);
-        } catch (retryError: any) {
-          if (retryError?.name === 'AbortError' || generation !== movieTorrentSearchGenerationRef.current) return;
-          // Keep the first response; the fallback below can still use it.
-        }
-      }
+      // Do not retry a cache miss with a title-only live search. This UI is
+      // deliberately cache-only; refreshes belong to the external cache builder.
 
       // Some indexers omit seeder counts. If no actively seeded releases
       // survived, show linked, non-CAM releases within the size limit rather
