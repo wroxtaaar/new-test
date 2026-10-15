@@ -4635,7 +4635,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     {[...marvelWebSeriesCatalogue.results].sort(compareReleaseDateDescending).slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize).map(show => (
                       <article key={String(show.id)} className="min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 transition hover:border-violet-400/50 hover:bg-slate-900/95 flex flex-col">
                         <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Play ${show.title} with NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
-                          {show.posterUrl ? <img src={highQualityPostersReady ? lowQualityPosterUrl(show.posterUrl).replace('/t/p/w342/', '/t/p/w780/') : lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
+                          {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
                               image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
@@ -4692,7 +4692,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 {regionalWebSeriesCatalogue.results.map(show => (
                   <article key={String(show.id)} className="min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 flex flex-col">
                     <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Find ${show.title} on NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
-                      {show.posterUrl ? <img src={highQualityPostersReady ? lowQualityPosterUrl(show.posterUrl).replace('/t/p/w342/', '/t/p/w780/') : lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
+                      {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
                               image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
@@ -4746,7 +4746,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     {[...dcWebSeriesCatalogue.results].sort(compareReleaseDateDescending).slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize).map(show => (
                       <article key={String(show.id)} className="min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 transition hover:border-cyan-500/40 hover:bg-slate-900/95 flex flex-col">
                         <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Find ${show.title} on NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
-                          {show.posterUrl ? <img src={highQualityPostersReady ? lowQualityPosterUrl(show.posterUrl).replace('/t/p/w342/', '/t/p/w780/') : lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
+                          {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
                               image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
@@ -4785,7 +4785,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       .map(show => (
                       <article key={String(show.id)} className="min-w-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 transition hover:border-cyan-500/40 hover:bg-slate-900/95 flex flex-col">
                         <button type="button" onClick={() => playCatalogueTvWithNexStream(show)} aria-label={`Find ${show.title} on NexStream`} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950 text-left cursor-pointer">
-                          {show.posterUrl ? <img src={highQualityPostersReady ? lowQualityPosterUrl(show.posterUrl).replace('/t/p/w342/', '/t/p/w780/') : lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
+                          {show.posterUrl ? <img src={lowQualityPosterUrl(show.posterUrl)} alt={show.title} loading="eager" className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.src.includes('/t/p/w780/')) {
                               image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
