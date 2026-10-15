@@ -3404,7 +3404,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
   useEffect(() => {
     const candidates = [
-      ...(movieCatalogue?.results || []).flatMap(item => {
+      ...visibleMovieCatalogueItems.slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize).flatMap(item => {
         const candidate = {
           title: String(item.title || '').trim(),
           year: item.year,
