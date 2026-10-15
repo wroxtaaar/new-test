@@ -3337,6 +3337,78 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     });
   }, [sortedResults, isMarvelEnglishResults, showMarvelWebSeries, marvelFilmFilter]);
 
+  // Every cached catalogue page needs its own saved streaming-provider hydration.
+  // The initial search only enriches page 1; without this page-scoped pass, later
+  // pages render cards before their persisted OTT data is ever attached.
+  useEffect(() => {
+    if (!activeFranchiseSearchMode || !posterFirstPageReady) return;
+    const start = (franchiseGridPage - 1) * franchiseGridPageSize;
+    const pageGroups = groupedResults.slice(start, start + franchiseGridPageSize);
+    if (!pageGroups.length) return;
+    const titles = Array.from(new Set(pageGroups.map(group => String(group.title || '').trim()).filter(Boolean)));
+    if (!titles.length) return;
+
+    const controller = new AbortController();
+    void api.searchSavedOtt(titles, controller.signal).then(response => {
+      if (controller.signal.aborted) return;
+      const savedByTitle = new Map<string, any>();
+      for (const result of response.results || []) {
+        for (const entry of result.entries || []) {
+          const keys = [entry.title, result.query]
+            .map(value => normalizeSavedOttTitle(String(value || '')))
+            .filter(Boolean);
+          for (const key of keys) {
+            const current = savedByTitle.get(key);
+            const count = (value: any) => ['streamingProviders', 'rentProviders', 'buyProviders']
+              .reduce((total, field) => total + (Array.isArray(value?.ottAvailability?.[field])
+                ? value.ottAvailability[field].length
+                : Array.isArray(value?.[field]) ? value[field].length : 0), 0);
+            if (!current || count(entry) > count(current)) savedByTitle.set(key, entry);
+          }
+        }
+      }
+      setSearchAvailabilityByGroup(previous => {
+        const next = { ...previous };
+        for (const group of pageGroups) {
+          const titleKey = normalizeSavedOttTitle(episodeSeriesTitle(group.title) || group.title);
+          const entry = savedByTitle.get(titleKey) || savedByTitle.get(normalizeSavedOttTitle(group.title));
+          if (!entry) continue;
+          const saved = entry.ottAvailability && typeof entry.ottAvailability === 'object' ? entry.ottAvailability : entry;
+          const region = String(saved.region || 'IN');
+          const providers = uniqueOttProviders([
+            ...normalizeSavedOttProviders(saved.streamingProviders, 'streaming', region),
+            ...normalizeSavedOttProviders(saved.rentProviders, 'rent', region),
+            ...normalizeSavedOttProviders(saved.buyProviders, 'buy', region),
+          ]);
+          // Preserve richer provider data already visible for this group.
+          const existing = next[group.key];
+          if ((existing?.providers?.length || 0) > providers.length) continue;
+          next[group.key] = {
+            status: providers.length ? 'ready' : 'not_confirmed',
+            query: group.title,
+            title: String(entry.catalogueTitle || entry.marvelCatalogueTitle || entry.title || group.title),
+            year: group.year,
+            providers,
+            matches: providers.length ? [{
+              id: String(entry.tmdbId || ''),
+              tmdbId: entry.tmdbId,
+              title: String(entry.catalogueTitle || entry.marvelCatalogueTitle || entry.title || group.title),
+              year: group.year,
+              type: 'movie',
+              status: 'ready',
+              providers,
+            }] : [],
+            message: providers.length ? undefined : 'No saved streaming providers for this title.',
+          };
+        }
+        return next;
+      });
+    }).catch(() => {
+      // Saved provider hydration is best-effort; keep existing card data intact.
+    });
+    return () => controller.abort();
+  }, [activeFranchiseSearchMode, posterFirstPageReady, franchiseGridPage, groupedResults]);
+
   // Search cards can come from the prebuilt Marvel/DC/Bollywood/Hollywood
   // catalogues and therefore aren't necessarily related to the text the user
   // typed. Merge their per-title metadata from the persistent VPS JSON rather
