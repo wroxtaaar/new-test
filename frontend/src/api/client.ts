@@ -30,6 +30,38 @@ export interface MarvelCatalogueResponse {
   resultCount?: number;
   builtAt?: string;
   error?: string;
+  refreshing?: boolean;
+}
+
+export interface TvCatalogueItem {
+  id: number | string;
+  title: string;
+  year?: number | null;
+  releaseDate?: string;
+  overview?: string;
+  posterUrl?: string;
+  backdropUrl?: string;
+  rating?: number;
+  tmdbUrl?: string;
+  streamingProviders?: Array<{
+    providerId?: number | null;
+    name: string;
+    type: 'subscription' | 'free' | 'ads' | 'rent' | 'buy' | string;
+    region?: string;
+    logoUrl?: string;
+    webUrl?: string;
+  }>;
+  providerLink?: string;
+  source?: string;
+}
+
+export interface TvCataloguePage {
+  catalogue: string;
+  page: number;
+  totalPages: number;
+  totalResults: number;
+  provider: string;
+  results: TvCatalogueItem[];
 }
 
 export type MovieCatalogueKey =
@@ -41,7 +73,8 @@ export type MovieCatalogueKey =
   | 'popular-hollywood'
   | 'popular-bollywood'
   | 'trending-hollywood'
-  | 'trending-bollywood';
+  | 'trending-bollywood'
+  | 'bollywood-library';
 
 export interface MovieCatalogueItem {
   id: number | string;
@@ -54,6 +87,78 @@ export interface MovieCatalogueItem {
   rating?: number;
   genres?: number[];
   source?: string;
+  tmdbId?: number | string;
+  imdbId?: string | null;
+  verified?: boolean;
+  tmdbUrl?: string;
+  imdbUrl?: string;
+  torrentMatch?: {
+    title?: string;
+    indexer?: string;
+    infoUrl?: string;
+    magnetUrl?: string;
+    infoHash?: string;
+    size?: number;
+    seeders?: number;
+    leechers?: number;
+    matchScore?: number;
+  };
+  torrentMatches?: Array<{
+    title?: string;
+    indexer?: string;
+    infoUrl?: string;
+    magnetUrl?: string;
+    infoHash?: string;
+    size?: number;
+    seeders?: number;
+    leechers?: number;
+    matchScore?: number;
+  }>;
+  ottAvailability?: {
+    region?: string;
+    status?: string;
+    streamingProviders?: MovieOttProvider[];
+    rentProviders?: MovieOttProvider[];
+    buyProviders?: MovieOttProvider[];
+    providerLink?: string;
+    checkedAt?: string;
+    source?: string;
+    providerAttribution?: string;
+    attribution?: string;
+  };
+}
+
+export interface SearchMediaMetadata {
+  id: number | string;
+  tmdbId?: number | string;
+  title: string;
+  year?: number | null;
+  mediaType: 'movie' | 'tv';
+  overview?: string;
+  posterUrl?: string;
+  backdropUrl?: string;
+  rating?: number;
+  tmdbUrl: string;
+  source?: string;
+}
+
+export interface SearchMediaMetadataResponse {
+  status: 'ready' | 'not_found' | 'unavailable';
+  query: string;
+  source?: string;
+  results: SearchMediaMetadata[];
+}
+
+export interface ImdbRatingResult {
+  query?: string;
+  title: string;
+  year?: number | null;
+  mediaType?: 'movie' | 'tv';
+  status: 'found' | 'not_found' | 'unavailable' | 'rate_limited';
+  imdbRating?: number | null;
+  imdbVotes?: string | null;
+  imdbId?: string | null;
+  imdbUrl?: string | null;
 }
 
 export interface MovieCataloguePage {
@@ -63,6 +168,7 @@ export interface MovieCataloguePage {
   totalPages: number;
   totalResults: number;
   releasedOnly?: boolean;
+  maxSizeGb?: number;
   results: MovieCatalogueItem[];
   attribution?: string;
 }
@@ -140,12 +246,19 @@ const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const value = String(input);
   const url = value.startsWith('/') ? API_BASE + value : value;
   const method = String(init?.method || 'GET').toUpperCase();
-  const isSeedrMutation =
-    value.startsWith('/api/seedr/') &&
+  // Some callers pass an absolute URL (API_BASE + '/api/...'); normalise to a
+  // path so the CSRF header is attached to every state-changing API request.
+  const path = value.startsWith('/')
+    ? value
+    : API_BASE && value.startsWith(API_BASE)
+      ? value.slice(API_BASE.length)
+      : value;
+  const isApiMutation =
+    path.startsWith('/api/') &&
     !['GET', 'HEAD', 'OPTIONS'].includes(method);
 
   const headers = new Headers(init?.headers || undefined);
-  if (isSeedrMutation && seedrCsrfToken) {
+  if (isApiMutation && seedrCsrfToken) {
     headers.set('X-Torrent-Studio-CSRF', seedrCsrfToken);
   }
 
@@ -157,6 +270,103 @@ const apiFetch = (input: RequestInfo | URL, init?: RequestInit) => {
 };
 
 export const api = {
+  async searchMediaMetadata(query: string, signal?: AbortSignal): Promise<SearchMediaMetadataResponse> {
+    const params = new URLSearchParams({ q: query });
+    const res = await fetch(API_BASE + '/api/search/metadata?' + params.toString(), {
+      signal, credentials: 'include', cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw new Error(data?.detail || body || ('TMDB metadata lookup failed (HTTP ' + res.status + ')'));
+    return data as SearchMediaMetadataResponse;
+  },
+
+  async searchMediaMetadataBatch(titles: string[], signal?: AbortSignal): Promise<{
+    status: string;
+    source?: string;
+    requested?: number;
+    matched?: number;
+    results: SearchMediaMetadata[];
+  }> {
+    const params = new URLSearchParams();
+    [...new Set(titles.map(title => String(title || '').trim()).filter(Boolean))]
+      .slice(0, 80)
+      .forEach(title => params.append('titles', title));
+    const res = await fetch(API_BASE + '/api/search/metadata/batch?' + params.toString(), {
+      signal, credentials: 'include', cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw new Error(data?.detail || body || ('Cached search metadata lookup failed (HTTP ' + res.status + ')'));
+    return data;
+  },
+
+  async getImdbRatings(
+    titles: string[],
+    mediaTypes: Array<'movie' | 'tv'> = [],
+    tmdbIds: Array<number | string | null | undefined> = [],
+    signal?: AbortSignal,
+  ): Promise<{
+    status: string;
+    requested?: number;
+    matched?: number;
+    results: ImdbRatingResult[];
+  }> {
+    const params = new URLSearchParams();
+    const seen = new Set<string>();
+    titles.forEach((rawTitle, index) => {
+      const title = String(rawTitle || '').trim();
+      if (!title) return;
+      const mediaType = mediaTypes[index] === 'tv' ? 'tv' : 'movie';
+      const key = mediaType + '|' + title.toLowerCase();
+      if (seen.has(key) || seen.size >= 80) return;
+      seen.add(key);
+      params.append('titles', title);
+      params.append('media_types', mediaType);
+      const tmdbId = Number(tmdbIds[index] || 0);
+      params.append('tmdb_ids', String(Number.isFinite(tmdbId) && tmdbId > 0 ? tmdbId : 0));
+    });
+    const res = await fetch(API_BASE + '/api/catalogue/imdb-ratings?' + params.toString(), {
+      signal, credentials: 'include', cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw new Error(data?.detail || body || ('IMDb rating lookup failed (HTTP ' + res.status + ')'));
+    return data;
+  },
+
+  async searchSavedOtt(titles: string[], signal?: AbortSignal): Promise<{
+    status: string;
+    results: Array<{ query: string; found: boolean; entries: Array<{
+      title: string;
+      year?: string | null;
+      tmdbId?: number | string;
+      ottAvailability: {
+        region?: string;
+        status?: string;
+        streamingProviders?: unknown[];
+        rentProviders?: unknown[];
+        buyProviders?: unknown[];
+        providerLink?: string;
+        source?: string;
+      };
+    }> }>;
+  }> {
+    const params = new URLSearchParams();
+    titles.slice(0, 80).forEach(title => params.append('titles', title));
+    const res = await fetch(API_BASE + '/api/catalogue/ott/search?' + params.toString(), {
+      signal, credentials: 'include', cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw new Error(data?.detail || body || ('Saved OTT lookup failed (HTTP ' + res.status + ')'));
+    return data;
+  },
+
   async getMarvelCatalogue(signal?: AbortSignal): Promise<MarvelCatalogueResponse> {
     const res = await fetch(API_BASE + '/api/catalogue/marvel', {
       signal,
@@ -185,16 +395,32 @@ export const api = {
     return data as MarvelCatalogueResponse;
   },
 
+  async getTvCatalogue(key: string, page = 1, signal?: AbortSignal): Promise<TvCataloguePage> {
+    const params = new URLSearchParams({ page: String(Math.min(Math.max(page, 1), 500)) });
+    const res = await fetch(API_BASE + '/api/tv/catalogue/' + encodeURIComponent(key) + '?' + params.toString(), {
+      signal, credentials: 'include', cache: 'no-store',
+    });
+    const body = await res.text();
+    let data: any = null;
+    try { data = body ? JSON.parse(body) : null; } catch {}
+    if (!res.ok) throw new Error(data?.detail || data?.error || body || ('TV catalogue failed (HTTP ' + res.status + ')'));
+    return data as TvCataloguePage;
+  },
+
   async getMovieCatalogue(
     key: MovieCatalogueKey,
     page = 1,
     releasedOnly = true,
     signal?: AbortSignal,
+    maxSizeGb = 5,
+    basic = false,
   ): Promise<MovieCataloguePage> {
     const params = new URLSearchParams({
       page: String(Math.min(Math.max(page, 1), 500)),
       released_only: String(releasedOnly),
     });
+    if (basic) params.set('basic', 'true');
+    if (key === 'bollywood-library') params.set('max_size_gb', String(Math.min(5, Math.max(1, maxSizeGb))));
     const res = await fetch(API_BASE + '/api/movies/catalogue/' + encodeURIComponent(key) + '?' + params.toString(), {
       signal,
       credentials: 'include',
@@ -210,9 +436,8 @@ export const api = {
   },
 
   async clearTmdbMovieCaches(): Promise<{ status: string; cacheTypes?: string[]; refetchRequired?: boolean }> {
-    const res = await fetch(API_BASE + '/api/movies/catalogue/cache/clear', {
+    const res = await apiFetch('/api/movies/catalogue/cache/clear', {
       method: 'POST',
-      credentials: 'include',
       cache: 'no-store',
     });
     const body = await res.text();
@@ -241,6 +466,51 @@ export const api = {
       throw new Error(data?.detail || data?.error || body || ('OTT availability failed (HTTP ' + res.status + ')'));
     }
     return data as MovieOttAvailability;
+  },
+
+  async searchAvailability(query: string, signal?: AbortSignal): Promise<{
+    status: 'ready' | 'not_found' | 'not_confirmed' | 'unavailable';
+    query: string;
+    title?: string;
+    year?: number | string;
+    matches?: Array<{
+      id: string;
+      title: string;
+      year?: number | string;
+      type?: string;
+      tmdbId?: number | string;
+      status: 'ready' | 'not_found' | 'not_confirmed' | 'unavailable';
+      providers: Array<{ name: string; region: string; type: string; webUrl?: string; logoUrl?: string; providerId?: number | string }>;
+    }>;
+    providers: Array<{ name: string; region: string; type: string; webUrl?: string; logoUrl?: string; providerId?: number | string }>;
+    message?: string;
+  }> {
+    const params = new URLSearchParams({ q: query });
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 14000);
+    const forwardAbort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener('abort', forwardAbort, { once: true });
+    try {
+      const res = await fetch(API_BASE + '/api/search/availability?' + params.toString(), {
+        signal: controller.signal, credentials: 'include', cache: 'no-store',
+      });
+      const body = await res.text();
+      let data: any = null;
+      try { data = body ? JSON.parse(body) : null; } catch {}
+      if (!res.ok) throw new Error(data?.detail || data?.message || body || ('Availability lookup failed (HTTP ' + res.status + ')'));
+      return data;
+    } catch (error: any) {
+      if (timedOut) throw new Error('Streaming availability check timed out.');
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', forwardAbort);
+    }
   },
 
   // Torrents (qBittorrent WebAPI)

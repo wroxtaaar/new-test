@@ -77,6 +77,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
   const resumeTimeRef = useRef(0);
   const resumePlayingRef = useRef(false);
   const subtitleTrackRef = useRef<HTMLTrackElement>(null);
+  const [usingDirectFallback, setUsingDirectFallback] = useState(false);
   const hlsActiveRef = useRef(false);
   const hlsRef = useRef<Hls | null>(null);
 
@@ -98,6 +99,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setIsPlaying(true);
     setMediaError('');
     setIsSeeking(false);
+    setUsingDirectFallback(false);
     hlsActiveRef.current = false;
     const initialSubtitles = file?.subtitleTracks || [];
     setSubtitleTracks(initialSubtitles);
@@ -132,13 +134,22 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     setMediaError('');
     setTrackNotice('Preparing browser stream…');
 
-    // Direct-only Seedr playback: the browser fetches media bytes from Seedr,
-    // never through this app's backend stream/proxy (which would use server bandwidth).
+    // Always have a concrete browser source. Prefer the resolved backend
+    // stream, then the direct Seedr presentation URL, then the download
+    // endpoint as the final browser-playback fallback.
     const rawStreamUrl = String(file.streamUrl || '').trim();
-    const externalStreamUrl = String(file.externalStreamUrl || '').trim();
-    const downloadUrl = String(file.downloadUrl || '').trim();
-    const streamUrl = externalStreamUrl || rawStreamUrl || downloadUrl;
-    const fallbackStreamUrl = '';
+    const directBaseUrl = rawStreamUrl.includes('/api/torrents/stream/')
+      ? rawStreamUrl.replace('/api/torrents/stream/', '/api/torrents/direct-stream/')
+      : rawStreamUrl;
+    const streamUrl = rawStreamUrl || String(file.externalStreamUrl || '').trim() || String(file.downloadUrl || '').trim();
+
+    // HLS audio tracks are switched through HLS.js. Do not append an audio query parameter.
+    const fallbackStreamUrl = String(file.externalStreamUrl || '').trim() &&
+      String(file.externalStreamUrl || '').trim() !== streamUrl
+      ? String(file.externalStreamUrl || '').trim()
+      : String(file.downloadUrl || '').trim() !== streamUrl
+        ? String(file.downloadUrl || '').trim()
+        : '';
 
     const restoreTime = resumeTimeRef.current;
     const restorePlaying = resumePlayingRef.current || (!media.paused && duration > 0);
@@ -297,19 +308,10 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     let cancelled = false;
     setTracksLoading(true);
 
-    // Direct Seedr playback must not trigger a backend media probe: the probe
-    // can fetch media bytes through the server even when playback is direct.
+    // Keep any already-discovered sidecar subtitles, but still inspect the
+    // media container so embedded subtitles and embedded audio tracks are not
+    // hidden just because a folder also contains an .srt/.vtt file.
     const sidecarSubtitles = Array.isArray(file.subtitleTracks) ? file.subtitleTracks : [];
-    const selectedStreamUrl = String(file.externalStreamUrl || file.streamUrl || file.downloadUrl || '').trim();
-    const isDirectSeedrStream = /^https?:\/\/(?:[^/]+\.)?seedr\.cc\//i.test(selectedStreamUrl);
-    if (isDirectSeedrStream) {
-      setAudioTracks([]);
-      setSelectedAudioIndex(undefined);
-      setSubtitleTracks(sidecarSubtitles.map((track: any, index: number) => ({ ...track, index })));
-      setHlsSubtitleTracks([]);
-      setTracksLoading(false);
-      return () => { cancelled = true; controller.abort(); };
-    }
 
     api.getSeedrMediaInfo(fileId)
       .then(data => {
@@ -538,8 +540,25 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
     if (hlsActiveRef.current) return;
 
     const media = mediaRef.current;
-    const selectedStreamUrl = String(file?.externalStreamUrl || file?.streamUrl || file?.downloadUrl || '').trim();
-    // Never fall back to the backend proxy for a failed direct stream.
+    if (
+      media &&
+      file?.externalStreamUrl &&
+      file.externalStreamUrl !== file.streamUrl &&
+      !usingDirectFallback
+    ) {
+      // The backend proxy is the preferred browser path, but Seedr's
+      // presentation URL is known to be directly playable by Chrome for
+      // some files. If the proxy response is rejected by the browser,
+      // immediately retry the exact Seedr presentation URL rather than
+      // showing a fatal error.
+      setUsingDirectFallback(true);
+      setMediaError('');
+      setTrackNotice('Trying direct Seedr stream…');
+      media.src = file.externalStreamUrl;
+      media.load();
+      return;
+    }
+
     const code = media && 'error' in media ? media.error?.code : undefined;
     setMediaError(
       code ? `Browser could not play this stream (media error ${code}).` : 'Unable to play this video stream.'
@@ -1007,8 +1026,8 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
         {isVideo ? (
           <video
             ref={videoRef}
-            crossOrigin={!file.externalStreamUrl && file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
-            src={file.externalStreamUrl || file.streamUrl || file.downloadUrl}
+            crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
+            src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
             className="w-full h-32 object-contain bg-black rounded-lg"
             onTimeUpdate={onTimeUpdate}
             onSeeking={onSeeking}
@@ -1025,7 +1044,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           <audio
             ref={audioRef}
             autoPlay
-            src={file.externalStreamUrl || file.streamUrl || file.downloadUrl}
+            src={file.streamUrl || file.externalStreamUrl || file.downloadUrl}
             onTimeUpdate={onTimeUpdate}
             onLoadedMetadata={onLoadedMetadata}
             onEnded={() => setIsPlaying(false)}
@@ -1183,7 +1202,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
           {isVideo ? (
             <video
               ref={videoRef}
-              crossOrigin={!file.externalStreamUrl && file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
+              crossOrigin={file.streamUrl?.startsWith(API_BASE) ? 'anonymous' : undefined}
               autoPlay
               className={`object-contain cursor-pointer ${
                 isFullscreen
@@ -1280,7 +1299,7 @@ export const MediaPlayerModal: React.FC<MediaPlayerModalProps> = ({
 
               <audio
                 ref={audioRef}
-                src={file.externalStreamUrl || file.streamUrl || file.downloadUrl}
+                src={file.streamUrl}
                 onTimeUpdate={onTimeUpdate}
                 onLoadedMetadata={onLoadedMetadata}
                 onEnded={() => setIsPlaying(false)}
