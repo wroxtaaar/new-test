@@ -2193,7 +2193,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         // Fetch the first page of movies quickly, then stream the rest in the
         // background. Servers without paging support ignore the parameters and
         // return the full catalogue in one response.
-        const CATALOGUE_PAGE_SIZE = 24;
+        const CATALOGUE_PAGE_SIZE = 18;
         const fetchCataloguePage = (page: number) => searchMode === 'marvel'
           ? api.getMarvelCatalogue(controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE })
           : api.getCatalogue(searchMode, controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE });
