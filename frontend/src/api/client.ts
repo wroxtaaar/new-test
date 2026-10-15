@@ -518,7 +518,7 @@ export const api = {
   },
 
   // Torrents (qBittorrent WebAPI)
-  async searchTorrents(query: string, limit = 50, signal?: AbortSignal): Promise<TorrentSearchResult[]> {
+  async searchTorrents(query: string, limit = 50, signal?: AbortSignal, prepareTrace?: { id: string; intent: 'explicit-card-click' }): Promise<TorrentSearchResult[]> {
     const params = new URLSearchParams({
       q: query,
       limit: String(Math.min(Math.max(limit, 1), 50))
@@ -533,7 +533,11 @@ export const api = {
     let res: Response;
     try {
       res = await fetch(searchBase + '/api/search?' + params.toString(), {
-        signal: signal || controller.signal
+        signal: signal || controller.signal,
+        headers: prepareTrace ? {
+          'X-Prepare-Intent': prepareTrace.intent,
+          'X-Prepare-Trace': prepareTrace.id,
+        } : undefined,
       });
     } catch (error: any) {
       if (error?.name === 'AbortError') {
