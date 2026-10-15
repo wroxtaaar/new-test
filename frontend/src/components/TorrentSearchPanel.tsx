@@ -3014,7 +3014,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           ...basic,
           results: (basic.results || []).map(movie => ({
             ...movie,
-            posterUrl: String(movie.posterUrl || '').replace(/\/w(\d+)\//, '/w342/'),
+            posterUrl: lowQualityPosterUrl(movie.posterUrl || '', 'w185'),
           })),
         };
         setMovieCatalogue(basicPage);
@@ -3774,14 +3774,14 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   <div className="aspect-[2/3] bg-slate-900">
                     {item.poster ? <img src={lowQualityPosterUrl(item.poster)} alt={item.title} loading="eager" onLoad={event => {
                             const image = event.currentTarget;
-                            if (!image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w342/')) {
+                            if (!image.dataset.highQualityTried && image.currentSrc.includes('/t/p/w185/')) {
                               image.dataset.highQualityTried = 'true';
-                              image.src = image.currentSrc.replace('/t/p/w342/', '/t/p/w780/');
+                              image.src = image.currentSrc.replace('/t/p/w185/', '/t/p/w780/');
                             }
                           }} className="h-full w-full object-cover" onError={event => {
                             const image = event.currentTarget;
                             if (image.dataset.highQualityTried === 'true' && image.src.includes('/t/p/w780/')) {
-                              image.src = image.src.replace('/t/p/w780/', '/t/p/w342/');
+                              image.src = image.src.replace('/t/p/w780/', '/t/p/w185/');
                               return;
                             }
                             image.style.display = 'none';
