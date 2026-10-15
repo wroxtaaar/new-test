@@ -188,7 +188,9 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
             <img
               src={normalizeLowQualityPosterUrl(posterSrc)}
               alt={posterAlt}
-              loading="lazy"
+              loading="eager"
+              fetchPriority="high"
+              decoding="async"
               className="h-full w-full object-cover cursor-pointer"
               onClick={onPosterClick}
               onLoad={event => {
