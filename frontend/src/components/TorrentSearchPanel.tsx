@@ -1308,6 +1308,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const posterBackgroundQueueRef = useRef<Array<{ key: string; result: TorrentSearchResult }>>([]);
   const posterBackgroundQueuedRef = useRef(new Set<string>());
   const posterBackgroundActiveRef = useRef(0);
+  // Track the keys currently being resolved; queued-only checks miss active jobs.
+  const posterBackgroundActiveKeysRef = useRef(new Set<string>());
   const posterBackgroundGenerationRef = useRef(0);
   const posterBackgroundAttemptsRef = useRef(new Map<string, number>());
   // Avoid repeating an identical failed poster request for every quality/variant
@@ -1501,6 +1503,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
       posterBackgroundQueuedRef.current.delete(job.key);
       posterBackgroundActiveRef.current += 1;
+      posterBackgroundActiveKeysRef.current.add(job.key);
 
       void (async () => {
         try {
@@ -1545,6 +1548,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             }, 45000);
           }
         } finally {
+          posterBackgroundActiveKeysRef.current.delete(job.key);
           posterBackgroundActiveRef.current = Math.max(
             0,
             posterBackgroundActiveRef.current - 1
@@ -1562,6 +1566,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     posterBackgroundGenerationRef.current += 1;
     posterBackgroundQueueRef.current = [];
     posterBackgroundQueuedRef.current.clear();
+    posterBackgroundActiveKeysRef.current.clear();
     posterBackgroundAttemptsRef.current.clear();
     posterLoadedRef.current.clear();
 
@@ -3372,7 +3377,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         (Object.values(ottAvailability) as Array<{ status?: string }>).some(item => item?.status === 'loading');
       // Low-quality posters still being resolved for the visible page also count as work.
       const visibleKeys = currentPagePosterKeys();
-      const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key));
+      const posterBusy = posterBackgroundQueueRef.current.some(job => visibleKeys.has(job.key)) ||
+        [...posterBackgroundActiveKeysRef.current].some(key => visibleKeys.has(key));
       if (!availabilityBusy && !ottBusy && !posterBusy && imdbInFlightRef.current === 0) {
         setHighQualityPostersReady(true);
       }
