@@ -42,6 +42,9 @@ from cache_diagnostics import (
 APP_NAME = "Torrent Studio API"
 logger = logging.getLogger("torrent-studio")
 
+# Live torrent-provider searches are allowed only inside the explicit manual-search route.
+_MANUAL_TORRENT_SEARCH = contextvars.ContextVar("manual_torrent_search", default=False)
+
 # TMDB provides dynamic, paginated movie discovery. Credentials stay server-side;
 # use a free developer key for non-commercial use or the API Read Access Token.
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
@@ -2450,6 +2453,9 @@ async def search_1337x_direct(
     category: str | None = None,
     provider_query: str | None = None,
 ) -> list[dict[str, Any]]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return []
     """Primary 1337x search using media categories and cheap listing-page scraping.
 
     The unsorted category route is the reliable base path. The server-side
@@ -2734,6 +2740,9 @@ async def search_1337x_direct(
     return [item for item in fetched if isinstance(item, dict)]
 
 async def search_yts_movies(query: str, limit: int = 50) -> list[dict[str, Any]]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return []
     """Search YTS directly so movie searches are not lost in aggregate ranking."""
     movie_query = _media_provider_query(query)
     if not movie_query:
@@ -3046,6 +3055,9 @@ async def search_limetorrents(
     limit: int = 50,
     pages: int = 2,
 ) -> list[dict[str, Any]]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return []
     """Search LimeTorrents concurrently across mirrors; resolve magnets on demand."""
     _title_query, season, episode = _media_search_parts(query)
     provider_query = _media_provider_query(query)
@@ -3197,6 +3209,9 @@ async def search_knaben(
     limit: int = 100,
     provider_query: str | None = None,
 ) -> list[dict[str, Any]]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return []
     """Search Knaben API v2 using its edge-cached GET interface."""
     title_query, season, episode = _media_search_parts(query)
     title_query = re.sub(r"\s+", " ", provider_query or _media_provider_query(query)).strip()
@@ -3342,6 +3357,9 @@ async def search_knaben(
 
 
 async def search_torrents_csv(query: str, limit: int) -> dict[str, Any]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return {"source": "torrents-csv", "elapsedMs": 0, "results": []}
     started = time.monotonic()
     try:
         async with _InstrumentedAsyncClient(timeout=SEARCH_SOURCE_TIMEOUT_SECONDS, follow_redirects=True) as client:
@@ -3398,6 +3416,9 @@ async def search_torrents_csv(query: str, limit: int) -> dict[str, Any]:
 
 
 async def search_apibay(query: str, limit: int) -> dict[str, Any]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return {"source": "apibay", "elapsedMs": 0, "results": []}
     started = time.monotonic()
     try:
         async with _InstrumentedAsyncClient(timeout=SEARCH_SOURCE_TIMEOUT_SECONDS, follow_redirects=True) as client:
@@ -3719,6 +3740,9 @@ async def _search_1337x_uncached(
     query: str,
     allow_series_fallback: bool = True,
 ) -> list[dict[str, Any]]:
+    if not _MANUAL_TORRENT_SEARCH.get():
+        _record_cache_event("torrent_search", "blocked_prefilled_live_lookup")
+        return []
     """Perform one bounded live media search.
 
     This is intentionally conservative for Render Free: only the primary
@@ -11465,7 +11489,12 @@ async def api_search_metadata_batch(
 
 @app.get("/api/search")
 async def api_search(q: str = Query(..., min_length=1), limit: int = Query(50, ge=1, le=50)):
-    return await search_1337x(q, limit)
+    # Live torrent-provider access is explicitly scoped to this user-triggered endpoint.
+    token = _MANUAL_TORRENT_SEARCH.set(True)
+    try:
+        return await search_1337x(q, limit)
+    finally:
+        _MANUAL_TORRENT_SEARCH.reset(token)
 
 REGIONAL_MOVIE_PREBUILT_CACHE_PATH = Path(os.getenv("REGIONAL_MOVIE_PREBUILT_CACHE_PATH", "/app/data/regional_movie_prebuilt_cache.json"))
 
