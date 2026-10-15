@@ -4813,15 +4813,9 @@ async def _poster_lookup(title: str, year: str = "") -> str | None:
             _poster_inflight.pop(cache_key, None)
 
 
-# Poster bytes are proxied through the app rather than redirecting the browser to a
-# third-party image CDN. This avoids mobile/browser network restrictions on image
-# hosts and lets the first request use a genuinely small thumbnail.
-_POSTER_IMAGE_CACHE: dict[str, tuple[float, bytes, str]] = {}
-_POSTER_IMAGE_CACHE_TTL = 6 * 60 * 60
-_POSTER_IMAGE_CACHE_LIMIT = 256
-_POSTER_IMAGE_HTTP_CLIENT: httpx.AsyncClient | None = None
-
-
+# Return a lightweight redirect to the image CDN instead of proxying image bytes
+# through the Render instance. The latter can time out on CDN connections and caused
+# every poster to remain blank. Keep size selection here so w185 can load first.
 def _poster_url_for_size(poster_url: str, size: str) -> str:
     url = str(poster_url or "").strip()
     if not url:
@@ -4832,26 +4826,14 @@ def _poster_url_for_size(poster_url: str, size: str) -> str:
         host = (parts.hostname or "").casefold()
         path = parts.path
         if host == "image.tmdb.org":
-            path = re.sub(r"/t/p/(?:original|w\d+)/", f"/t/p/{size}/", path)
+            path = re.sub(r"/t/p/(?:original|w\\d+)/", f"/t/p/{size}/", path)
         elif host.endswith("media-amazon.com") or host == "images-na.ssl-images-amazon.com":
-            path = re.sub(r"\._V1_\.[^.]+$", f"._V1_UX{width}_.jpg", path)
+            path = re.sub(r"\\._V1_\\.[^.]+$", f"._V1_UX{width}_.jpg", path)
         elif "mzstatic.com" in host:
-            path = re.sub(r"\d+x\d+bb", f"{width}x{width}bb", path)
+            path = re.sub(r"\\d+x\\d+bb", f"{width}x{width}bb", path)
         return parts._replace(path=path).geturl()
     except Exception:
         return url
-
-
-async def _poster_image_client() -> httpx.AsyncClient:
-    global _POSTER_IMAGE_HTTP_CLIENT
-    if _POSTER_IMAGE_HTTP_CLIENT is None or _POSTER_IMAGE_HTTP_CLIENT.is_closed:
-        _POSTER_IMAGE_HTTP_CLIENT = httpx.AsyncClient(
-            timeout=httpx.Timeout(8.0, connect=4.0),
-            follow_redirects=True,
-            headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                     "User-Agent": "TorrentStudio/1.0"},
-        )
-    return _POSTER_IMAGE_HTTP_CLIENT
 
 
 @app.get("/api/poster")
@@ -4863,43 +4845,11 @@ async def api_poster(
     poster = await _poster_lookup(title, year)
     if not poster:
         raise HTTPException(404, "Poster not found")
-
     size = size if size in {"w185", "w780"} else "w185"
-    image_url = _poster_url_for_size(poster, size)
-    cache_key = size + "|" + image_url
-    now = time.time()
-    cached_image = _POSTER_IMAGE_CACHE.get(cache_key)
-    if cached_image and cached_image[0] > now:
-        body, media_type = cached_image[1], cached_image[2]
-    else:
-        _POSTER_IMAGE_CACHE.pop(cache_key, None)
-        try:
-            client = await _poster_image_client()
-            upstream = await client.get(image_url)
-            if upstream.status_code != 200 or not upstream.content:
-                raise HTTPException(502, "Poster image source unavailable")
-            media_type = upstream.headers.get("content-type", "image/jpeg").split(";", 1)[0].strip()
-            if not media_type.startswith("image/") or len(upstream.content) > 10 * 1024 * 1024:
-                raise HTTPException(502, "Invalid poster image response")
-            body = upstream.content
-            if len(_POSTER_IMAGE_CACHE) >= _POSTER_IMAGE_CACHE_LIMIT:
-                expired = [key for key, value in _POSTER_IMAGE_CACHE.items() if value[0] <= now]
-                for key in expired:
-                    _POSTER_IMAGE_CACHE.pop(key, None)
-                while len(_POSTER_IMAGE_CACHE) >= _POSTER_IMAGE_CACHE_LIMIT:
-                    _POSTER_IMAGE_CACHE.pop(next(iter(_POSTER_IMAGE_CACHE)))
-            _POSTER_IMAGE_CACHE[cache_key] = (now + _POSTER_IMAGE_CACHE_TTL, body, media_type)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.warning("Poster image proxy failed for '%s (%s)': %s", title, year, type(exc).__name__)
-            raise HTTPException(502, "Poster image temporarily unavailable") from exc
-
-    return Response(
-        content=body,
-        media_type=media_type,
-        headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
-                 "X-Content-Type-Options": "nosniff"},
+    return RedirectResponse(
+        _poster_url_for_size(poster, size),
+        status_code=302,
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 
