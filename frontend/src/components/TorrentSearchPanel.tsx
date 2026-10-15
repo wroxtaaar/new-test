@@ -838,7 +838,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     groups: TorrentQualityGroup[];
     savedAt: number;
   }>());
-  const movieTorrentPrefetchRunningRef = useRef(false);
   const MOVIE_TORRENT_CACHE_STORAGE_KEY = 'home_movie_torrent_details_v1';
   const MOVIE_TORRENT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const NEXSTREAM_SEARCH_CACHE_KEY = 'home_nexstream_search_v1';
@@ -1285,8 +1284,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     files: { index: number; name: string; size: number; path: string; type: string; priority?: number }[];
     totalSize: number;
   }>());
-  const metadataInFlightRef = useRef(new Set<string>());
-  const prefetchGenerationRef = useRef(0);
   const recentSearchRef = useRef<HTMLDivElement | null>(null);
   const searchRequestRef = useRef<AbortController | null>(null);
   const searchGenerationRef = useRef(0);
@@ -2371,12 +2368,24 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (searchMode) setIsSearching(false);
       startPosterBackgroundSearch(data);
 
-      // Use OTT data already embedded in enriched catalogue rows before scheduling any API lookups.
-      // Do not gate this on searchMode: catalogue presets can be invoked through different UI paths.
-      {
+      // Keep OTT discovery off the initial render path. The card grid must first give
+      // every poster on the current page a chance to load at low resolution.
+      void (async () => {
+        while (
+          !posterFirstPageReadyRef.current &&
+          generation === searchGenerationRef.current &&
+          !controller.signal.aborted
+        ) {
+          await new Promise<void>(resolve => window.setTimeout(resolve, 80));
+        }
+        if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
+        {
         // Process every catalogue group so saved enrichment is available even when the
         // UI reorders results by quality/seeds. Only live lookups remain capped below.
-        const availabilityGroups = groupTorrentResults(data);
+        const availabilityGroups = groupTorrentResults(data).slice(
+          (franchiseGridPage - 1) * franchiseGridPageSize,
+          franchiseGridPage * franchiseGridPageSize,
+        );
         const pendingLiveLookups: typeof availabilityGroups = [];
         // Titles with no provider info are re-checked live (3 at a time, bounded per search),
         // and the backend stores each answer, so every card ends up with streaming info.
@@ -2584,53 +2593,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
             if (group) await runLiveLookup(group);
           }
         }));
-      }
-
-      // Do not wait for metadata before displaying results. Start resolving
-      // the first two results immediately, then the next two after that batch
-      // finishes. The cache is used by Add when available.
-      const prefetchGeneration = ++prefetchGenerationRef.current;
-      void (async () => {
-        const candidates = data.slice(0, 4);
-        for (let start = 0; start < candidates.length; start += 2) {
-          if (prefetchGenerationRef.current !== prefetchGeneration) return;
-
-          const batch = candidates.slice(start, start + 2);
-          await Promise.allSettled(batch.map(async (result) => {
-            const source = result.magnetUrl || result.downloadUrl || result.sourceUrl;
-            const key = result.infoHash || source || result.title;
-            if (!source || !key || metadataCacheRef.current.has(key) || metadataInFlightRef.current.has(key)) {
-              return;
-            }
-
-            metadataInFlightRef.current.add(key);
-            try {
-              const metadata = await api.inspectMagnet(
-                source,
-                'Downloads',
-                result.infoUrl || result.sourceUrl || '',
-                result.descriptorUrl || ''
-              );
-
-              if (
-                metadata &&
-                !metadata.pending &&
-                Array.isArray(metadata.files) &&
-                metadata.files.length > 0
-              ) {
-                metadataCacheRef.current.set(key, {
-                  name: String(metadata.name || '').trim(),
-                  hash: String(metadata.hash || result.infoHash || '').trim(),
-                  files: metadata.files,
-                  totalSize: Number(metadata.totalSize || 0)
-                });
-              }
-            } catch {
-              // Add will simply resolve this result on demand if prefetch fails.
-            } finally {
-              metadataInFlightRef.current.delete(key);
-            }
-          }));
         }
       })();
 
@@ -3123,66 +3085,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       }
     }
   };
-
-  const prefetchRegionalTorrentDetails = async () => {
-    if (movieTorrentPrefetchRunningRef.current) return;
-    movieTorrentPrefetchRunningRef.current = true;
-    try {
-      const catalogues: MovieCatalogueKey[] = [
-        'popular-bollywood', 'trending-bollywood', 'latest-bollywood',
-        'popular-hollywood', 'trending-hollywood', 'latest-hollywood',
-      ];
-      const queued = new Map<string, MovieCatalogueItem>();
-      for (const catalogueKey of catalogues) {
-        try {
-          const page = await api.getMovieCatalogue(catalogueKey, 1, true);
-          for (const movie of (page.results || []).slice(0, 12)) {
-            const key = normalizeGroupTitle(movie.title) + '|' + String(movie.year || '');
-            if (!movieTorrentDetailsCacheRef.current.has(key)) queued.set(key, movie);
-          }
-        } catch { /* One catalogue failing should not stop the other catalogues. */ }
-      }
-      const queue = Array.from(queued.entries());
-      let next = 0;
-      const worker = async () => {
-        while (next < queue.length) {
-          const current = queue[next++];
-          if (!current) return;
-          const [cacheKey, movie] = current;
-          if (movieTorrentDetailsCacheRef.current.has(cacheKey)) continue;
-          try {
-            const query = movie.title + (movie.year ? ' ' + movie.year : '');
-            let rows = await api.searchTorrents(query, 50);
-            if (!rows.length && movie.title) rows = await api.searchTorrents(movie.title, 50);
-            const expectedTitle = normalizeGroupTitle(movie.title);
-            const minSize = searchLimits.minSizeMb * 1024 * 1024;
-            const maxSize = searchLimits.maxSizeGb * 1024 * 1024 * 1024;
-            const lowQuality = /(?:^|[\s._()[\]-])(?:cam(?:rip)?|hdcam|hd[ ._-]?cam|telesync|tele[ ._-]?sync|ts[ ._-]?(?:md|ac3|hd)?|telecine|dvdscr|dvd[ ._-]?scr|screener|workprint)(?:$|[\s._()[\]-])/i;
-            const usable = rows.filter(result => {
-              const title = normalizeGroupTitle(String(result.title || ''));
-              const mediaTitle = normalizeGroupTitle(String(result.mediaTitle || ''));
-              const size = Number(result.size) || 0;
-              const hasSource = Boolean(result.magnetUrl || result.downloadUrl || result.sourceUrl);
-              return expectedTitle && (title.includes(expectedTitle) || mediaTitle.includes(expectedTitle))
-                && hasSource && size >= minSize && size <= maxSize
-                && !lowQuality.test(String(result.title || '') + ' ' + String(result.quality || ''));
-            });
-            const groups = groupTorrentResults(usable);
-            movieTorrentDetailsCacheRef.current.set(cacheKey, { groups, savedAt: Date.now() });
-            persistMovieTorrentCache();
-          } catch { /* Failed titles can be retried when the user opens Prepare. */ }
-        }
-      };
-      await Promise.all([worker(), worker()]);
-    } finally {
-      movieTorrentPrefetchRunningRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    // Warm the persistent torrent cache in the background, without blocking the UI.
-    void prefetchRegionalTorrentDetails();
-  }, []);
 
   const sortedResults = useMemo(() => {
     // Use the shared root search_limits.json settings. Keep both bounds local
