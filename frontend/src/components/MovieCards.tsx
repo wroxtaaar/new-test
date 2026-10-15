@@ -338,6 +338,8 @@ export interface MoviePrepareCardProps {
   selectedVariantKey: string;
   onSelectVariant: (key: string) => void;
   variantsAriaLabel: string;
+  /** Streaming services resolved for this movie. */
+  providers?: MovieCardProvider[];
   /** Set once the torrent has been prepared in Seedr. */
   prepared: null | {
     isPlaying: boolean;
@@ -369,6 +371,7 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
   selectedVariantKey,
   onSelectVariant,
   variantsAriaLabel,
+  providers = [],
   prepared,
   directStream,
   prepare,
@@ -494,6 +497,18 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                       <X className="h-3.5 w-3.5" />
                     </button>
                   </div>
+
+                  {providers.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1" aria-label={`Streaming services for ${title}`}>
+                      {providers.slice(0, 5).map(provider => (
+                        <a key={provider.key} href={provider.webUrl || undefined} target={provider.webUrl ? '_blank' : undefined}
+                          rel={provider.webUrl ? 'noreferrer' : undefined} title={provider.name}
+                          className="rounded-full border border-cyan-900/70 bg-cyan-950/40 px-1.5 py-0.5 text-[10px] leading-4 text-cyan-200">
+                          {provider.name}
+                        </a>
+                      ))}
+                    </div>
+                  )}
 
                   {variants.length > 1 && (
                     <select
