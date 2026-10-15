@@ -39,7 +39,7 @@ jobs:
             find "$SOURCE" -mindepth 1 -maxdepth 2 -print | head -80
             exit 1
           fi
-          rsync -a --delete --exclude='.git/' "$SOURCE/" ./
+          rsync -a --delete --exclude='.git/' --exclude='.github/workflows/***' "$SOURCE/" ./
           rm -f "$ARCHIVE"
           git add -A
           git config user.name "github-actions[bot]"
