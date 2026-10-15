@@ -57,7 +57,7 @@ function normalizeLowQualityPosterUrl(value: string): string {
 
 function upgradeToHighQualityPoster(image: HTMLImageElement): void {
   if (!image.isConnected || image.dataset.highQualityTried) return;
-  const current = image.currentSrc || image.src;
+  const current = image.src || image.currentSrc;
   try {
     const parsed = new URL(current, window.location.origin);
     if (parsed.pathname.replace(/\/+$/, '') === '/api/poster') {
@@ -221,7 +221,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
                       const image = event.currentTarget;
                       if (image.dataset.highQualityTried === 'true') {
                         try {
-                          const parsed = new URL(image.currentSrc || image.src, window.location.origin);
+                          const parsed = new URL(image.src || image.currentSrc, window.location.origin);
                           if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
                             parsed.searchParams.set('size', 'w185');
                             image.src = parsed.toString();
@@ -404,7 +404,7 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                       const image = event.currentTarget;
                       if (image.dataset.highQualityTried === 'true') {
                         try {
-                          const parsed = new URL(image.currentSrc || image.src, window.location.origin);
+                          const parsed = new URL(image.src || image.currentSrc, window.location.origin);
                           if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
                             parsed.searchParams.set('size', 'w185');
                             image.src = parsed.toString();
