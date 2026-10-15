@@ -2599,6 +2599,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       return;
     }
     const traceId = prepareTraceIdRef.current;
+    const previewIdentity = catalogueMovieIdentity(movie, movieCatalogue?.catalogue);
     prepareBuildPendingRef.current = true;
 
     // The Get-card grid owns the first render pass. Do not start Prepare-card
@@ -2636,7 +2637,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const generation = ++movieTorrentSearchGenerationRef.current;
 
     setMovieTorrentSearchTitle(titleQuery);
-    setMovieTorrentPreviewCatalogueId(catalogueMovieIdentity(movie, movieCatalogue?.catalogue));
+    setMovieTorrentPreviewCatalogueId(previewIdentity);
     setMovieTorrentPreviewPosterUrl(
       cataloguePosterUrlsRef.current[String(movie.id)] || cataloguePosterSource(movie)
     );
@@ -2690,7 +2691,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         }));
         setSelectedMovieTorrentQualityByGroup({ [selectedGroup.key]: torrentResultKey(selectedGroup.variants[0]) });
         setMovieTorrentPreviewGroup(selectedGroup);
-        setMovieTorrentPreviewCatalogueId(catalogueMovieIdentity(movie, movieCatalogue?.catalogue));
+        setMovieTorrentPreviewCatalogueId(previewIdentity);
         if (!/^(popular|trending|latest)-(bollywood|hollywood)$/.test(String(movieCatalogue?.catalogue || ''))) {
           startPosterBackgroundSearch(selectedGroup.variants);
         }
@@ -2872,7 +2873,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         }));
         setSelectedMovieTorrentQualityByGroup({ [group.key]: torrentResultKey(group.variants[0]) });
         setMovieTorrentPreviewGroup(group);
-        setMovieTorrentPreviewCatalogueId(catalogueMovieIdentity(movie, movieCatalogue?.catalogue));
+        setMovieTorrentPreviewCatalogueId(previewIdentity);
         setMovieTorrentPickerGroups(null);
       }
     } catch (error: any) {
