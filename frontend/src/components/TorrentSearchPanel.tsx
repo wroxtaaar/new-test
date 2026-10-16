@@ -3418,7 +3418,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // typed. Merge their per-title metadata from the persistent VPS JSON rather
   // than relying only on a single broad TMDB search for the original query.
   useEffect(() => {
-    if (!posterFirstPageReady) return;
+    // Synopsis/IMDb are cheap cached reads: load them with the initial cards, not after posters.
     const pageStart = (franchiseGridPage - 1) * franchiseGridPageSize;
     const visibleGroups = groupedResults.slice(pageStart, pageStart + franchiseGridPageSize);
     const titles = Array.from(new Set(visibleGroups
@@ -3451,12 +3451,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [groupedResults, posterFirstPageReady, franchiseGridPage]);
+  }, [groupedResults, franchiseGridPage]);
 
   // Search TMDB by show name for episode-shaped torrent titles. A broad search for
   // the episode name (e.g. "Escape Plan") cannot resolve "The Rookie" or "NCIS: New Orleans".
   useEffect(() => {
-    if (!posterFirstPageReady) return;
+    // Synopsis/IMDb are cheap cached reads: load them with the initial cards, not after posters.
     const pageStart = (franchiseGridPage - 1) * franchiseGridPageSize;
     const visibleGroups = groupedResults.slice(pageStart, pageStart + franchiseGridPageSize);
     const discoveredSeriesTitles = Array.from(new Set(visibleGroups
@@ -3492,7 +3492,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     });
 
     return () => controller.abort();
-  }, [groupedResults, posterFirstPageReady, franchiseGridPage]);
+  }, [groupedResults, franchiseGridPage]);
 
   // Staged loading: every new result set starts with low-bandwidth thumbnails.
   // High-quality upgrades remain paused until the card metadata/ratings/availability
@@ -3582,11 +3582,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       const start = (franchiseGridPage - 1) * franchiseGridPageSize;
       const pageMovies = visibleMovieCatalogueItems.slice(start, start + franchiseGridPageSize);
       const pageGroups = groupedResults.slice(start, start + franchiseGridPageSize);
+      // Prefilled catalogues: streaming info is optional and must not delay the HQ posters.
       const ottSettled = activeFranchiseSearchMode
-        ? pageGroups.every(group => {
-            const state = searchAvailabilityByGroup[group.key];
-            return state != null && state.status !== 'loading';
-          })
+        ? true
         : pageMovies.every(movie => {
             const status = ottAvailability[String(movie.id)]?.status;
             return status != null && status !== 'loading';
@@ -3625,7 +3623,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
   useEffect(() => {
-    if (!posterFirstPageReady) return;
+    // Synopsis/IMDb are cheap cached reads: load them with the initial cards, not after posters.
     const visibleStart = (franchiseGridPage - 1) * franchiseGridPageSize;
     const visibleGroupTitles = new Set(groupedResults
       .slice(visibleStart, visibleStart + franchiseGridPageSize)
@@ -3738,7 +3736,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }).finally(() => {
       imdbInFlightRef.current = Math.max(0, imdbInFlightRef.current - 1);
     });
-  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick, franchiseGridPage, posterFirstPageReady]);
+  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick, franchiseGridPage]);
 
   const clearTmdbCacheAndReload = async () => {
     const currentCatalogue = movieCatalogue;
