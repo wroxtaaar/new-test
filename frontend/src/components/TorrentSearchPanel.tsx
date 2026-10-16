@@ -1973,9 +1973,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       .filter(item => Number.isInteger(item.id) && item.id > 0);
     if (!items.length) return;
 
-    prefetchNexStreamEpisodeMetadata(items, (id, status) => {
-      setNexStreamEpisodePrefetchStatus(previous => ({ ...previous, [String(id)]: status }));
-    });
+    // Episode metadata is only fetched when the user opens a series card; prefetching
+    // here competed with the initial cards and posters for the page.
+    return;
   }, [
     showDcWebSeries,
     showMarvelWebSeries,
@@ -2371,6 +2371,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           await new Promise<void>(resolve => window.setTimeout(resolve, 80));
         }
         if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
+        // Prefilled catalogue pages (Marvel/DC/Classics) never run live provider lookups.
+        // Saved streaming info is hydrated per page by the page-scoped effect, after the
+        // initial cards are ready; torrent/NexStream info loads only when a card is clicked.
+        if (searchMode) return;
         {
         // Process every catalogue group so saved enrichment is available even when the
         // UI reorders results by quality/seeds. Only live lookups remain capped below.
