@@ -44,7 +44,7 @@ def collect():
 # deliberately year-scoped to avoid matching a different film with the same name.
 TITLE_FALLBACKS = {
     ("avp alien vs predator", "2004"): ["Alien vs Predator", "Alien vs. Predator"],
-    ("ultimate avengers 2", "2006"): ["Ultimate Avengers 2: Rise of the Panther", "Ultimate Avengers 2"],
+    ("ultimate avengers 2", "2006"): ["Ultimate Avengers 2: Rise of the Panther", "Ultimate Avengers II", "Ultimate Avengers 2"],
     ("thunderbolts a k a the new avengers", "2025"): ["Thunderbolts", "The New Avengers"],
     ("batman the dark knight rises", "2012"): ["The Dark Knight Rises"],
     ("interstellar imax", "2014"): ["Interstellar"],
@@ -55,6 +55,9 @@ TITLE_FALLBACKS = {
     ("wandavision s01ep01 02 1080p dual audio", "2021"): ["WandaVision"],
     ("wandavision s01ep07 1080p dual audio", "2021"): ["WandaVision"],
     ("loki season 1 s01", "2021"): ["Loki"],
+    ("wandavision s01ep01 02 1080p dual udio", "2021"): ["WandaVision"],
+    ("wandavision s01ep07 1080p dual udio", "2021"): ["WandaVision"],
+    ("2 like stars on earth", "2007"): ["Taare Zameen Par", "Like Stars on Earth"],
     ("dilwale dulhania le jayenge hindi movie sub ita", "1995"): ["Dilwale Dulhania Le Jayenge"],
     ("pany lust stories 3", "2026"): ["Lust Stories 3"],
     ("dhurandhar the revenge raw amp undekha", "2026"): ["Dhurandhar: The Revenge", "Dhurandhar The Revenge"],
