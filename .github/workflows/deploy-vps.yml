@@ -1,4 +1,4 @@
-name: Deploy Home to Oracle VPS
+name: Deploy new-test to Oracle VPS
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: home-vps-main
+  group: new-test-vps-main
   cancel-in-progress: true
 
 jobs:
@@ -56,14 +56,14 @@ jobs:
           ssh -p "$VPS_SSH_PORT" "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
           set -e
 
-          APP_DIR="$HOME/home"
-          IMAGE="home"
-          CONTAINER="home"
-          PREVIOUS="home-previous"
+          APP_DIR="$HOME/new-test"
+          IMAGE="new-test"
+          CONTAINER="new-test"
+          PREVIOUS="new-test-previous"
 
           cd "$APP_DIR"
 
-          echo "Updating Home repository..."
+          echo "Updating new-test repository..."
           git fetch origin main
           git reset --hard origin/main
 
@@ -84,7 +84,7 @@ jobs:
           fi
 
           echo "Starting new container..."
-          DATA_DIR="$HOME/home-data"
+          DATA_DIR="$HOME/new-test-data"
           mkdir -p "$DATA_DIR"
           if ! docker run -d \
             --name "$CONTAINER" \
