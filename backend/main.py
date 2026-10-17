@@ -9481,6 +9481,119 @@ async def _apply_movie_release_eligibility(payload: dict[str, Any], *, enabled: 
     return result
 
 
+def _cache_only_regional_movie_catalogue(catalogue_key: str, page: int) -> dict[str, Any] | None:
+    """Build a regional movie page from shipped snapshots when live TMDB is disabled."""
+    page_size = 18
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows_by_identity: dict[str, dict[str, Any]] = {}
+    prebuilt_paths = (
+        REGIONAL_MOVIE_PREBUILT_CACHE_PATH,
+        _CACHE_SEED_DIR / "runtime" / "regional_movie_prebuilt_cache.json",
+    )
+    seen_paths: set[str] = set()
+    for path in prebuilt_paths:
+        identity = str(path)
+        if identity in seen_paths:
+            continue
+        seen_paths.add(identity)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Could not read regional movie snapshot %s: %s", path, exc)
+            continue
+        movies = payload.get("movies") if isinstance(payload, dict) else None
+        if not isinstance(movies, dict):
+            continue
+        for entry in movies.values():
+            if not isinstance(entry, dict) or catalogue_key not in (entry.get("catalogues") or []):
+                continue
+            movie = entry.get("movie")
+            if not isinstance(movie, dict):
+                continue
+            row = dict(movie)
+            release_date = str(row.get("releaseDate") or row.get("release_date") or "").strip()
+            if release_date and not _tmdb_release_date_is_released(release_date[:10], today):
+                continue
+            row.setdefault("tmdbId", row.get("id"))
+            row.setdefault("source", "Bundled TMDB cache")
+            movie_id = str(row.get("tmdbId") or row.get("id") or "").strip()
+            title_key = re.sub(r"[^a-z0-9]+", "", str(row.get("title") or "").casefold())
+            key = movie_id or (title_key + "|" + str(row.get("year") or ""))
+            if key.strip("|"):
+                rows_by_identity.setdefault(key, row)
+
+    if not rows_by_identity and catalogue_key == "latest-hollywood":
+        seed_path = _CACHE_SEED_DIR / "latest_hollywood_catalogue.json"
+        try:
+            payload = json.loads(seed_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            payload = {}
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Could not read Hollywood latest snapshot %s: %s", seed_path, exc)
+            payload = {}
+        for source_row in payload.get("results", []) if isinstance(payload, dict) else []:
+            if not isinstance(source_row, dict):
+                continue
+            row = dict(source_row)
+            row["title"] = str(
+                row.get("catalogueTitle") or row.get("mediaTitle") or row.get("title") or ""
+            ).strip()
+            if not row["title"]:
+                continue
+            release_date = str(row.get("releaseDate") or row.get("release_date") or "").strip()
+            if release_date and not _tmdb_release_date_is_released(release_date[:10], today):
+                continue
+            key = str(row.get("tmdbId") or "").strip() or (
+                re.sub(r"[^a-z0-9]+", "", row["title"].casefold())
+                + "|" + str(row.get("year") or "")
+            )
+            if not row.get("id"):
+                row["id"] = row.get("tmdbId") or key
+            row.setdefault("source", "Bundled Hollywood latest cache")
+            rows_by_identity.setdefault(key, row)
+
+    if not rows_by_identity:
+        return None
+
+    rows = sorted(
+        rows_by_identity.values(),
+        key=lambda row: (
+            str(row.get("releaseDate") or row.get("release_date") or ""),
+            re.sub(r"[^a-z0-9]+", "", str(row.get("title") or "").casefold()),
+        ),
+        reverse=True,
+    )
+    total_results = len(rows)
+    total_pages = max(1, (total_results + page_size - 1) // page_size)
+    start = (page - 1) * page_size
+    return {
+        "catalogue": catalogue_key,
+        "releasedOnly": True,
+        "provider": "Bundled TMDB cache",
+        "page": page,
+        "totalPages": total_pages,
+        "totalResults": total_results,
+        "pageSize": page_size,
+        "results": rows[start:start + page_size],
+        "releaseEligibility": "streaming-in-india-or-30-days",
+        "attribution": "This product uses the TMDB API but is not endorsed or certified by TMDB.",
+    }
+
+
+def _regional_movie_cache_page_is_usable(payload: dict[str, Any], page: int) -> bool:
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return False
+    try:
+        total_results = int(payload.get("totalResults") or 0)
+        total_pages = int(payload.get("totalPages") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return bool(results)
+    return bool(results) or total_results == 0 or page > total_pages
+
+
 async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: int) -> dict[str, Any]:
     """Build stable 18-item display pages from eligible regional movie candidates."""
     page_size = 18
@@ -9621,17 +9734,43 @@ async def api_tmdb_movie_catalogue(
         if eligible_cached and (
             not is_trending or time.monotonic() - eligible_cached[0] < 900
         ):
-            _record_cache_event("movie_catalogue", "eligible_memory_hit")
-            return eligible_cached[1]
+            cached_payload = eligible_cached[1]
+            if _regional_movie_cache_page_is_usable(cached_payload, page):
+                _record_cache_event("movie_catalogue", "eligible_memory_hit")
+                return cached_payload
+            logger.warning(
+                "Ignoring empty regional movie cache page %s for %s with a positive total",
+                page, catalogue_key,
+            )
+            _tmdb_movie_catalogue_cache.pop(eligible_cache_key, None)
         if eligible_cached:
             _tmdb_movie_catalogue_cache.pop(eligible_cache_key, None)
         if not is_trending:
             eligible_persistent = _read_tmdb_persistent_cache(eligible_cache_key)
             if eligible_persistent:
-                _record_cache_event("movie_catalogue", "eligible_persistent_hit")
                 payload = eligible_persistent[1]
-                _tmdb_movie_catalogue_cache[eligible_cache_key] = (time.monotonic(), payload)
-                return payload
+                if _regional_movie_cache_page_is_usable(payload, page):
+                    _record_cache_event("movie_catalogue", "eligible_persistent_hit")
+                    _tmdb_movie_catalogue_cache[eligible_cache_key] = (time.monotonic(), payload)
+                    return payload
+                logger.warning(
+                    "Ignoring empty regional movie cache page %s for %s with a positive total",
+                    page, catalogue_key,
+                )
+        if CACHE_ONLY_MODE:
+            bundled_payload = _cache_only_regional_movie_catalogue(catalogue_key, page)
+            if bundled_payload is not None:
+                _record_cache_event("movie_catalogue", "bundled_cache_hit")
+                _tmdb_movie_catalogue_cache[eligible_cache_key] = (time.monotonic(), bundled_payload)
+                logger.info(
+                    "Serving bundled regional movie catalogue %s page %s (%s titles)",
+                    catalogue_key, page, bundled_payload["totalResults"],
+                )
+                return bundled_payload
+            raise HTTPException(
+                status_code=503,
+                detail=f"No saved movie catalogue is available for {catalogue_key}; configure TMDB credentials to load it.",
+            )
         _record_cache_event("movie_catalogue", "eligible_miss")
         payload = await _fetch_paginated_regional_movie_catalogue(catalogue_key, page)
         _tmdb_movie_catalogue_cache[eligible_cache_key] = (time.monotonic(), payload)
