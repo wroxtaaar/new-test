@@ -4699,6 +4699,102 @@ def _bundled_poster(clean_title: str, clean_year: str) -> str | None:
     return _BUNDLED_POSTERS.get(f"{_poster_normalize_title(clean_title)}|{clean_year}")
 
 
+async def _watchmode_poster_lookup(title: str, year: str = "") -> str | None:
+    """Use Watchmode only when configured; accept only exact title/year matches."""
+    if CACHE_ONLY_MODE or not WATCHMODE_API_KEYS:
+        return None
+    clean_title = str(title or "").strip()
+    clean_year = str(year or "").strip()
+    if not clean_title:
+        return None
+
+    for alias in _poster_title_aliases(clean_title, clean_year)[:3]:
+        try:
+            response = await _watchmode_get(
+                "/search/",
+                params={"search_field": "name", "search_value": alias, "types": "movie,tv"},
+                timeout=5.0,
+            )
+            if response is None or response.status_code != 200:
+                continue
+            data = response.json()
+            rows = data.get("title_results") if isinstance(data, dict) else []
+            matches = []
+            wanted = _poster_normalize_title(alias)
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or row.get("title") or "").strip()
+                candidate = _poster_normalize_title(name)
+                candidate_year = str(row.get("year") or "").strip()[:4]
+                if not name or candidate != wanted:
+                    continue
+                if clean_year and candidate_year != clean_year:
+                    continue
+                if not row.get("id"):
+                    continue
+                matches.append(row)
+            if not matches:
+                continue
+            details = await asyncio.gather(*[
+                _watchmode_get(f"/title/{int(row['id'])}/details/",
+                    timeout=5.0)
+                for row in matches[:2]
+            ])
+            for detail_response in details:
+                if detail_response is None or detail_response.status_code != 200:
+                    continue
+                detail = detail_response.json()
+                if not isinstance(detail, dict):
+                    continue
+                poster = str(detail.get("posterLarge") or detail.get("posterMedium") or detail.get("poster") or "").strip()
+                if poster.startswith("https://") or poster.startswith("http://"):
+                    return poster
+        except Exception as exc:
+            logger.debug("Watchmode poster lookup failed for '%s (%s)': %s", clean_title, clean_year, type(exc).__name__)
+    return None
+
+
+async def _omdb_poster_lookup(title: str, year: str = "") -> str | None:
+    """Use OMDb as a low-priority fallback with strict title/year validation."""
+    if CACHE_ONLY_MODE:
+        return None
+    keys = _split_env_keys(os.getenv("OMDB_API_KEYS", ""), os.getenv("OMDB_API_KEY", ""))
+    if not keys:
+        return None
+    clean_title = str(title or "").strip()
+    clean_year = str(year or "").strip()
+    if not clean_title:
+        return None
+
+    aliases = _poster_title_aliases(clean_title, clean_year)[:3]
+    async with _InstrumentedAsyncClient(timeout=httpx.Timeout(5.0, connect=3.0), follow_redirects=True) as client:
+        for alias in aliases:
+            for key in keys:
+                try:
+                    params = {"apikey": key, "t": alias, "type": "movie"}
+                    if clean_year:
+                        params["y"] = clean_year
+                    response = await client.get("https://www.omdbapi.com/", params=params)
+                    if response.status_code != 200:
+                        continue
+                    data = response.json()
+                    if not isinstance(data, dict) or str(data.get("Response") or "").lower() != "true":
+                        continue
+                    candidate = _poster_normalize_title(str(data.get("Title") or ""))
+                    candidate_year = str(data.get("Year") or "").strip()[:4]
+                    if candidate != _poster_normalize_title(alias):
+                        continue
+                    if clean_year and candidate_year != clean_year:
+                        continue
+                    poster = str(data.get("Poster") or "").strip()
+                    if poster.startswith(("https://", "http://")) and poster.casefold() != "n/a":
+                        return poster
+                except Exception as exc:
+                    logger.debug("OMDb poster lookup failed for '%s (%s)': %s", clean_title, clean_year, type(exc).__name__)
+    return None
+
+
 async def _poster_lookup_uncached(clean_title: str, clean_year: str, cache_key: str) -> str | None:
     # Check the bundled poster index before any network lookup, even when live
     # metadata is enabled. It contains verified TMDB poster URLs and avoids
@@ -4711,6 +4807,10 @@ async def _poster_lookup_uncached(clean_title: str, clean_year: str, cache_key: 
     # Prefer TMDB's year-filtered movie results to prevent a similarly named
     # title from supplying the wrong artwork. Other sources remain fallbacks.
     poster = None if CACHE_ONLY_MODE else await _tmdb_poster_lookup(clean_title, clean_year)
+    if not poster and not CACHE_ONLY_MODE:
+        poster = await _watchmode_poster_lookup(clean_title, clean_year)
+    if not poster and not CACHE_ONLY_MODE:
+        poster = await _omdb_poster_lookup(clean_title, clean_year)
 
     try:
         title_aliases = _poster_title_aliases(clean_title, clean_year)
