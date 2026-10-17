@@ -9893,6 +9893,76 @@ async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: in
     }
 
 
+async def _enrich_regional_movie_catalogue_metadata(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    rows = payload.get("results")
+    if not isinstance(rows, list):
+        return payload
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def enrich(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        try:
+            movie_id = int(row.get("tmdbId") or row.get("id") or 0)
+        except (TypeError, ValueError):
+            movie_id = 0
+        title = str(row.get("title") or "").strip()
+        try:
+            year = int(row.get("year") or 0)
+        except (TypeError, ValueError):
+            year = 0
+        if movie_id <= 0 or not title:
+            return
+
+        async with semaphore:
+            try:
+                rating = await _get_imdb_rating_record(
+                    title, year, "movie", movie_id,
+                )
+                row["imdbRatingStatus"] = str(rating.get("status") or "unavailable")
+                for source_field, target_field in (
+                    ("imdbRating", "imdbRating"),
+                    ("imdbVotes", "imdbVotes"),
+                    ("imdbId", "imdbId"),
+                    ("imdbUrl", "imdbUrl"),
+                    ("checkedAt", "imdbCheckedAt"),
+                ):
+                    value = rating.get(source_field)
+                    if value is not None:
+                        row[target_field] = value
+            except Exception:
+                logger.warning(
+                    "IMDb enrichment failed for regional movie %s (%s)",
+                    title, movie_id, exc_info=True,
+                )
+                row["imdbRatingStatus"] = "unavailable"
+
+            try:
+                row["ottAvailability"] = await api_tmdb_movie_ott_availability(
+                    movie_id, region="IN",
+                )
+            except Exception as exc:
+                logger.info(
+                    "OTT enrichment unavailable for regional movie %s (%s): %s",
+                    title, movie_id, type(exc).__name__,
+                )
+                row["ottAvailability"] = {
+                    "movieId": movie_id,
+                    "region": "IN",
+                    "status": "unavailable",
+                    "streamingProviders": [],
+                    "rentProviders": [],
+                    "buyProviders": [],
+                    "checkedAt": datetime.now(timezone.utc).isoformat(),
+                }
+
+    await asyncio.gather(*(enrich(row) for row in rows))
+    return payload
+
+
 @app.get("/api/movies/catalogue/{catalogue_key}")
 async def api_tmdb_movie_catalogue(
     catalogue_key: str,
@@ -9949,7 +10019,7 @@ async def api_tmdb_movie_catalogue(
                 _record_cache_event("movie_catalogue", "weekly_trending_archive_hit")
                 return archived_page
 
-        eligible_cache_key = (catalogue_key + "|eligible-v4", page)
+        eligible_cache_key = (catalogue_key + "|eligible-v5", page)
         eligible_cached = _tmdb_movie_catalogue_cache.get(eligible_cache_key)
         stale_payload = None
         if eligible_cached:
@@ -9993,6 +10063,9 @@ async def api_tmdb_movie_catalogue(
         if CACHE_ONLY_MODE:
             bundled_payload = _cache_only_regional_movie_catalogue(catalogue_key, page)
             if bundled_payload is not None:
+                bundled_payload = await _enrich_regional_movie_catalogue_metadata(
+                    bundled_payload,
+                )
                 _record_cache_event("movie_catalogue", "bundled_cache_hit")
                 _tmdb_movie_catalogue_cache[eligible_cache_key] = (time.monotonic(), bundled_payload)
                 logger.info(
@@ -10012,6 +10085,7 @@ async def api_tmdb_movie_catalogue(
         _record_cache_event("movie_catalogue", "eligible_miss")
         try:
             payload = await _fetch_paginated_regional_movie_catalogue(catalogue_key, page)
+            payload = await _enrich_regional_movie_catalogue_metadata(payload)
         except Exception as exc:
             if stale_payload is None:
                 raise
@@ -10541,7 +10615,7 @@ def _regional_movie_cache_refresh_delay() -> float:
     oldest_saved_at = time.time()
     for catalogue_key in REGIONAL_MOVIE_CATALOGUE_KEYS:
         for page in range(1, REGIONAL_MOVIE_PREWARM_PAGES + 1):
-            cached = _read_tmdb_persistent_cache((catalogue_key + "|eligible-v4", page))
+            cached = _read_tmdb_persistent_cache((catalogue_key + "|eligible-v5", page))
             if not cached or not _regional_movie_cache_page_is_usable(cached[1], page):
                 return 0
             oldest_saved_at = min(oldest_saved_at, cached[0])

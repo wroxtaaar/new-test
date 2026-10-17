@@ -96,7 +96,11 @@ export interface MovieCatalogueItem {
   trendingWeek?: string;
   trendingRank?: number;
   trendingWeeks?: string[];
+  imdbRatingStatus?: ImdbRatingResult['status'];
+  imdbRating?: number | null;
+  imdbVotes?: string | null;
   imdbId?: string | null;
+  imdbCheckedAt?: number | string | null;
   verified?: boolean;
   tmdbUrl?: string;
   imdbUrl?: string;

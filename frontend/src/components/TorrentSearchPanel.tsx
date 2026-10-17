@@ -58,6 +58,22 @@ function imdbFallbackForCatalogueMovie(movie: { title?: string; year?: number | 
   return undefined;
 }
 
+function imdbRatingForCatalogueMovie(movie: MovieCatalogueItem): ImdbRatingResult | undefined {
+  if (movie.imdbRatingStatus !== 'found' && movie.imdbRatingStatus !== 'not_found') {
+    return undefined;
+  }
+  return {
+    title: movie.title,
+    year: movie.year,
+    mediaType: 'movie',
+    status: movie.imdbRatingStatus,
+    imdbRating: movie.imdbRating,
+    imdbVotes: movie.imdbVotes,
+    imdbId: movie.imdbId,
+    imdbUrl: movie.imdbUrl,
+  };
+}
+
 function cataloguePosterOverride(movie: { title?: string; year?: number | string | null; posterUrl?: string | null }): string {
   return isTheCrow2024(movie) ? CROW_2024_POSTER_URL : String(movie.posterUrl || '').trim();
 }
@@ -1042,6 +1058,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const NEXSTREAM_SEARCH_CACHE_KEY = 'home_nexstream_search_v1';
   const NEXSTREAM_RESOLVE_CACHE_KEY = 'home_nexstream_resolve_v1';
   const NEXSTREAM_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+  const NEXSTREAM_RESOLVE_CACHE_TTL_MS = 4 * 60 * 1000;
 
   const persistMovieTorrentCache = () => {
     try {
@@ -1052,7 +1069,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     } catch { /* Storage can be unavailable or full; in-memory caching still works. */ }
   };
 
-  const readLocalCache = <T,>(key: string, cacheKey: string): T | null => {
+  const readLocalCache = <T,>(
+    key: string,
+    cacheKey: string,
+    ttlMs = NEXSTREAM_CACHE_TTL_MS,
+  ): T | null => {
     try {
       const parsed = JSON.parse(localStorage.getItem(key) || '{}') as
         | Record<string, { value: T; savedAt: number }>
@@ -1067,7 +1088,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         return null;
       }
       const entry = parsed[cacheKey];
-      if (entry && Date.now() - entry.savedAt < NEXSTREAM_CACHE_TTL_MS) return entry.value;
+      if (entry && Date.now() - entry.savedAt < ttlMs) return entry.value;
     } catch {}
     return null;
   };
@@ -2176,7 +2197,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     setNexStreamError('');
     try {
       const resolveCacheKey = item.type + ':' + item.id + ':' + String(season ?? '') + ':' + String(episode ?? '');
-      const cachedResolve = readLocalCache<{ url: string; name: string }>(NEXSTREAM_RESOLVE_CACHE_KEY, resolveCacheKey);
+      const cachedResolve = readLocalCache<{ url: string; name: string }>(
+        NEXSTREAM_RESOLVE_CACHE_KEY,
+        resolveCacheKey,
+        NEXSTREAM_RESOLVE_CACHE_TTL_MS,
+      );
       let source: { url: string; name?: string } | undefined;
       if (cachedResolve && /^https:\/\//i.test(cachedResolve.url)) {
         source = cachedResolve;
@@ -3944,8 +3969,17 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const visibleSearchMetadata = searchMetadata.filter(item =>
       visibleGroupTitles.has(normalizeSavedOttTitle(item.title))
     );
+    const visibleCatalogueItems = visibleMovieCatalogueItems.slice(
+      (franchiseGridPage - 1) * franchiseGridPageSize,
+      franchiseGridPage * franchiseGridPageSize,
+    );
+    const cachedCatalogueRatingKeys = new Set(
+      visibleCatalogueItems
+        .filter(item => item.imdbRatingStatus === 'found' || item.imdbRatingStatus === 'not_found')
+        .map(item => imdbRatingKey(item.title, item.year)),
+    );
     const candidates = [
-      ...visibleMovieCatalogueItems.slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize).flatMap(item => {
+      ...visibleCatalogueItems.flatMap(item => {
         const candidate = {
           title: String(item.title || '').trim(),
           year: item.year,
@@ -3984,6 +4018,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     for (const item of candidates) {
       const key = imdbRatingKey(item.title, item.year, item.mediaType);
       const cachedRating = imdbRatingsByKey[key];
+      if (cachedCatalogueRatingKeys.has(key)) {
+        imdbRatingRequestedRef.current.add(key);
+        continue;
+      }
       if (cachedRating && ['found', 'not_found'].includes(cachedRating.status)) {
         imdbRatingRequestedRef.current.add(key);
         continue;
@@ -4646,6 +4684,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               const isPunisherSpecial = /punisher.*one last kill|one last kill.*punisher/i.test(String(movie.title || ''));
               const movieImdb = imdbRatingsByKey[imdbRatingKey(movie.title, movie.year)] ||
                 (isPunisherSpecial ? imdbRatingsByKey[imdbRatingKey(movie.title, movie.year, 'tv')] : undefined) ||
+                imdbRatingForCatalogueMovie(movie) ||
                 imdbFallbackForCatalogueMovie(movie);
               const movieTitleHref = imdbTitleLink(movieImdb, movie.title, movie.year);
 
