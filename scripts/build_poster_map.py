@@ -74,17 +74,31 @@ def main():
         return item, resolve(args.api, *item)
 
     done = missing = failed = 0
+    missing_items = []
+    failed_items = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for (title, year), url in pool.map(work, todo):
             if url:
                 existing[(norm(title), year)] = [title, year, url]
                 done += 1
+                print(f"[FOUND] {title} ({year}): {url}", flush=True)
             elif url is None:
                 failed += 1
+                failed_items.append((title, year))
+                print(f"[ERROR] {title} ({year}): resolver request failed after retries; will retry next run", flush=True)
             else:
                 missing += 1
+                missing_items.append((title, year))
+                print(f"[NO POSTER] {title} ({year}): resolver returned no URL", flush=True)
     MAP.write_text(json.dumps(sorted(existing.values()), separators=(",", ":")), encoding="utf-8")
     print(f"resolved {done}, no poster found {missing}, failed (re-run) {failed}; total in map {len(existing)}")
+    report = ROOT / "poster_map_failures.txt"
+    lines = ["NO POSTER FOUND"]
+    lines.extend(f"{title}\t{year}" for title, year in missing_items)
+    lines.extend(["", "REQUEST ERRORS (safe to retry)"])
+    lines.extend(f"{title}\t{year}" for title, year in failed_items)
+    report.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+    print(f"wrote failure report {report}")
     print(f"wrote {MAP} ({MAP.stat().st_size // 1024} KB)")
 
 
