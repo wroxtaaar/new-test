@@ -51,6 +51,16 @@ TITLE_FALLBACKS = {
     ("the nightmare before christmas 3d", "1993"): ["The Nightmare Before Christmas"],
     ("coraline e la porta magica", "2009"): ["Coraline"],
     ("jawan extended cut", "2023"): ["Jawan"],
+    ("wandavision season 1 s01", "2021"): ["WandaVision"],
+    ("wandavision s01ep01 02 1080p dual audio", "2021"): ["WandaVision"],
+    ("wandavision s01ep07 1080p dual audio", "2021"): ["WandaVision"],
+    ("loki season 1 s01", "2021"): ["Loki"],
+    ("dilwale dulhania le jayenge hindi movie sub ita", "1995"): ["Dilwale Dulhania Le Jayenge"],
+    ("pany lust stories 3", "2026"): ["Lust Stories 3"],
+    ("dhurandhar the revenge raw amp undekha", "2026"): ["Dhurandhar: The Revenge", "Dhurandhar The Revenge"],
+    ("dhurandhar the revenge raw and undekha", "2026"): ["Dhurandhar: The Revenge", "Dhurandhar The Revenge"],
+    ("aphics dhurandhar the revenge", "2026"): ["Dhurandhar: The Revenge", "Dhurandhar The Revenge"],
+    ("ftware ikka", "2026"): ["Ikka"],
 }
 
 
