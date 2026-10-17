@@ -1031,6 +1031,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [movieTorrentPreviewCatalogueId, setMovieTorrentPreviewCatalogueId] = useState<string | null>(null);
   const catalogueMovieIdentity = (movie: MovieCatalogueItem, catalogueKey?: string | null) =>
     [String(catalogueKey || 'catalogue'), String(movie.id), normalizeGroupTitle(movie.title), String(movie.year || '')].join('|');
+  const [pendingPosterAction, setPendingPosterAction] = useState<
+    | { kind: 'catalogue'; movie: MovieCatalogueItem; catalogue: string; page: number }
+    | { kind: 'search'; groupKey: string; page: number }
+    | null
+  >(null);
   // Preserve the exact poster URL from the catalogue card the user clicked.
   // The selected inline card must keep using that same source, even while the
   // catalogue list re-renders or torrent metadata is substituted.
@@ -1142,8 +1147,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const franchisePageGenerationRef = useRef(0);
   const franchiseLoadedPagesRef = useRef(new Map<CachedFranchiseSearchMode, Set<number>>());
   const [franchiseGridPage, setFranchiseGridPage] = useState(1);
-  // While Get cards are mounting and their low-resolution posters settle, queue
-  // the explicit Prepare click without starting torrent/cache/network work.
+  // Hold explicit Prepare clicks until the visible catalogue posters settle.
   const prepareBuildPendingRef = useRef(false);
   const previousPosterPageRef = useRef(1);
   const [posterFirstPageReady, setPosterFirstPageReady] = useState(false);
@@ -3924,6 +3928,37 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
 
   useEffect(() => {
+    if (!pendingPosterAction) return;
+    if (pendingPosterAction.kind === 'catalogue') {
+      if (
+        !movieCatalogue ||
+        movieCatalogue.catalogue !== pendingPosterAction.catalogue ||
+        movieCatalogue.page !== pendingPosterAction.page
+      ) {
+        setPendingPosterAction(null);
+        prepareClickIntentRef.current = false;
+        prepareTraceIdRef.current = null;
+        return;
+      }
+    } else if (
+      franchiseGridPage !== pendingPosterAction.page ||
+      !groupedResults.some(group => group.key === pendingPosterAction.groupKey)
+    ) {
+      setPendingPosterAction(null);
+      return;
+    }
+    if (!posterFirstPageReady) return;
+
+    const action = pendingPosterAction;
+    setPendingPosterAction(null);
+    if (action.kind === 'catalogue') {
+      void searchMovieTorrents(action.movie);
+    } else {
+      setExpandedSearchGroupKey(action.groupKey);
+    }
+  }, [pendingPosterAction, posterFirstPageReady, movieCatalogue, groupedResults, franchiseGridPage]);
+
+  useEffect(() => {
     if (!movieCatalogue?.results?.length) return;
     queueOttLookups(movieCatalogue.results.slice(0, franchiseGridPageSize));
   }, [movieCatalogue?.results]);
@@ -4680,6 +4715,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               </div>
             </div>
           )}
+          {pendingPosterAction && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-400">
+              Loading the visible posters before opening this card…
+            </div>
+          )}
           {movieTorrentSearchError && (
             <div className={'flex items-start justify-between gap-3 rounded-xl border px-3 py-3 text-xs ' + (movieTorrentSearchError.startsWith('Coming soon on OTT') ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100' : 'border-amber-500/30 bg-amber-500/10 text-amber-200')}>
               <span>{movieTorrentSearchError}</span>
@@ -4843,7 +4883,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie), 'w185')}
                   posterAlt={movie.title}
                   onPosterClick={() => {
-                    if (isSearching || movieTorrentSearchLoading || prepareBuildPendingRef.current) return;
+                    if (isSearching || movieTorrentSearchLoading || pendingPosterAction || prepareBuildPendingRef.current) return;
                     const traceId = `prep-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
                     prepareClickIntentRef.current = true;
                     prepareTraceIdRef.current = traceId;
@@ -4854,6 +4894,16 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       year: movie.year || null,
                       at: new Date().toISOString(),
                     }));
+                    const isHollywoodCatalogue = /^(popular|trending|latest)-hollywood$/.test(movieCatalogue.catalogue);
+                    if (!isHollywoodCatalogue && !posterFirstPageReadyRef.current) {
+                      setPendingPosterAction({
+                        kind: 'catalogue',
+                        movie,
+                        catalogue: movieCatalogue.catalogue,
+                        page: movieCatalogue.page,
+                      });
+                      return;
+                    }
                     void searchMovieTorrents(movie);
                   }}
                   onPosterLoad={event => {
@@ -4995,6 +5045,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           </div>
           {!isSearching && renderFranchisePagination(Math.max(groupedResults.length, catalogueExpectedTitles))}
 
+          {pendingPosterAction?.kind === 'search' && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-400">
+              Loading the visible posters before opening this card…
+            </div>
+          )}
 
           {activeTopSection === 'classics' && classicsContentTab !== 'movies' ? (
             <section className="space-y-3">
@@ -5357,7 +5412,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     }
                     posterSrc={lowQualityPosterUrl(sharedPosterUrl)}
                     posterAlt={mediaDisplayTitle}
-                    onPosterClick={() => setExpandedSearchGroupKey(group.key)}
+                    onPosterClick={() => {
+                      if (pendingPosterAction) return;
+                      if (!posterFirstPageReadyRef.current) {
+                        setPendingPosterAction({
+                          kind: 'search',
+                          groupKey: group.key,
+                          page: franchiseGridPage,
+                        });
+                        return;
+                      }
+                      setExpandedSearchGroupKey(group.key);
+                    }}
                     onPosterLoad={event => {
                       const key = posterKeyFor(posterResult);
                       searchPosterUrlsRef.current[key] = event.currentTarget.currentSrc || event.currentTarget.src;
