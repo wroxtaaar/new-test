@@ -3397,8 +3397,122 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         }
         return next;
       });
-    }).catch(() => {
-      // Saved provider hydration is best-effort; keep existing card data intact.
+      const groupsNeedingLookup = pageGroups.filter(group => {
+        const titleKey = normalizeSavedOttTitle(episodeSeriesTitle(group.title) || group.title);
+        const entry = savedByTitle.get(titleKey) || savedByTitle.get(normalizeSavedOttTitle(group.title));
+        const hasSavedProviders = entry && [
+          'streamingProviders',
+          'rentProviders',
+          'buyProviders',
+        ].some(field => {
+          const availability = entry.ottAvailability && typeof entry.ottAvailability === 'object'
+            ? entry.ottAvailability
+            : entry;
+          return Array.isArray(availability[field]) && availability[field].length > 0;
+        });
+        const hasTmdbId = group.variants.some(variant => {
+          const id = Number((variant as TorrentSearchResult & { tmdbId?: number | string }).tmdbId);
+          return Number.isInteger(id) && id > 0;
+        });
+        return !hasSavedProviders && hasTmdbId;
+      });
+
+      setSearchAvailabilityByGroup(previous => {
+        const next = { ...previous };
+        for (const group of groupsNeedingLookup) {
+          if ((next[group.key]?.providers.length || 0) === 0) {
+            next[group.key] = { status: 'loading', query: group.title, providers: [] };
+          }
+        }
+        return next;
+      });
+
+      let nextGroupIndex = 0;
+      const lookupWorker = async () => {
+        while (!controller.signal.aborted) {
+          const group = groupsNeedingLookup[nextGroupIndex++];
+          if (!group) return;
+          const variantWithId = group.variants.find(variant => {
+            const id = Number((variant as TorrentSearchResult & { tmdbId?: number | string }).tmdbId);
+            return Number.isInteger(id) && id > 0;
+          });
+          if (!variantWithId) continue;
+          const tmdbId = Number((variantWithId as TorrentSearchResult & { tmdbId?: number | string }).tmdbId);
+          try {
+            const availability = await api.getMovieOttAvailability(tmdbId, 'IN', controller.signal);
+            if (controller.signal.aborted) return;
+            const region = String(availability.region || 'IN');
+            const providers = uniqueOttProviders([
+              ...normalizeSavedOttProviders(availability.streamingProviders, 'streaming', region),
+              ...normalizeSavedOttProviders(availability.rentProviders, 'rent', region),
+              ...normalizeSavedOttProviders(availability.buyProviders, 'buy', region),
+            ].map(provider => ({
+              name: provider.name,
+              region: provider.region,
+              type: provider.type,
+              webUrl: provider.webUrl,
+            })));
+            const title = group.title.replace(/\s*\(?(?:19|20)\d{2}\)?\s*$/, '').trim();
+            setSearchAvailabilityByGroup(previous => {
+              const existing = previous[group.key];
+              if ((existing?.providers.length || 0) > providers.length) return previous;
+              return {
+                ...previous,
+                [group.key]: {
+                  status: providers.length ? 'ready' : 'not_confirmed',
+                  query: title,
+                  title,
+                  year: group.year,
+                  providers,
+                  matches: providers.length ? [{
+                    id: String(tmdbId),
+                    tmdbId,
+                    title,
+                    year: group.year,
+                    type: 'movie',
+                    status: 'ready',
+                    providers,
+                  }] : [],
+                  message: providers.length ? undefined : 'No streaming providers reported.',
+                },
+              };
+            });
+          } catch (error) {
+            if (controller.signal.aborted) return;
+            setSearchAvailabilityByGroup(previous => {
+              const existing = previous[group.key];
+              if ((existing?.providers.length || 0) > 0) return previous;
+              return {
+                ...previous,
+                [group.key]: {
+                  status: 'unavailable',
+                  query: group.title,
+                  providers: [],
+                  message: error instanceof Error ? error.message : 'Streaming availability could not be checked.',
+                },
+              };
+            });
+          }
+        }
+      };
+      void Promise.all(
+        Array.from({ length: Math.min(3, groupsNeedingLookup.length) }, () => lookupWorker()),
+      );
+    }).catch(error => {
+      if (controller.signal.aborted) return;
+      setSearchAvailabilityByGroup(previous => {
+        const next = { ...previous };
+        for (const group of pageGroups) {
+          if ((next[group.key]?.providers.length || 0) > 0) continue;
+          next[group.key] = {
+            status: 'unavailable',
+            query: group.title,
+            providers: [],
+            message: error instanceof Error ? error.message : 'Saved streaming information could not be loaded.',
+          };
+        }
+        return next;
+      });
     });
     return () => controller.abort();
   }, [activeFranchiseSearchMode, franchiseGridPage, groupedResults]);
