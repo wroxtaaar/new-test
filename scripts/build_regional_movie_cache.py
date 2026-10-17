@@ -5,7 +5,7 @@ Each movie/series catalogue is filled independently to 50 unique eligible entrie
 when the API can supply them. Titles may intentionally occur in multiple catalogues.
 A failed page does not abort other catalogues, and prior good snapshots are retained.
 """
-import json, os, re, time, urllib.parse, urllib.request
+import json, os, re, sys, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -137,8 +137,10 @@ def main():
                 if cat == "latest-bollywood":
                     pages = verified_bollywood_latest_pages(pages)
                 print(json.dumps({"event": "catalogue_preserved", "catalogue": cat, "movies": sum(len(p.get("results", [])) for p in pages)}), flush=True)
-            else:
+            elif not pages:
                 print(json.dumps({"event": "catalogue_incomplete", "catalogue": cat, "movies": count, "target": TARGET_PER_CATALOGUE}), flush=True)
+            else:
+                print(json.dumps({"event": "catalogue_partial_preserved", "catalogue": cat, "pages": len(pages), "movies": count}), flush=True)
 
         cache["catalogues"][cat] = {
             "builtAt": datetime.now(timezone.utc).isoformat(),
@@ -302,7 +304,9 @@ def main():
     cache["torrentMovieCount"] = sum(bool((x.get("torrentDetails") or {}).get("results")) for x in movies.values())
     cache["failedCatalogues"] = failed_catalogues
     atomic_json(CACHE, cache)
-    print(json.dumps({"event": "complete", "status": cache["status"], "catalogues": {k: v.get("movieCount", 0) for k, v in cache["catalogues"].items()}, "movieCount": cache["movieCount"], "torrentMovieCount": cache["torrentMovieCount"], "file": str(CACHE)}), flush=True)
+    print(json.dumps({"event": "complete", "status": cache["status"], "failedCatalogues": failed_catalogues, "failedTvCatalogues": failed_tv_catalogues, "catalogues": {k: v.get("movieCount", 0) for k, v in cache["catalogues"].items()}, "movieCount": cache["movieCount"], "torrentMovieCount": cache["torrentMovieCount"], "file": str(CACHE)}), flush=True)
+    if failed_catalogues or failed_tv_catalogues:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

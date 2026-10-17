@@ -3,7 +3,7 @@ name: Sync portable cache snapshots
 on:
   workflow_dispatch:
   # Bootstrap snapshots when this workflow is changed, then refresh from the VPS
-  # every six hours so ephemeral Render deployments keep receiving warm caches.
+  # every six hours; rebuild regional snapshots when they are stale (weekly).
   push:
     branches:
       - main
@@ -22,7 +22,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -40,6 +40,90 @@ jobs:
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$VPS_SSH_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Refresh stale regional catalogues on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_USER" || { echo "Missing VPS_USER"; exit 1; }
+          ssh -o BatchMode=yes -p "$VPS_SSH_PORT" "$VPS_USER@$VPS_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          APP_DIR="$HOME/new-test"
+          DATA_DIR="$HOME/new-test-data"
+
+          refresh_needed=$(python3 - "$DATA_DIR" <<'PY'
+          import json
+          import sys
+          import time
+          from pathlib import Path
+          from datetime import datetime
+
+          data_dir = Path(sys.argv[1])
+          catalogues = {
+              "regional_movie_prebuilt_cache.json": (
+                  "popular-bollywood", "trending-bollywood", "latest-bollywood",
+                  "popular-hollywood", "trending-hollywood", "latest-hollywood",
+              ),
+              "regional_tv_prebuilt_cache.json": (
+                  "indian-popular", "indian-trending", "indian-latest",
+                  "hollywood-popular", "hollywood-trending", "hollywood-latest",
+              ),
+          }
+
+          def is_stale(path, expected):
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+                  if not isinstance(payload, dict):
+                      return True
+                  built_at = datetime.fromisoformat(
+                      str(payload.get("builtAt") or "").replace("Z", "+00:00")
+                  ).timestamp()
+                  if time.time() - built_at >= 7 * 24 * 60 * 60:
+                      return True
+                  if payload.get("status") == "building":
+                      return True
+                  if payload.get("failedCatalogues"):
+                      return True
+                  entries = payload.get("catalogues")
+                  if not isinstance(entries, dict):
+                      return True
+                  for name in expected:
+                      entry = entries.get(name)
+                      pages = entry.get("pages") if isinstance(entry, dict) else None
+                      if not isinstance(pages, list) or not pages:
+                          return True
+                      if not any(
+                          isinstance(page, dict)
+                          and isinstance(page.get("results"), list)
+                          and page["results"]
+                          for page in pages
+                      ):
+                          return True
+                  return False
+              except (OSError, ValueError, TypeError, OverflowError):
+                  return True
+
+          stale = any(
+              is_stale(data_dir / filename, expected)
+              for filename, expected in catalogues.items()
+          )
+          print("yes" if stale else "no")
+          PY
+          )
+
+          if [ "$refresh_needed" = "yes" ]; then
+            echo "Regional movie or TV snapshots are missing, stale, or incomplete; rebuilding."
+            cd "$APP_DIR"
+            HOME_DATA_DIR="$DATA_DIR" \
+              HOME_API_BASE="http://127.0.0.1:10000" \
+              python3 scripts/build_regional_movie_cache.py
+          else
+            echo "Regional movie and TV snapshots are current; skipping rebuild."
+          fi
+          REMOTE
 
       - name: Snapshot VPS caches into the repository
         env:
