@@ -488,7 +488,8 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                     data-movie-poster-stage="true"
                     src={posterSrc}
                     alt={posterAlt}
-                    loading="lazy"
+                    loading="eager"
+                    fetchPriority="high"
                     className="w-full h-full object-cover cursor-pointer"
                     onClick={onPosterClick}
                     onLoad={event => {

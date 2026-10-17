@@ -631,6 +631,37 @@ function normalizeSavedOttProviders(
   });
 }
 
+function savedOttAvailabilityForMovie(movie: MovieCatalogueItem): MovieOttAvailability | undefined {
+  const saved = movie.ottAvailability;
+  if (!saved || typeof saved !== 'object') return undefined;
+  const region = String(saved.region || 'IN');
+  const streamingProviders = normalizeSavedOttProviders(saved.streamingProviders, 'streaming', region);
+  const rentProviders = normalizeSavedOttProviders(saved.rentProviders, 'rent', region);
+  const buyProviders = normalizeSavedOttProviders(saved.buyProviders, 'buy', region);
+  const savedStatus = String(saved.status || '').toLowerCase();
+  return {
+    movieId: Number(movie.tmdbId || movie.id),
+    region,
+    status: (
+      savedStatus === 'streaming' ||
+      savedStatus === 'streaming_info_found' ||
+      streamingProviders.length > 0
+    ) ? 'streaming'
+      : (savedStatus === 'rent_buy' || rentProviders.length > 0 || buyProviders.length > 0) ? 'rent_buy'
+      : savedStatus === 'digital_scheduled' ? 'digital_scheduled'
+      : savedStatus === 'digital_release_known' ? 'digital_release_known'
+      : 'not_confirmed',
+    streamingProviders,
+    rentProviders,
+    buyProviders,
+    providerLink: String(saved.providerLink || ''),
+    checkedAt: String(saved.checkedAt || ''),
+    source: String(saved.source || 'saved-catalogue'),
+    providerAttribution: String(saved.providerAttribution || ''),
+    attribution: String(saved.attribution || ''),
+  };
+}
+
 function torrentMediaIdentity(result: TorrentSearchResult): { title: string; normalized: string; year: string } {
   const source = String(result.mediaTitle || result.title || '').trim();
   const embeddedYears: Array<{ year: string; index: number }> = [];
@@ -1181,33 +1212,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // the same title is still in flight.
       let state = existing && !isRetry ? existing : undefined;
       const saved = movie.ottAvailability;
-      if (!state && saved && typeof saved === 'object') {
-        const savedStatus = String(saved.status || '').toLowerCase();
-        const region = String(saved.region || 'IN');
-        const streamingProviders = normalizeSavedOttProviders(saved.streamingProviders, 'streaming', region);
-        const rentProviders = normalizeSavedOttProviders(saved.rentProviders, 'rent', region);
-        const buyProviders = normalizeSavedOttProviders(saved.buyProviders, 'buy', region);
-        state = {
-          movieId: Number(movie.tmdbId || movie.id),
-          region,
-          status: (
-            savedStatus === 'streaming' ||
-            savedStatus === 'streaming_info_found' ||
-            streamingProviders.length > 0
-          ) ? 'streaming'
-            : (savedStatus === 'rent_buy' || rentProviders.length > 0 || buyProviders.length > 0) ? 'rent_buy'
-            : savedStatus === 'digital_scheduled' ? 'digital_scheduled'
-            : savedStatus === 'digital_release_known' ? 'digital_release_known'
-            : 'not_confirmed',
-          streamingProviders,
-          rentProviders,
-          buyProviders,
-          providerLink: String(saved.providerLink || ''),
-          checkedAt: String(saved.checkedAt || ''),
-          source: String(saved.source || 'saved-catalogue'),
-          providerAttribution: String(saved.providerAttribution || ''),
-          attribution: String(saved.attribution || ''),
-        };
+      if (!state) {
+        state = savedOttAvailabilityForMovie(movie);
+      }
+      if (state) {
         next[movieId] = state;
         changed = true;
       }
@@ -1240,6 +1248,14 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       setOttAvailability(next);
     }
     ottQueuePumpRef.current();
+  };
+
+  const ottAvailabilityForMovie = (movie: MovieCatalogueItem): MovieOttCardState | undefined => {
+    const current = ottAvailability[String(movie.id)];
+    if (!current || current.status === 'loading' || current.status === 'error') {
+      return savedOttAvailabilityForMovie(movie) || current;
+    }
+    return current;
   };
 
   // Initialize state used by visibleMovieCatalogueItems before evaluating its memo dependencies.
@@ -1294,12 +1310,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     // Apply the shared release-date comparator to every catalogue so the
     // ordering is consistent across Marvel/DC and the other movie sections.
     movies = [...movies].sort(compareReleaseDateDescending);
-    if (streamingOnly) movies = movies.filter(movie => ottAvailability[String(movie.id)]?.status === 'streaming');
+    if (streamingOnly) movies = movies.filter(movie => ottAvailabilityForMovie(movie)?.status === 'streaming');
     return movies;
   }, [movieCatalogue, streamingOnly, ottAvailability, isMarvelEnglishResults, showMarvelWebSeries, marvelFilmFilter, isDcLiveActionEnglishResults]);
 
   const ottPendingCount = movieCatalogue?.results.filter(movie => {
-    const status = ottAvailability[String(movie.id)]?.status;
+    const status = ottAvailabilityForMovie(movie)?.status;
     return !status || status === 'loading';
   }).length || 0;
 
@@ -3544,24 +3560,15 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const startedAt = Date.now();
     let settledSince: number | null = null;
 
-    // Keep every card on the low-resolution poster until the entire visible page
-    // has completed its metadata pass. This is page-level staging, not per-card:
-    // one card must never jump to w780 while another card is still filling in.
+    // Keep every card on the low-resolution poster until the visible page has
+    // loaded its thumbnails; only then let the idle queue consider upgrades.
     if (!posterFirstPageReady) return;
 
     const checkPageDetails = () => {
       if (cancelled) return;
-      const start = (franchiseGridPage - 1) * franchiseGridPageSize;
-      const pageMovies = visibleMovieCatalogueItems.slice(start, start + franchiseGridPageSize);
-      const pageGroups = groupedResults.slice(start, start + franchiseGridPageSize);
-      // Prefilled catalogues: streaming info is optional and must not delay the HQ posters.
-      const ottSettled = activeFranchiseSearchMode
-        ? true
-        : pageMovies.every(movie => {
-            const status = ottAvailability[String(movie.id)]?.status;
-            return status != null && status !== 'loading';
-          });
-      const metadataSettled = ottSettled && imdbInFlightRef.current === 0;
+      // OTT availability is useful card content, but it must not hold back idle
+      // poster upgrades while the provider service is slow.
+      const metadataSettled = activeFranchiseSearchMode || imdbInFlightRef.current === 0;
       const now = Date.now();
 
       if (metadataSettled) {
@@ -3576,8 +3583,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         settledSince = null;
       }
 
-      // Providers/IMDb can be unavailable upstream. Do not leave thumbnails
-      // permanently low-res: after 25 seconds, release the page as a whole.
+      // IMDb can be unavailable upstream. Do not leave thumbnails permanently
+      // low-res: after 25 seconds, release the page as a whole.
       if (now - startedAt >= 25000) {
         setHighQualityPostersReady(true);
         return;
@@ -3590,7 +3597,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [posterFirstPageReady, movieCatalogue, visibleMovieCatalogueItems, ottAvailability, groupedResults, searchMetadata, imdbRatingsByKey, searchAvailabilityByGroup, activeFranchiseSearchMode, franchiseGridPage, imdbRetryTick]);
+  }, [posterFirstPageReady, activeFranchiseSearchMode]);
 
   // IMDb ratings are fetched independently after cards have rendered.
   // Movies use OMDb's movie type; show metadata uses OMDb's series type.
@@ -4326,7 +4333,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     posterSrc={posterSrc}
                     posterAlt={previewGroup.title}
                     providers={(() => {
-                      const availability = ottAvailability[String(movie.id)];
+                      const availability = ottAvailabilityForMovie(movie);
                       return availability && availability.status !== 'loading' && availability.status !== 'error'
                         ? toCardProviders(uniqueOttProviders([
                             ...(availability.streamingProviders || []),
@@ -4343,12 +4350,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     }}
                     onPosterError={event => {
                       const image = event.currentTarget;
-                      const originalUrl = String(
+                      const originalUrl = lowQualityPosterUrl(String(
                         movieTorrentPreviewPosterUrl ||
                         cataloguePosterUrlsRef.current[String(movie.id)] ||
                         cataloguePosterSource(movie) ||
                         (isRegionalMoviePreview ? '' : previewGroup.posterResult?.posterUrl || '')
-                      ).trim();
+                      ).trim(), 'w185');
                       // The compact card retries the unmodified poster when the resized
                       // URL fails. Do the same here so both cards show the same artwork.
                       if (originalUrl && image.dataset.originalFallbackTried !== 'true') {
@@ -4419,7 +4426,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 );
               }
 
-              const ott = ottAvailability[String(movie.id)];
+              const ott = ottAvailabilityForMovie(movie);
               const ottProviders = ott && ott.status !== 'loading' && ott.status !== 'error'
                 ? toCardProviders(uniqueOttProviders([
                     ...(ott.streamingProviders || []),
@@ -4436,7 +4443,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   imdb={movieImdb}
                   tmdbRating={movie.rating}
                   overview={movie.overview || 'No synopsis available from TMDB for this title.'}
-                  posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie))}
+                  posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie), 'w185')}
                   posterAlt={movie.title}
                   onPosterClick={() => {
                     if (isSearching || movieTorrentSearchLoading || prepareBuildPendingRef.current) return;
@@ -4460,7 +4467,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   }}
                   onPosterError={event => {
                     const image = event.currentTarget;
-                    const originalUrl = cataloguePosterSource(movie);
+                    const originalUrl = lowQualityPosterUrl(cataloguePosterSource(movie), 'w185');
                     // If the optimized w500 URL fails, retry the catalogue's
                     // original poster URL once before showing the placeholder.
                     if (originalUrl && image.dataset.originalFallbackTried !== 'true' && image.src !== new URL(originalUrl, window.location.origin).toString()) {
