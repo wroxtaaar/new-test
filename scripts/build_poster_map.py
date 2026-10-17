@@ -97,7 +97,7 @@ def main():
     lines.extend(f"{title}\t{year}" for title, year in missing_items)
     lines.extend(["", "REQUEST ERRORS (safe to retry)"])
     lines.extend(f"{title}\t{year}" for title, year in failed_items)
-    report.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote failure report {report}")
     print(f"wrote {MAP} ({MAP.stat().st_size // 1024} KB)")
 
