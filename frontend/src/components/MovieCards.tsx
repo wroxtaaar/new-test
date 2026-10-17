@@ -8,7 +8,7 @@ import { MovieCatalogueCard } from './MovieCatalogueCard.tsx';
  * Classics, Bollywood, Hollywood, TMDB discovery and normal search results):
  *
  *   1. MovieCompactCard  - poster, IMDb rating, title, synopsis, streaming services.
- *      Clicking the poster opens the prepare card.
+ *      Clicking the card opens its Prepare view.
  *   2. MoviePrepareCard  - torrent details: quality picker, seeders, source,
  *      Direct Stream + Prepare, and Play / Download / Copy once prepared.
  *
@@ -27,12 +27,28 @@ export interface MovieCardProvider {
 
 /**
  * Staged poster loading shared by every movie card: cards first show the lightweight
- * (w185) thumbnail. The large (w780) version is requested only after card metadata,
- * ratings and availability have settled, keeping initial catalogue loading responsive.
+ * (w185) thumbnail. The large (w780) version waits for page details and browser idle,
+ * then loads at low priority so navigation and initial card content stay responsive.
  */
 let highQualityPostersReady = false;
 const pendingHighQualityPosters = new Set<HTMLImageElement>();
+const upgradedHighQualityPosters = new Set<HTMLImageElement>();
 let highQualityUpgradeScheduled = false;
+let highQualityUpgradeInFlight = false;
+let highQualityUpgradeGeneration = 0;
+let highQualityIdleHandle: number | null = null;
+let highQualityFallbackTimer: number | null = null;
+let lastPosterUserActivity = Date.now();
+
+if (typeof document !== 'undefined') {
+  const notePosterUserActivity = () => {
+    lastPosterUserActivity = Date.now();
+  };
+  document.addEventListener('pointerdown', notePosterUserActivity, { passive: true });
+  document.addEventListener('keydown', notePosterUserActivity);
+  document.addEventListener('scroll', notePosterUserActivity, { passive: true });
+  document.addEventListener('touchstart', notePosterUserActivity, { passive: true });
+}
 
 function normalizeLowQualityPosterUrl(value: string): string {
   const url = String(value || '').trim();
@@ -55,39 +71,93 @@ function normalizeLowQualityPosterUrl(value: string): string {
   }
 }
 
-function upgradeToHighQualityPoster(image: HTMLImageElement): void {
-  if (!image.isConnected || image.dataset.highQualityTried) return;
+function cancelHighQualityUpgradeSchedule(): void {
+  const idleWindow = window as Window & {
+    cancelIdleCallback?: (handle: number) => void;
+  };
+  if (highQualityIdleHandle !== null) {
+    idleWindow.cancelIdleCallback?.(highQualityIdleHandle);
+    highQualityIdleHandle = null;
+  }
+  if (highQualityFallbackTimer !== null) {
+    window.clearTimeout(highQualityFallbackTimer);
+    highQualityFallbackTimer = null;
+  }
+  highQualityUpgradeScheduled = false;
+}
+
+function restoreLowQualityPoster(image: HTMLImageElement): void {
+  if (!image.isConnected || image.dataset.highQualityTried !== 'true') return;
+  const lowQualityUrl = normalizeLowQualityPosterUrl(image.currentSrc || image.src);
+  image.dataset.highQualityTried = '';
+  image.dataset.highQualityFailed = '';
+  image.dataset.posterQuality = 'low-retrying';
+  image.fetchPriority = 'high';
+  image.loading = 'eager';
+  if (lowQualityUrl && image.src !== lowQualityUrl) image.src = lowQualityUrl;
+}
+
+function upgradeToHighQualityPoster(image: HTMLImageElement): boolean {
+  if (
+    !image.isConnected ||
+    image.dataset.highQualityTried === 'true' ||
+    image.dataset.highQualityFailed === 'true'
+  ) return false;
   const current = image.src || image.currentSrc;
   try {
     const parsed = new URL(current, window.location.origin);
     if (parsed.pathname.replace(/\/+$/, '') === '/api/poster') {
-      // Keep the upgrade on the same-origin proxy so the browser never has to
-      // request a third-party image host directly.
+      parsed.searchParams.set('size', 'w780');
+      const highQualityUrl = parsed.toString();
+      if (highQualityUrl === current) return false;
+      image.fetchPriority = 'low';
+      image.loading = 'lazy';
       image.dataset.highQualityTried = 'true';
       image.dataset.posterQuality = 'high-pending';
-      parsed.searchParams.set('size', 'w780');
-      image.src = parsed.toString();
-      return;
+      image.src = highQualityUrl;
+      upgradedHighQualityPosters.add(image);
+      highQualityUpgradeInFlight = true;
+      return true;
     }
   } catch {
     // Fall through to the direct TMDB URL handling below.
   }
-  if (!current.includes('image.tmdb.org') || !/\/t\/p\/w185\//.test(current)) return;
+  if (!current.includes('image.tmdb.org') || !/\/t\/p\/w185\//.test(current)) return false;
+  image.fetchPriority = 'low';
+  image.loading = 'lazy';
   image.dataset.highQualityTried = 'true';
   image.dataset.posterQuality = 'high-pending';
   image.src = current.replace('/t/p/w185/', '/t/p/w780/');
+  upgradedHighQualityPosters.add(image);
+  highQualityUpgradeInFlight = true;
+  return true;
 }
 
 function scheduleHighQualityPosterUpgrades(): void {
-  if (!highQualityPostersReady || highQualityUpgradeScheduled || pendingHighQualityPosters.size === 0) return;
+  if (
+    !highQualityPostersReady ||
+    highQualityUpgradeScheduled ||
+    highQualityUpgradeInFlight ||
+    pendingHighQualityPosters.size === 0
+  ) return;
   highQualityUpgradeScheduled = true;
+  const generation = highQualityUpgradeGeneration;
 
   const run = () => {
+    highQualityIdleHandle = null;
+    highQualityFallbackTimer = null;
     highQualityUpgradeScheduled = false;
-    if (!highQualityPostersReady || pendingHighQualityPosters.size === 0) return;
+    if (
+      generation !== highQualityUpgradeGeneration ||
+      !highQualityPostersReady ||
+      highQualityUpgradeInFlight ||
+      pendingHighQualityPosters.size === 0
+    ) return;
+    if (Date.now() - lastPosterUserActivity < 1800) {
+      scheduleHighQualityPosterUpgrades();
+      return;
+    }
 
-    // Upgrade posters already on screen first. Off-screen cards remain queued until
-    // visible or until the browser has idle time, avoiding a burst of large downloads.
     const images = [...pendingHighQualityPosters].filter(image => image.isConnected);
     images.sort((a, b) => {
       const visible = (image: HTMLImageElement) => {
@@ -97,30 +167,30 @@ function scheduleHighQualityPosterUpgrades(): void {
       return Number(visible(b)) - Number(visible(a));
     });
 
-    if (images.length === 0) {
-      // Keep queued images registered: a section may still be mounting or swapping
-      // cards. A later poster load or ready-state transition will schedule them again.
-      return;
-    }
-
-    // Upgrade a small batch each turn rather than serializing every poster. The old
-    // one-at-a-time 180ms queue made deep catalogues take many seconds to sharpen.
-    // Visible posters sort first; browser image caching prevents repeat transfers.
-    const batch = images.slice(0, 4);
-    for (const image of batch) {
+    for (const image of images) {
       pendingHighQualityPosters.delete(image);
-      upgradeToHighQualityPoster(image);
+      if (upgradeToHighQualityPoster(image)) return;
     }
-
-    window.setTimeout(scheduleHighQualityPosterUpgrades, 50);
   };
 
-  const idleWindow = window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number };
-  if (idleWindow.requestIdleCallback) idleWindow.requestIdleCallback(run, { timeout: 1200 });
-  else window.setTimeout(run, 250);
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+  };
+  if (idleWindow.requestIdleCallback) {
+    highQualityIdleHandle = idleWindow.requestIdleCallback(run, { timeout: 5000 });
+  } else {
+    highQualityFallbackTimer = window.setTimeout(run, 2500);
+  }
 }
 
 export function requestHighQualityPoster(image: HTMLImageElement): void {
+  if (image.dataset.highQualityTried === 'true') {
+    if (upgradedHighQualityPosters.has(image)) {
+      highQualityUpgradeInFlight = false;
+    }
+    scheduleHighQualityPosterUpgrades();
+    return;
+  }
   if (image.dataset.posterQuality === 'low-loaded' || image.complete) {
     pendingHighQualityPosters.add(image);
     scheduleHighQualityPosterUpgrades();
@@ -129,14 +199,23 @@ export function requestHighQualityPoster(image: HTMLImageElement): void {
   }
 }
 
-/** Call with false while a page is still loading info, true once it has settled. */
+/** Pause and reset upgrades on navigation; resume only after the page details settle. */
 export function setHighQualityPostersReady(ready: boolean): void {
+  if (!ready) {
+    highQualityUpgradeGeneration += 1;
+    cancelHighQualityUpgradeSchedule();
+    highQualityUpgradeInFlight = false;
+    pendingHighQualityPosters.clear();
+    for (const image of upgradedHighQualityPosters) {
+      restoreLowQualityPoster(image);
+    }
+    upgradedHighQualityPosters.clear();
+    for (const image of document.querySelectorAll<HTMLImageElement>('img[data-movie-poster-stage="true"]')) {
+      image.dataset.highQualityFailed = '';
+    }
+  }
   highQualityPostersReady = ready;
   if (!ready) {
-    // Drop images from a page the user already left.
-    for (const image of [...pendingHighQualityPosters]) {
-      if (!image.isConnected) pendingHighQualityPosters.delete(image);
-    }
     return;
   }
   scheduleHighQualityPosterUpgrades();
@@ -199,7 +278,14 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
   const showImdb = hasImdbRating(imdb);
   const showTmdb = !showImdb && tmdbRating != null && tmdbRating > 0;
   return (
-    <MovieCatalogueCard className="transition hover:border-slate-700 hover:bg-slate-900/95">
+    <MovieCatalogueCard
+      onClick={event => {
+        const target = event.target;
+        if (target instanceof Element && target.closest('a, button, input, select, textarea, [role="button"]')) return;
+        onPosterClick();
+      }}
+      className="cursor-pointer transition hover:border-slate-700 hover:bg-slate-900/95"
+    >
       <div data-movie-poster-slot="true" data-poster-waiting={!posterSrc ? "true" : "false"} className="relative aspect-[2/3] w-full overflow-hidden bg-slate-950">
         {posterSrc ? (
           <>
@@ -210,8 +296,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
               loading="eager"
               fetchPriority="high"
               decoding="async"
-              className="h-full w-full object-cover cursor-pointer"
-              onClick={onPosterClick}
+              className="h-full w-full object-cover"
               onLoad={event => {
                       const image = event.currentTarget;
                       image.dataset.posterQuality = image.dataset.highQualityTried === 'true' ? 'high-loaded' : 'low-loaded';
@@ -222,6 +307,9 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
                       const image = event.currentTarget;
                       const previousSrc = image.src;
                       if (image.dataset.highQualityTried === 'true') {
+                        requestHighQualityPoster(image);
+                        image.dataset.highQualityTried = '';
+                        image.dataset.highQualityFailed = 'true';
                         try {
                           const parsed = new URL(image.src || image.currentSrc, window.location.origin);
                           if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {
@@ -243,7 +331,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
                       image.dataset.posterQuality = image.src !== previousSrc ? 'low-retrying' : 'low-failed';
                     }}
             />
-            <div data-poster-placeholder="true" onClick={onPosterClick} className="hidden cursor-pointer absolute inset-0 flex items-center justify-center text-slate-600">
+            <div data-poster-placeholder="true" className="hidden absolute inset-0 flex items-center justify-center text-slate-600">
               <Film className="h-8 w-8" />
             </div>
           </>
@@ -413,6 +501,9 @@ export const MoviePrepareCard: React.FC<MoviePrepareCardProps> = ({
                       const image = event.currentTarget;
                       const previousSrc = image.src;
                       if (image.dataset.highQualityTried === 'true') {
+                        requestHighQualityPoster(image);
+                        image.dataset.highQualityTried = '';
+                        image.dataset.highQualityFailed = 'true';
                         try {
                           const parsed = new URL(image.src || image.currentSrc, window.location.origin);
                           if (parsed.pathname.replace(/\/+$/, '') === '/api/poster' && parsed.searchParams.get('size') === 'w780') {

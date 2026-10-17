@@ -65,6 +65,8 @@ function cataloguePosterOverride(movie: { title?: string; year?: number | string
 function cataloguePosterSource(movie: { title?: string; year?: number | string | null; posterUrl?: string | null }): string {
   const known = cataloguePosterOverride(movie);
   if (known) return known;
+  const directPosterUrl = String(movie.posterUrl || '').trim();
+  if (/^https?:\/\//i.test(directPosterUrl)) return directPosterUrl;
   const params = new URLSearchParams({ title: String(movie.title || '').trim() });
   if (movie.year) params.set('year', String(movie.year));
   params.set('size', 'w185');
@@ -2092,6 +2094,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
   const runSearch = async (event?: React.FormEvent, searchOverride?: string, searchMode?: 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'classics') => {
     event?.preventDefault();
+    setHighQualityPostersReady(false);
     setFranchiseGridPage(1);
     setActiveFranchiseSearchMode(searchMode || null);
     franchisePageRequestRef.current?.abort();
@@ -2360,20 +2363,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       setSearched(true);
       if (searchMode) setIsSearching(false);
 
-      // Keep OTT discovery off the initial render path. The card grid must first give
-      // every poster on the current page a chance to load at low resolution.
       void (async () => {
-        while (
-          !posterFirstPageReadyRef.current &&
-          generation === searchGenerationRef.current &&
-          !controller.signal.aborted
-        ) {
-          await new Promise<void>(resolve => window.setTimeout(resolve, 80));
-        }
         if (generation !== searchGenerationRef.current || controller.signal.aborted) return;
         // Prefilled catalogue pages (Marvel/DC/Classics) never run live provider lookups.
-        // Saved streaming info is hydrated per page by the page-scoped effect, after the
-        // initial cards are ready; torrent/NexStream info loads only when a card is clicked.
+        // Saved streaming info is hydrated independently; torrent/NexStream info loads
+        // only when a card is clicked.
         if (searchMode) return;
         {
         // Process every catalogue group so saved enrichment is available even when the
@@ -2628,25 +2622,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const traceId = prepareTraceIdRef.current;
     const previewIdentity = catalogueMovieIdentity(movie, movieCatalogue?.catalogue);
     prepareBuildPendingRef.current = true;
-
-    // The Get-card grid owns the first render pass. Do not start Prepare-card
-    // state changes, cache reads, torrent lookups, or poster work until every
-    // visible Get-card poster has loaded/failed (with the existing bounded fallback).
-    // This leaves the clicked movie as a Get card while the rest of the page finishes.
-    const getCardStageStartedAt = Date.now();
-    while (!posterFirstPageReadyRef.current) {
-      if (!prepareClickIntentRef.current || prepareTraceIdRef.current !== traceId) {
-        prepareBuildPendingRef.current = false;
-        return;
-      }
-      if (Date.now() - getCardStageStartedAt >= 9000) break;
-      await new Promise<void>(resolve => window.setTimeout(resolve, 50));
-    }
-    if (!prepareClickIntentRef.current || prepareTraceIdRef.current !== traceId) {
-      prepareBuildPendingRef.current = false;
-      return;
-    }
-    prepareBuildPendingRef.current = false;
     prepareClickIntentRef.current = false;
 
     console.info('[PREPARE_TRACE]', JSON.stringify({
@@ -2677,6 +2652,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     setSearched(false);
     setQuery(titleQuery);
     setSelectedQualityByGroup({});
+    prepareBuildPendingRef.current = false;
 
     const cacheKey = normalizeGroupTitle(movie.title) + '|' + String(movie.year || '');
     const cachedDetails = movieTorrentDetailsCacheRef.current.get(cacheKey);
@@ -2730,40 +2706,65 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }
 
     try {
-      let data: TorrentSearchResult[] | null = null;
-      // Prefer the shared, precomputed VPS JSON cache. It is common to all
-      // devices and avoids re-running indexer searches for prebuilt titles.
-      try {
-        const params = new URLSearchParams({ title: movie.title, year: String(movie.year || '') });
-        console.info('[PREPARE_TRACE]', JSON.stringify({
-          event: 'prebuilt-request',
-          traceId,
-          title: movie.title,
-          year: movie.year || null,
-          at: new Date().toISOString(),
+      const embeddedMatches = [
+        ...(Array.isArray(movie.torrentMatches) ? movie.torrentMatches : []),
+        ...(movie.torrentMatch ? [movie.torrentMatch] : []),
+      ];
+      let data: TorrentSearchResult[] | null = embeddedMatches
+        .filter(match => Boolean(match && (match.magnetUrl || match.infoHash || match.infoUrl)))
+        .map((match, index): TorrentSearchResult => ({
+          guid: String(match.infoHash || match.magnetUrl || match.infoUrl || movie.title + '-' + index),
+          title: String(match.title || movie.title),
+          mediaTitle: movie.title,
+          size: Number(match.size) || 0,
+          seeders: Number(match.seeders) || 0,
+          leechers: Number(match.leechers) || 0,
+          indexer: match.indexer,
+          infoHash: match.infoHash,
+          magnetUrl: match.magnetUrl,
+          infoUrl: match.infoUrl,
+          sourceUrl: match.infoUrl,
+          year: movie.year,
+          posterUrl: movie.posterUrl,
+          quality: '',
         }));
-        const response = await fetch(API_BASE + '/api/regional-movies/prebuilt?' + params.toString(), {
-          signal: controller.signal,
-          credentials: 'include',
-          cache: 'no-store',
-          headers: {
-            'X-Prepare-Intent': 'explicit-card-click',
-            'X-Prepare-Trace': traceId,
-          },
-        });
-        console.info('[PREPARE_TRACE]', JSON.stringify({
-          event: 'prebuilt-response',
-          traceId,
-          status: response.status,
-          ok: response.ok,
-          at: new Date().toISOString(),
-        }));
-        if (response.ok) {
-          const cached = await response.json();
-          const rows = cached?.torrentDetails?.results;
-          if (cached?.status === 'ready' && Array.isArray(rows) && rows.length > 0) data = rows as TorrentSearchResult[];
-        }
-      } catch { /* The live search remains the fallback if the shared cache is unavailable. */ }
+      if (data.length === 0) data = null;
+
+      // Prefer the movie's bundled torrent matches; query the shared VPS snapshot
+      // only when this catalogue row does not already include a release.
+      if (!data) {
+        try {
+          const params = new URLSearchParams({ title: movie.title, year: String(movie.year || '') });
+          console.info('[PREPARE_TRACE]', JSON.stringify({
+            event: 'prebuilt-request',
+            traceId,
+            title: movie.title,
+            year: movie.year || null,
+            at: new Date().toISOString(),
+          }));
+          const response = await fetch(API_BASE + '/api/regional-movies/prebuilt?' + params.toString(), {
+            signal: controller.signal,
+            credentials: 'include',
+            cache: 'no-store',
+            headers: {
+              'X-Prepare-Intent': 'explicit-card-click',
+              'X-Prepare-Trace': traceId,
+            },
+          });
+          console.info('[PREPARE_TRACE]', JSON.stringify({
+            event: 'prebuilt-response',
+            traceId,
+            status: response.status,
+            ok: response.ok,
+            at: new Date().toISOString(),
+          }));
+          if (response.ok) {
+            const cached = await response.json();
+            const rows = cached?.torrentDetails?.results;
+            if (cached?.status === 'ready' && Array.isArray(rows) && rows.length > 0) data = rows as TorrentSearchResult[];
+          }
+        } catch { /* The bundled catalogue details remain the fallback. */ }
+      }
       if (generation !== movieTorrentSearchGenerationRef.current) return;
       // Prefilled catalogues are cache-only. A missing VPS/GitHub-seeded
       // cache entry must never trigger a live provider/indexer search, even
@@ -2811,36 +2812,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // title+year search yields nothing, retry the movie's plain title before
       // concluding that the provider has no releases.
       const titleOnlyQuery = String(movie.title || '').trim();
-      // If the shared regional cache has no entry, use any torrent matches
-      // already embedded in this catalogue item (Marvel/DC/other seeded
-      // catalogues). These are persisted catalogue data, not a live lookup.
-      if (!data || data.length === 0) {
-        const embeddedMatches = [
-          ...(Array.isArray(movie.torrentMatches) ? movie.torrentMatches : []),
-          ...(movie.torrentMatch ? [movie.torrentMatch] : []),
-        ];
-        if (embeddedMatches.length) {
-          data = embeddedMatches
-            .filter(match => Boolean(match && (match.magnetUrl || match.infoHash || match.infoUrl)))
-            .map((match, index): TorrentSearchResult => ({
-              guid: String(match.infoHash || match.magnetUrl || match.infoUrl || movie.title + '-' + index),
-              title: String(match.title || movie.title),
-              mediaTitle: movie.title,
-              size: Number(match.size) || 0,
-              seeders: Number(match.seeders) || 0,
-              leechers: Number(match.leechers) || 0,
-              indexer: match.indexer,
-              infoHash: match.infoHash,
-              magnetUrl: match.magnetUrl,
-              infoUrl: match.infoUrl,
-              sourceUrl: match.infoUrl,
-              year: movie.year,
-              posterUrl: movie.posterUrl,
-              quality: '',
-            }));
-        }
-      }
-
       // Do not retry a cache miss with a title-only live search. This UI is
       // deliberately cache-only; refreshes belong to the external cache builder.
 
@@ -3089,6 +3060,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     page = 1,
     onlyReleased = releasedOnly,
   ) => {
+    setHighQualityPostersReady(false);
     setFranchiseGridPage(1);
     setActiveFranchiseSearchMode(null);
     franchisePageRequestRef.current?.abort();
@@ -3237,6 +3209,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }
 
   function navigateFranchisePage(page: number): void {
+    setHighQualityPostersReady(false);
     setFranchiseGridPage(page);
     if (activeFranchiseSearchMode) void loadCachedFranchisePage(activeFranchiseSearchMode, page);
   }
@@ -3345,7 +3318,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   // The initial search only enriches page 1; without this page-scoped pass, later
   // pages render cards before their persisted OTT data is ever attached.
   useEffect(() => {
-    if (!activeFranchiseSearchMode || !posterFirstPageReady) return;
+    if (!activeFranchiseSearchMode) return;
     const start = (franchiseGridPage - 1) * franchiseGridPageSize;
     const pageGroups = groupedResults.slice(start, start + franchiseGridPageSize);
     if (!pageGroups.length) return;
@@ -3411,7 +3384,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // Saved provider hydration is best-effort; keep existing card data intact.
     });
     return () => controller.abort();
-  }, [activeFranchiseSearchMode, posterFirstPageReady, franchiseGridPage, groupedResults]);
+  }, [activeFranchiseSearchMode, franchiseGridPage, groupedResults]);
 
   // Search cards can come from the prebuilt Marvel/DC/Bollywood/Hollywood
   // catalogues and therefore aren't necessarily related to the text the user
@@ -3495,10 +3468,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   }, [groupedResults, franchiseGridPage]);
 
   // Staged loading: every new result set starts with low-bandwidth thumbnails.
-  // High-quality upgrades remain paused until the card metadata/ratings/availability
-  // queues have settled (the quiet effect below opens the high-quality stage).
-  // Page-by-page staging: whenever the visible page changes, its jobs jump the queue and
-  // the high-quality stage closes again until that page has no work left.
+  // High-quality upgrades remain paused until the visible page's initial details settle.
+  // Page-by-page staging restarts low-resolution posters before background upgrades.
   const currentPagePosterKeys = () => new Set(
     groupedResults
       .slice((franchiseGridPage - 1) * franchiseGridPageSize, franchiseGridPage * franchiseGridPageSize)
@@ -3551,10 +3522,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (settled || Date.now() - startedAt >= 8000) {
         posterFirstPageReadyRef.current = true;
         setPosterFirstPageReady(true);
-        if (movieCatalogue?.results?.length) {
-          const start = (franchiseGridPage - 1) * franchiseGridPageSize;
-          queueOttLookups(visibleMovieCatalogueItems.slice(start, start + franchiseGridPageSize));
-        }
         return;
       }
       posterCheckTimer = window.setTimeout(checkVisiblePosterLoads, 80);
@@ -3565,6 +3532,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (posterCheckTimer !== undefined) window.clearTimeout(posterCheckTimer);
     };
   }, [movieCatalogue, groupedResults, franchiseGridPage]);
+
+  useEffect(() => {
+    if (!movieCatalogue?.results?.length) return;
+    queueOttLookups(movieCatalogue.results.slice(0, franchiseGridPageSize));
+  }, [movieCatalogue?.results]);
 
   useEffect(() => {
     let timer: number | undefined;

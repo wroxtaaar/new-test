@@ -8,6 +8,7 @@ titles (all torrent rows of a title stay together), ready to be sent as-is.
 """
 import gzip, json, re, sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 SEED = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).parent / "cache-seed")
 PAGE_SIZE = 18
@@ -40,13 +41,61 @@ def group_key(item, index=0):
     return "__untitled_row_" + str(index)
 
 
+def load_poster_map():
+    path = SEED / "poster_map.json"
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError(f"Poster map must be a JSON list: {path}")
+    posters = {}
+    for row in payload:
+        if not isinstance(row, list) or len(row) != 3:
+            continue
+        title, year, url = (str(value or "").strip() for value in row)
+        if title and url.startswith(("https://", "http://")):
+            key = re.sub(r"[^a-z0-9]+", "", title.casefold()) + "|" + year
+            posters.setdefault(key, url)
+    return posters
+
+
+def apply_bundled_poster(row, posters):
+    current = str(row.get("posterUrl") or "").strip()
+    if current.startswith(("https://", "http://")):
+        return
+
+    title = ""
+    year = ""
+    try:
+        parts = urlsplit(current)
+        if parts.path.rstrip("/") == "/api/poster":
+            query = parse_qs(parts.query)
+            title = (query.get("title") or [""])[0].strip()
+            year = (query.get("year") or [""])[0].strip()
+    except ValueError:
+        return
+
+    if not title:
+        title = str(
+            row.get("catalogueTitle") or row.get("marvelCatalogueTitle")
+            or row.get("mediaTitle") or row.get("title") or ""
+        ).strip()
+        year = str(row.get("year") or "")
+    key = re.sub(r"[^a-z0-9]+", "", title.casefold()) + "|" + year
+    if poster := posters.get(key):
+        row["posterUrl"] = poster
+
+
 def main():
+    posters = load_poster_map()
     for key, name in SOURCES.items():
         path = SEED / name
         if not path.exists():
             continue
         payload = json.loads(path.read_text(encoding="utf-8"))
         rows = [r for r in payload.get("results", []) if isinstance(r, dict)]
+        for row in rows:
+            apply_bundled_poster(row, posters)
         groups = {}
         for index, row in enumerate(rows):
             groups.setdefault(group_key(row, index), []).append(row)
