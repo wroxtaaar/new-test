@@ -2126,7 +2126,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     setIsDcLiveActionEnglishResults(searchMode === 'dc-live-action');
     setShowMarvelWebSeries(false);
     setShowDcWebSeries(false);
-    const yearSortedFranchiseModes = new Set(['marvel', 'marvel-hindi', 'dc-live-action', 'dc-live-action-hindi', 'dc-animated']);
+    const chronologicalFranchiseModes = new Set(['marvel', 'marvel-hindi', 'dc-live-action', 'dc-live-action-hindi', 'dc-animated', 'classics']);
     setMovieTorrentSearchError('');
     setMovieTorrentPreviewCatalogueId(null);
     movieTorrentSearchControllerRef.current?.abort();
@@ -2340,18 +2340,15 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       // The backend owns low-result TV/season fallback. Keeping that logic
       // server-side avoids launching duplicate season searches from the browser.
 
-      // Cache JSON snapshots are kept newest-year-first, but normalize that order
-      // here too before publishing cards. This makes the cached Marvel/DC views
-      // deterministic even if an older persistent cache or API response is unsorted;
-      // the user never needs to press the Year sort control just to get the default order.
-      if (searchMode && yearSortedFranchiseModes.has(searchMode)) {
+      // Keep the cached franchise/favourites catalogues in full release-date
+      // order even if an older cache snapshot or API response is unsorted.
+      if (searchMode && chronologicalFranchiseModes.has(searchMode)) {
         data = [...data].sort((a, b) => {
+          const dateOrder = releaseDateSortValue(b) - releaseDateSortValue(a);
+          if (dateOrder !== 0) return dateOrder;
+
           const aIdentity = torrentMediaIdentity(a);
           const bIdentity = torrentMediaIdentity(b);
-          const aYear = Number.parseInt(aIdentity.year, 10) || 0;
-          const bYear = Number.parseInt(bIdentity.year, 10) || 0;
-          if (aYear !== bYear) return bYear - aYear;
-
           const titleOrder = aIdentity.normalized.localeCompare(
             bIdentity.normalized,
             undefined,
@@ -3320,6 +3317,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
 
     // Sort whole movie groups, never individual torrent variants.
     return [...groups].sort((a, b) => {
+      if (activeFranchiseSearchMode) {
+        const dateOrder = releaseDateSortValue(b.posterResult) - releaseDateSortValue(a.posterResult);
+        if (dateOrder !== 0) return dateOrder;
+      }
       const yearA = torrentGroupReleaseYear(a);
       const yearB = torrentGroupReleaseYear(b);
       if (!yearA && !yearB) return normalizeGroupTitle(a.title).localeCompare(normalizeGroupTitle(b.title), undefined, { numeric: true });
@@ -3328,7 +3329,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       if (yearA !== yearB) return yearB - yearA;
       return normalizeGroupTitle(a.title).localeCompare(normalizeGroupTitle(b.title), undefined, { numeric: true });
     });
-  }, [sortedResults, isMarvelEnglishResults, showMarvelWebSeries, marvelFilmFilter]);
+  }, [sortedResults, activeFranchiseSearchMode, isMarvelEnglishResults, showMarvelWebSeries, marvelFilmFilter]);
 
   // Every cached catalogue page needs its own saved streaming-provider hydration.
   // The initial search only enriches page 1; without this page-scoped pass, later

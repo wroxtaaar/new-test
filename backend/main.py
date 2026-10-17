@@ -3,7 +3,7 @@ from html import unescape
 import base64
 import contextvars
 import secrets
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from collections import deque
 import gzip
 import json
@@ -529,7 +529,12 @@ def _catalogue_group_key(item: dict[str, Any], index: int = 0) -> str:
     return "__untitled_row_" + str(index)
 
 
-def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) -> dict[str, Any]:
+def _page_catalogue_payload(
+    payload: dict[str, Any],
+    page: int,
+    page_size: int,
+    sort_by_release_date: bool = False,
+) -> dict[str, Any]:
     """Slice a catalogue by movie (all torrent rows of a title stay together)."""
     if page <= 0 or page_size <= 0:
         return payload
@@ -537,6 +542,28 @@ def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) 
     for index, row in enumerate(payload["results"]):
         groups.setdefault(_catalogue_group_key(row, index), []).append(row)
     keys = list(groups)
+    if sort_by_release_date:
+        def sort_key(key: str) -> tuple[int, str]:
+            rows = groups[key]
+            movie = next((row for row in rows if row.get("releaseDate") or row.get("release_date")), rows[0])
+            raw_date = str(movie.get("releaseDate") or movie.get("release_date") or "").strip()
+            try:
+                release_date = datetime.strptime(raw_date[:10], "%Y-%m-%d").date()
+            except (TypeError, ValueError):
+                year_match = re.search(r"\b((?:19|20)\d{2})\b", raw_date)
+                try:
+                    year = int(movie.get("year") or (year_match.group(1) if year_match else 0))
+                except (TypeError, ValueError):
+                    year = 0
+                release_date = date(year, 1, 1) if 1 <= year <= 9999 else date.min
+            title = str(
+                movie.get("catalogueTitle") or movie.get("marvelCatalogueTitle")
+                or movie.get("mediaTitle") or movie.get("title") or ""
+            )
+            normalized_title = re.sub(r"[^a-z0-9]+", "", title.casefold())
+            return -release_date.toordinal(), normalized_title
+
+        keys.sort(key=sort_key)
     total_pages = max(1, -(-len(keys) // page_size))
     start = (page - 1) * page_size
     rows = [row for key in keys[start:start + page_size] for row in groups[key]]
@@ -546,6 +573,12 @@ def _page_catalogue_payload(payload: dict[str, Any], page: int, page_size: int) 
 
 _PREBUILT_PAGE_SIZE = 18
 _PREBUILT_PAGE_MEMO: dict[str, bytes] = {}
+_DATE_SORTED_EXTRA_CATALOGUES = {
+    "dc-live-action",
+    "dc-live-action-hindi",
+    "dc-animated",
+    "classics",
+}
 
 
 def _prebuilt_catalogue_page(request: Request, key: str, page: int, page_size: int) -> Response | None:
@@ -9942,7 +9975,8 @@ async def api_extra_catalogue(catalogue_key: str, request: Request, page: int = 
             "completed": int(cached.get("titlesQueried") or 0), "total": int(cached.get("titlesQueried") or 0),
             "resultCount": int(cached.get("resultCount") or len(cached["results"])),
             "movieCount": int(cached.get("movieCount") or 0), "refreshing": False,
-            "results": cached["results"]}, page, page_size))
+            "results": cached["results"]}, page, page_size,
+            sort_by_release_date=catalogue_key in _DATE_SORTED_EXTRA_CATALOGUES))
     if catalogue_key == "classics" and cached:
         _schedule_classics_movie_ott_enrichment()
     await _ensure_extra_catalogue_refresh(catalogue_key)
@@ -9965,7 +9999,12 @@ async def api_extra_catalogue(catalogue_key: str, request: Request, page: int = 
                 request,
                 "extra:%s:%d:%d" % (catalogue_key, page, page_size),
                 _file_signature(_EXTRA_CATALOGUE_PATHS[catalogue_key]),
-                lambda: _page_catalogue_payload(response_payload, page, page_size),
+                lambda: _page_catalogue_payload(
+                    response_payload,
+                    page,
+                    page_size,
+                    sort_by_release_date=catalogue_key in _DATE_SORTED_EXTRA_CATALOGUES,
+                ),
             )
         return response_payload
     return {**state, "results": []}
@@ -10250,7 +10289,7 @@ async def api_marvel_catalogue(request: Request, page: int = Query(0, ge=0), pag
             "movieCount": int(cached.get("movieCount") or 0),
             "results": cached["results"],
             "refreshing": False,
-        }, page, page_size))
+        }, page, page_size, sort_by_release_date=True))
     if cached:
         # Keep the current cache available immediately while rebuilding it once
         # when its version predates the updated MCU film list.
@@ -10281,7 +10320,7 @@ async def api_marvel_catalogue(request: Request, page: int = Query(0, ge=0), pag
                 request,
                 "marvel-page:%d:%d" % (page, page_size),
                 _file_signature(MARVEL_CATALOGUE_PATH),
-                lambda: _page_catalogue_payload(response_payload, page, page_size),
+                lambda: _page_catalogue_payload(response_payload, page, page_size, sort_by_release_date=True),
             )
         return response_payload
 
@@ -15644,4 +15683,3 @@ async def search_episode_release(
         "results": results,
         "providers": sorted({item["provider"] for item in results if item["provider"]}),
     }
-

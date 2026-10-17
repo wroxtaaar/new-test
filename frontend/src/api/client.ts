@@ -15,6 +15,7 @@ export interface TorrentSearchResult {
   sourceUrl?: string;
   descriptorUrl?: string;
   year?: number | string | null;
+  releaseDate?: string;
   rating?: number | null;
   genres?: string[];
   posterUrl?: string;

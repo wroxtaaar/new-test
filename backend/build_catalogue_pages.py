@@ -7,6 +7,7 @@ once at build time: cache-seed/pages/<key>/<n>.json.gz holds each page of 18
 titles (all torrent rows of a title stay together), ready to be sent as-is.
 """
 import gzip, json, re, sys
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -19,6 +20,13 @@ SOURCES = {
     "dc-live-action-hindi": "dc_live_action_hindi_catalogue.json",
     "dc-animated": "dc_animated_catalogue.json",
     "classics": "classics_catalogue.json",
+}
+CHRONOLOGICAL_CATALOGUES = {
+    "marvel",
+    "dc-live-action",
+    "dc-live-action-hindi",
+    "dc-animated",
+    "classics",
 }
 
 
@@ -39,6 +47,25 @@ def group_key(item, index=0):
 
     # Never group every malformed row under the same empty-string key.
     return "__untitled_row_" + str(index)
+
+
+def group_sort_key(rows):
+    movie = next((row for row in rows if row.get("releaseDate") or row.get("release_date")), rows[0])
+    raw_date = str(movie.get("releaseDate") or movie.get("release_date") or "").strip()
+    try:
+        release_date = datetime.strptime(raw_date[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        year_match = re.search(r"\b((?:19|20)\d{2})\b", raw_date)
+        try:
+            year = int(movie.get("year") or (year_match.group(1) if year_match else 0))
+        except (TypeError, ValueError):
+            year = 0
+        release_date = date(year, 1, 1) if 1 <= year <= 9999 else date.min
+    title = str(
+        movie.get("catalogueTitle") or movie.get("marvelCatalogueTitle")
+        or movie.get("mediaTitle") or movie.get("title") or ""
+    )
+    return -release_date.toordinal(), re.sub(r"[^a-z0-9]+", "", title.casefold())
 
 
 def load_poster_map():
@@ -100,6 +127,8 @@ def main():
         for index, row in enumerate(rows):
             groups.setdefault(group_key(row, index), []).append(row)
         keys = list(groups)
+        if key in CHRONOLOGICAL_CATALOGUES:
+            keys.sort(key=lambda group: group_sort_key(groups[group]))
         total_pages = max(1, -(-len(keys) // PAGE_SIZE))
         out = SEED / "pages" / key
         out.mkdir(parents=True, exist_ok=True)
