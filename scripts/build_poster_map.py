@@ -40,7 +40,21 @@ def collect():
     return wanted
 
 
-def resolve(api, title, year):
+# Canonical title fallbacks for common release-name variants. Each fallback is
+# deliberately year-scoped to avoid matching a different film with the same name.
+TITLE_FALLBACKS = {
+    ("avp alien vs predator", "2004"): ["Alien vs Predator", "Alien vs. Predator"],
+    ("ultimate avengers 2", "2006"): ["Ultimate Avengers 2: Rise of the Panther", "Ultimate Avengers 2"],
+    ("thunderbolts a k a the new avengers", "2025"): ["Thunderbolts", "The New Avengers"],
+    ("batman the dark knight rises", "2012"): ["The Dark Knight Rises"],
+    ("interstellar imax", "2014"): ["Interstellar"],
+    ("the nightmare before christmas 3d", "1993"): ["The Nightmare Before Christmas"],
+    ("coraline e la porta magica", "2009"): ["Coraline"],
+    ("jawan extended cut", "2023"): ["Jawan"],
+}
+
+
+def resolve_one(api, title, year):
     url = api.rstrip("/") + "/api/poster/resolve?" + urllib.parse.urlencode({"title": title, "year": year})
     for attempt in range(3):
         try:
@@ -54,6 +68,20 @@ def resolve(api, title, year):
             pass
         time.sleep(1 + attempt)
     return None  # transient failure; retry on next run
+
+
+def resolve(api, title, year):
+    # First try the catalogue's exact title. Only if it has no result, try
+    # explicit canonical aliases for this exact title/year pair.
+    found = resolve_one(api, title, year)
+    if found is None or found:
+        return found
+    key = (re.sub(r"[^a-z0-9]+", " ", str(title or "").casefold()).strip(), str(year or "").strip())
+    for alias in TITLE_FALLBACKS.get(key, []):
+        found = resolve_one(api, alias, year)
+        if found is None or found:
+            return found
+    return ""
 
 
 def main():
