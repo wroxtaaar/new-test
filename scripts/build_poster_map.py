@@ -36,6 +36,7 @@ def collect():
             year = (q.get("year") or [""])[0].strip()
             if title:
                 wanted.setdefault((norm(title), year), (title, year))
+    print(f"Scanned catalogue JSON files under {SEED}; found {len(wanted)} unique poster title/year keys", flush=True)
     return wanted
 
 
