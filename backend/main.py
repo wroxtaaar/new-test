@@ -8447,6 +8447,31 @@ def _tmdb_release_date_is_released(value: Any, today: str) -> bool:
     return release_date <= cutoff_date
 
 
+_BOLLYWOOD_COMEDY_SPECIAL_TITLES = {
+    "madhurvirlicasualtea",
+    "maheepsinghfir",
+    "abijitgangulybaby",
+}
+_BOLLYWOOD_COMEDY_SPECIAL_DESCRIPTION = re.compile(
+    r"\bstand[\s-]?up(?:\s+comedy)?\s+(?:special|show|performance)\b"
+    r"|\b(?:\d+(?:st|nd|rd|th)?\s+)?(?:comedy|comic)\s+special\b"
+    r"|\blive\s+(?:comedy|stand[\s-]?up)\s+(?:special|show|performance)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_bollywood_comedy_special(row: dict[str, Any]) -> bool:
+    title = str(row.get("title") or row.get("name") or row.get("original_title") or "").strip()
+    title_key = re.sub(r"[^a-z0-9]+", "", title.casefold())
+    if title_key in _BOLLYWOOD_COMEDY_SPECIAL_TITLES:
+        return True
+    description = " ".join(
+        str(row.get(field) or "")
+        for field in ("overview", "tagline", "description")
+    )
+    return bool(_BOLLYWOOD_COMEDY_SPECIAL_DESCRIPTION.search(description))
+
+
 async def _tmdb_fetch_movie_catalogue(catalogue_key: str, page: int, released_only: bool = True) -> dict[str, Any]:
     today = datetime.now(timezone.utc).date().isoformat()
     params: dict[str, Any] = {
@@ -8600,6 +8625,8 @@ async def _tmdb_fetch_movie_catalogue(catalogue_key: str, page: int, released_on
             continue
         title = str(item.get("title") or item.get("original_title") or "").strip()
         if not title:
+            continue
+        if catalogue_key == "latest-bollywood" and _is_bollywood_comedy_special(item):
             continue
         release_date = str(item.get("release_date") or "").strip()
         if released_only and not _tmdb_release_date_is_released(release_date, today):
@@ -9686,6 +9713,8 @@ def _cache_only_regional_movie_catalogue(catalogue_key: str, page: int) -> dict[
             if not isinstance(movie, dict):
                 continue
             row = dict(movie)
+            if catalogue_key == "latest-bollywood" and _is_bollywood_comedy_special(row):
+                continue
             release_date = str(row.get("releaseDate") or row.get("release_date") or "").strip()
             if release_date and not _tmdb_release_date_is_released(release_date[:10], today):
                 continue
@@ -9778,7 +9807,12 @@ async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: in
     # most candidates. Scan up to 30 weekly-trending pages to fill each
     # 18-card regional page without borrowing popularity-ranked Discover rows.
     max_source_pages = 30
-    source_cache_prefix = catalogue_key + ("|trending-v4" if is_trending else "|released-v6")
+    source_cache_variant = (
+        "|trending-v4" if is_trending
+        else "|released-v7" if catalogue_key == "latest-bollywood"
+        else "|released-v6"
+    )
+    source_cache_prefix = catalogue_key + source_cache_variant
     seen_ids: set[str] = set()
     eligible_rows: list[dict[str, Any]] = []
     source_total_pages = max_source_pages
@@ -9815,6 +9849,8 @@ async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: in
         filtered_payload = await _apply_movie_release_eligibility(source_payload, enabled=True)
         for row in filtered_payload.get("results") or []:
             if not isinstance(row, dict):
+                continue
+            if catalogue_key == "latest-bollywood" and _is_bollywood_comedy_special(row):
                 continue
             title_key = re.sub(r"[^a-z0-9]+", "", str(row.get("title") or row.get("name") or "").casefold())
             # Filter known catalogue contamination before pagination, allowing
@@ -9913,7 +9949,7 @@ async def api_tmdb_movie_catalogue(
                 _record_cache_event("movie_catalogue", "weekly_trending_archive_hit")
                 return archived_page
 
-        eligible_cache_key = (catalogue_key + "|eligible-v3", page)
+        eligible_cache_key = (catalogue_key + "|eligible-v4", page)
         eligible_cached = _tmdb_movie_catalogue_cache.get(eligible_cache_key)
         stale_payload = None
         if eligible_cached:
@@ -10505,7 +10541,7 @@ def _regional_movie_cache_refresh_delay() -> float:
     oldest_saved_at = time.time()
     for catalogue_key in REGIONAL_MOVIE_CATALOGUE_KEYS:
         for page in range(1, REGIONAL_MOVIE_PREWARM_PAGES + 1):
-            cached = _read_tmdb_persistent_cache((catalogue_key + "|eligible-v3", page))
+            cached = _read_tmdb_persistent_cache((catalogue_key + "|eligible-v4", page))
             if not cached or not _regional_movie_cache_page_is_usable(cached[1], page):
                 return 0
             oldest_saved_at = min(oldest_saved_at, cached[0])
