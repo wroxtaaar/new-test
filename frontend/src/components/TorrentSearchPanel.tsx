@@ -1037,6 +1037,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [movieTorrentPreviewPosterUrl, setMovieTorrentPreviewPosterUrl] = useState('');
   // Capture the URL of the poster that actually loaded in the original catalogue card.
   const cataloguePosterUrlsRef = useRef<Record<string, string>>({});
+  const searchPosterUrlsRef = useRef<Record<string, string>>({});
   const [movieTorrentPickerGroups, setMovieTorrentPickerGroups] = useState<TorrentQualityGroup[] | null>(null);
   const [movieTorrentSearchLoading, setMovieTorrentSearchLoading] = useState(false);
   const [movieTorrentSearchTitle, setMovieTorrentSearchTitle] = useState('');
@@ -1700,6 +1701,20 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }
 
     return candidates;
+  };
+
+  const posterImageUrlForResult = (result: TorrentSearchResult): string => {
+    const resolveUrl = posterResolveCandidateUrlsFor(result)[0];
+    if (!resolveUrl) return '';
+    try {
+      const url = new URL(resolveUrl, window.location.origin);
+      url.pathname = url.pathname.replace('/api/poster/resolve', '/api/poster');
+      url.searchParams.set('size', 'w185');
+      return url.toString();
+    } catch {
+      return resolveUrl.replace('/api/poster/resolve?', '/api/poster?') +
+        (resolveUrl.includes('?') ? '&' : '?') + 'size=w185';
+    }
   };
 
   const resolvePosterInBackground = async (url: string, generation: number) => {
@@ -4697,10 +4712,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 // or delayed and must not replace the movie's known poster.
                 const isRegionalMoviePreview = /^(popular|trending|latest)-(bollywood|hollywood)$/.test(String(movieCatalogue?.catalogue || ''));
                 const posterOverride = cataloguePosterOverride(movie);
-                const cataloguePosterUrl = cataloguePosterUrlsRef.current[String(movie.id)] ||
+                const loadedCataloguePosterUrl = cataloguePosterUrlsRef.current[String(movie.id)] || '';
+                const cataloguePosterUrl = loadedCataloguePosterUrl ||
                   (isTheCrow2024(movie) ? posterOverride : movieTorrentPreviewPosterUrl) ||
                   posterOverride || cataloguePosterSource(movie);
-                const posterSrc = lowQualityPosterUrl(
+                const posterSrc = loadedCataloguePosterUrl || lowQualityPosterUrl(
                   cataloguePosterUrl ||
                   (isRegionalMoviePreview ? '' : posterUrlFor(previewGroup.posterResult) || previewGroup.posterResult?.posterUrl || '')
                 );
@@ -5293,10 +5309,19 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               // title the card's synopsis comes from, so no card sits blank.
               // TMDB-id based metadata poster first (same title as the synopsis), then the
               // title+year resolver. If the metadata poster fails to load, the resolver takes over.
+              const loadedSearchPosterUrl = searchPosterUrlsRef.current[groupPosterKey] || '';
               const metadataPosterUrl = mediaMetadata?.posterUrl && !metadataPosterFailed[groupPosterKey]
                 ? mediaMetadata.posterUrl
                 : '';
-              const sharedPosterUrl = metadataPosterUrl || posterOverrides[groupPosterKey] || posterResult?.posterUrl || '';
+              // Give the image an immediate same-origin resolver URL instead of
+              // waiting for the background JSON lookup to finish before loading
+              // its first thumbnail. The backend's poster map makes common
+              // title/year lookups a fast redirect to the image CDN.
+              const sharedPosterUrl = loadedSearchPosterUrl ||
+                metadataPosterUrl ||
+                posterOverrides[groupPosterKey] ||
+                posterResult?.posterUrl ||
+                posterImageUrlForResult(posterResult);
 
               // Normal searches use a poster-first two-state card. Clicking the poster
               // opens the Prepare/details card; clicking it again returns here.
@@ -5335,6 +5360,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     onPosterClick={() => setExpandedSearchGroupKey(group.key)}
                     onPosterLoad={event => {
                       const key = posterKeyFor(posterResult);
+                      searchPosterUrlsRef.current[key] = event.currentTarget.currentSrc || event.currentTarget.src;
                       posterLoadedRef.current.add(key);
                       event.currentTarget.style.display = '';
                       event.currentTarget.parentElement?.querySelector('[data-poster-placeholder="true"]')?.classList.add('hidden');
@@ -5345,6 +5371,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                       // attach a poster for a different title/remake. Retry the strict
                       // title-and-year resolver instead.
                       const key = posterKeyFor(posterResult);
+                      delete searchPosterUrlsRef.current[key];
                       posterLoadedRef.current.delete(key);
                       setMetadataPosterFailed(previous => previous[key] ? previous : { ...previous, [key]: true });
                       image.style.display = 'none';
@@ -5382,7 +5409,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 <MoviePrepareCard
                   key={group.key || (group.title + '-' + index)}
                   className="z-0"
-                  posterSrc={lowQualityPosterUrl(sharedPosterUrl)}
+                  posterSrc={loadedSearchPosterUrl || lowQualityPosterUrl(sharedPosterUrl)}
                   posterAlt={group.title}
                   providers={toCardProviders(uniqueOttProviders(
                     (searchAvailabilityByGroup[group.key]?.matches || [])
@@ -5393,12 +5420,14 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   onPosterClick={() => setExpandedSearchGroupKey(null)}
                   onPosterLoad={event => {
                     const key = posterKeyFor(posterResult);
+                    searchPosterUrlsRef.current[key] = event.currentTarget.currentSrc || event.currentTarget.src;
                     posterLoadedRef.current.add(key);
                     event.currentTarget.style.display = '';
                     event.currentTarget.parentElement?.querySelector('[data-poster-placeholder="true"]')?.classList.add('hidden');
                   }}
                   onPosterError={event => {
                     const key = posterKeyFor(posterResult);
+                    delete searchPosterUrlsRef.current[key];
                     posterLoadedRef.current.delete(key);
                     setMetadataPosterFailed(previous => previous[key] ? previous : { ...previous, [key]: true });
                     event.currentTarget.style.display = 'none';
