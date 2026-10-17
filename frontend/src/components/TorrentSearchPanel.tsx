@@ -4908,7 +4908,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
               const metadataPosterUrl = mediaMetadata?.posterUrl && !metadataPosterFailed[groupPosterKey]
                 ? mediaMetadata.posterUrl
                 : '';
-              const resolvedPosterUrl = metadataPosterUrl || posterOverrides[groupPosterKey] || '';
+              const sharedPosterUrl = metadataPosterUrl || posterOverrides[groupPosterKey] || posterResult?.posterUrl || '';
 
               // Normal searches use a poster-first two-state card. Clicking the poster
               // opens the Prepare/details card; clicking it again returns here.
@@ -4926,12 +4926,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                     ? matchingSavedTitles.flatMap(match => match.providers)
                     : (availability?.providers || [])
                 );
-                // Prefer the same poster-resolver URL as the expanded torrent card. It is
-                // backed by the existing poster cache, so switching card modes reuses it
-                // instead of starting with a separate direct TMDB image request.
-                const posterKey = groupPosterKey;
-                const compactPosterUrl = resolvedPosterUrl;
-
                 return (
                   <MovieCompactCard
                     key={group.key || (group.title + '-' + index)}
@@ -4948,7 +4942,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                           ? 'TMDB synopsis is temporarily unavailable.'
                           : 'No synopsis available from TMDB for this title.')
                     }
-                    posterSrc={lowQualityPosterUrl(compactPosterUrl)}
+                    posterSrc={lowQualityPosterUrl(sharedPosterUrl)}
                     posterAlt={mediaDisplayTitle}
                     onPosterClick={() => setExpandedSearchGroupKey(group.key)}
                     onPosterLoad={event => {
@@ -5000,7 +4994,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                 <MoviePrepareCard
                   key={group.key || (group.title + '-' + index)}
                   className="z-0"
-                  posterSrc={lowQualityPosterUrl(resolvedPosterUrl || posterOverrides[groupPosterKey] || posterResult?.posterUrl || '')}
+                  posterSrc={lowQualityPosterUrl(sharedPosterUrl)}
                   posterAlt={group.title}
                   providers={toCardProviders(uniqueOttProviders(
                     (searchAvailabilityByGroup[group.key]?.matches || [])

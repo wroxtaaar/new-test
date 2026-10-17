@@ -3,8 +3,9 @@
 
 Run this on the machine that has your API keys (your VPS) while the full app
 is running there. It scans the bundled catalogues for every
-/api/poster?title=...&year=... link, asks the running backend to resolve each
-one (/api/poster/resolve), and merges the results into poster_map.json.
+/api/poster?title=...&year=... link, first reuses direct posters from the
+prebuilt movie cache, then asks the running backend to resolve any remaining
+titles (/api/poster/resolve), and merges the results into poster_map.json.
 
     python3 scripts/build_poster_map.py --api http://127.0.0.1:8000
 
@@ -19,6 +20,20 @@ ROOT = Path(__file__).resolve().parent.parent
 SEED = ROOT / "backend" / "cache-seed"
 MAP = SEED / "poster_map.json"
 LINK = re.compile(r"/api/poster\?([^\"'\\\s]+)")
+DIRECT_POSTER_ALIASES = {
+    ("bhoothbanglanozzemaledette", "2026"): ("bhoothbangla", "2026"),
+    ("border2hindi1080pnfwebdl", "1900"): ("border2", "2026"),
+    ("kabhikhushikabhieghamallsongsvideos", "2001"): ("kabhikhushikabhiegham", "2001"),
+    ("czasemslonceczasemdeszczkabhikhushikabhieghamlekpl", "2001"): ("kabhikhushikabhiegham", "2001"),
+    ("asibabitasinghreporting", "2026"): ("babitasinghreporting", "2026"),
+    ("obitelzlarakkunsitiresidentevilwelcometoraccooncity", "2021"): ("residentevilwelcometoraccooncity", "2021"),
+    ("waroftheworldsrevival", "2025"): ("waroftheworlds", "2025"),
+    ("timburtonsthenightmarebeforechristmas", "1993"): ("thenightmarebeforechristmas", "1993"),
+    ("coralineeomundosecreto", "2009"): ("coraline", "2009"),
+    ("losmundosdecoraline", "2009"): ("coraline", "2009"),
+    ("scarymovieextendedcut", "2026"): ("scarymovie", "2026"),
+    ("amarveltelevisionspecialpresentationthepunisheronelastkill", "2026"): ("thepunisheronelastkill", "2026"),
+}
 
 
 def norm(text):
@@ -38,6 +53,34 @@ def collect():
                 wanted.setdefault((norm(title), year), (title, year))
     print(f"Scanned catalogue JSON files under {SEED}; found {len(wanted)} unique poster title/year keys", flush=True)
     return wanted
+
+
+def collect_catalogue_posters(existing):
+    """Index verified direct posters already saved in the prebuilt movie cache."""
+    path = SEED / "runtime" / "regional_movie_prebuilt_cache.json"
+    if not path.is_file():
+        return existing
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    movies = payload.get("movies", {})
+    if not isinstance(movies, dict):
+        return existing
+    posters = dict(existing)
+    for entry in movies.values():
+        movie = entry.get("movie") if isinstance(entry, dict) else None
+        if not isinstance(movie, dict):
+            continue
+        title = str(movie.get("title") or "").strip()
+        year = str(movie.get("year") or "").strip()
+        url = str(movie.get("posterUrl") or "").strip()
+        if title and year and url.startswith(("https://", "http://")):
+            posters.setdefault((norm(title), year), url)
+    return posters
+
+
+def cached_poster(title, year, posters):
+    key = (norm(title), str(year or ""))
+    source_key = DIRECT_POSTER_ALIASES.get(key, key)
+    return posters.get(source_key, "")
 
 
 # Canonical title fallbacks for common release-name variants. Each fallback is
@@ -110,6 +153,8 @@ def main():
     parser.add_argument("--api", default="http://127.0.0.1:8000", help="URL of your running backend")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--refresh", action="store_true", help="re-resolve titles already in the map")
+    parser.add_argument("--report", type=Path, default=ROOT / "poster_map_failures.txt",
+                        help="path for the missing-poster report")
     args = parser.parse_args()
 
     existing = {}
@@ -119,9 +164,15 @@ def main():
 
     todo = [v for k, v in collect().items() if args.refresh or k not in existing]
     print(f"{len(existing)} already mapped, {len(todo)} to resolve")
+    cached_posters = collect_catalogue_posters({
+        key: value[2]
+        for key, value in existing.items()
+        if str(value[2]).startswith(("https://", "http://"))
+    })
 
     def work(item):
-        return item, resolve(args.api, *item)
+        title, year = item
+        return item, cached_poster(title, year, cached_posters) or resolve(args.api, title, year)
 
     done = missing = failed = 0
     missing_items = []
@@ -142,7 +193,7 @@ def main():
                 print(f"[NO POSTER] {title} ({year}): resolver returned no URL", flush=True)
     MAP.write_text(json.dumps(sorted(existing.values()), separators=(",", ":")), encoding="utf-8")
     print(f"resolved {done}, no poster found {missing}, failed (re-run) {failed}; total in map {len(existing)}")
-    report = ROOT / "poster_map_failures.txt"
+    report = args.report
     lines = ["NO POSTER FOUND"]
     lines.extend(f"{title}\t{year}" for title, year in missing_items)
     lines.extend(["", "REQUEST ERRORS (safe to retry)"])
