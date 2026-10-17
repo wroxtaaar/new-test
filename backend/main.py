@@ -39,6 +39,7 @@ from cache_diagnostics import (
     _upstream_provider_name,
     _upstream_endpoint_group,
 )
+from nexstream import nexstream_api_key_configured, resolve_nexstream_movie
 
 _TRUTHY = {"1", "true", "yes", "on"}
 # Cache-only deployments (e.g. Render free without provider keys) must never
@@ -9713,6 +9714,8 @@ def _cache_only_regional_movie_catalogue(catalogue_key: str, page: int) -> dict[
             if not isinstance(movie, dict):
                 continue
             row = dict(movie)
+            if catalogue_key == "latest-bollywood" and row.get("nexStreamPlayable") is not True:
+                continue
             if catalogue_key == "latest-bollywood" and _is_bollywood_comedy_special(row):
                 continue
             release_date = str(row.get("releaseDate") or row.get("release_date") or "").strip()
@@ -9801,12 +9804,13 @@ async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: in
     page_size = REGIONAL_MOVIE_CACHE_PAGE_SIZE
     wanted = page * page_size + 1
     is_trending = catalogue_key.startswith("trending-")
+    is_bollywood_latest = catalogue_key == "latest-bollywood"
     force_refresh = _REGIONAL_MOVIE_SOURCE_FORCE_REFRESH.get()
     refreshed_source_keys = _REGIONAL_MOVIE_SOURCE_REFRESHED_KEYS.get()
     # Trending is global; language + India release/OTT eligibility can discard
     # most candidates. Scan up to 30 weekly-trending pages to fill each
     # 18-card regional page without borrowing popularity-ranked Discover rows.
-    max_source_pages = 30
+    max_source_pages = min(30, max(3, page)) if is_bollywood_latest else 30
     source_cache_variant = (
         "|trending-v4" if is_trending
         else "|released-v7" if catalogue_key == "latest-bollywood"
@@ -9845,12 +9849,17 @@ async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: in
             _write_tmdb_persistent_cache(cache_key, source_payload)
             if refreshed_source_keys is not None:
                 refreshed_source_keys.add(cache_key)
-        source_total_pages = min(500, max(1, int(source_payload.get("totalPages") or source_page)))
+        source_total_pages = min(
+            max_source_pages,
+            500,
+            max(1, int(source_payload.get("totalPages") or source_page)),
+        )
         filtered_payload = await _apply_movie_release_eligibility(source_payload, enabled=True)
+        source_candidates: list[dict[str, Any]] = []
         for row in filtered_payload.get("results") or []:
             if not isinstance(row, dict):
                 continue
-            if catalogue_key == "latest-bollywood" and _is_bollywood_comedy_special(row):
+            if is_bollywood_latest and _is_bollywood_comedy_special(row):
                 continue
             title_key = re.sub(r"[^a-z0-9]+", "", str(row.get("title") or row.get("name") or "").casefold())
             # Filter known catalogue contamination before pagination, allowing
@@ -9862,7 +9871,12 @@ async def _fetch_paginated_regional_movie_catalogue(catalogue_key: str, page: in
             if not identity or identity in seen_ids:
                 continue
             seen_ids.add(identity)
-            eligible_rows.append(row)
+            source_candidates.append(row)
+        if is_bollywood_latest and source_candidates:
+            playable_rows = await _filter_nexstream_playable_movies(source_candidates)
+            eligible_rows.extend(playable_rows)
+        else:
+            eligible_rows.extend(source_candidates)
         if len(eligible_rows) >= wanted:
             exhausted = source_page >= source_total_pages
             break
@@ -9963,6 +9977,64 @@ async def _enrich_regional_movie_catalogue_metadata(
     return payload
 
 
+async def _filter_nexstream_playable_movies(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not nexstream_api_key_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="NEXSTREAM_API_KEY is required to build the playable Bollywood Latest catalogue.",
+        )
+    if not rows:
+        return []
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def check(row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            movie_id = int(row.get("tmdbId") or row.get("id") or 0)
+        except (TypeError, ValueError):
+            movie_id = 0
+        if movie_id <= 0:
+            return {"success": False, "sources": []}
+        async with semaphore:
+            return await resolve_nexstream_movie(movie_id)
+
+    checks = await asyncio.gather(
+        *(check(row) for row in rows),
+        return_exceptions=True,
+    )
+    playable_rows = []
+    transient_failures = 0
+    for row, result in zip(rows, checks):
+        if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result
+            transient_failures += 1
+            logger.info(
+                "NexStream playback check failed for %s (%s): %s",
+                row.get("title"), row.get("id"), type(result).__name__,
+            )
+            continue
+        sources = result.get("sources")
+        if result.get("success") and isinstance(sources, list) and sources:
+            row["nexStreamPlayable"] = True
+            row["nexStreamCheckedAt"] = datetime.now(timezone.utc).isoformat()
+            playable_rows.append(row)
+
+    if not playable_rows and transient_failures:
+        raise HTTPException(
+            status_code=503,
+            detail="NexStream checks failed before any playable Bollywood Latest title could be verified.",
+        )
+    if transient_failures:
+        logger.warning(
+            "Publishing %s verified NexStream titles; %s movie checks failed.",
+            len(playable_rows), transient_failures,
+        )
+    return playable_rows
+
+
 @app.get("/api/movies/catalogue/{catalogue_key}")
 async def api_tmdb_movie_catalogue(
     catalogue_key: str,
@@ -9982,10 +10054,12 @@ async def api_tmdb_movie_catalogue(
     if basic:
         # Fast first paint for deep pages: return basic source metadata immediately;
         # the frontend replaces this with the fully eligible/enriched page.
-        fast_key = (
-            catalogue_key + ("|fast-basic-v3" if catalogue_key == "marvel" else "|fast-basic-v2"),
-            page,
+        fast_variant = (
+            "|fast-basic-v4" if catalogue_key == "latest-bollywood"
+            else "|fast-basic-v3" if catalogue_key == "marvel"
+            else "|fast-basic-v2"
         )
+        fast_key = (catalogue_key + fast_variant, page)
         fast_cached = _tmdb_movie_catalogue_cache.get(fast_key)
         if fast_cached and time.monotonic() - fast_cached[0] < 900:
             _record_cache_event("movie_catalogue", "fast_memory_hit")
@@ -10003,6 +10077,8 @@ async def api_tmdb_movie_catalogue(
             rows = [row for row in rows if re.sub(r"[^a-z0-9]+", "", str(row.get("title") or "").casefold()) not in excluded_bollywood]
         if catalogue_key in {"popular-bollywood", "trending-bollywood", "latest-bollywood"}:
             rows = [row for row in rows if re.sub(r"[^a-z0-9]+", "", str(row.get("title") or "").casefold()) not in {"gangaa", "dearishq", "mastram"}]
+        if catalogue_key == "latest-bollywood":
+            rows = await _filter_nexstream_playable_movies(rows)
         fast_payload = dict(raw)
         fast_payload.update({"catalogue": catalogue_key, "page": page, "results": rows[:18], "pageSize": 18, "basic": True})
         _tmdb_movie_catalogue_cache[fast_key] = (time.monotonic(), fast_payload)
@@ -10019,7 +10095,7 @@ async def api_tmdb_movie_catalogue(
                 _record_cache_event("movie_catalogue", "weekly_trending_archive_hit")
                 return archived_page
 
-        eligible_cache_key = (catalogue_key + "|eligible-v5", page)
+        eligible_cache_key = (catalogue_key + "|eligible-v6", page)
         eligible_cached = _tmdb_movie_catalogue_cache.get(eligible_cache_key)
         stale_payload = None
         if eligible_cached:
@@ -10615,7 +10691,7 @@ def _regional_movie_cache_refresh_delay() -> float:
     oldest_saved_at = time.time()
     for catalogue_key in REGIONAL_MOVIE_CATALOGUE_KEYS:
         for page in range(1, REGIONAL_MOVIE_PREWARM_PAGES + 1):
-            cached = _read_tmdb_persistent_cache((catalogue_key + "|eligible-v5", page))
+            cached = _read_tmdb_persistent_cache((catalogue_key + "|eligible-v6", page))
             if not cached or not _regional_movie_cache_page_is_usable(cached[1], page):
                 return 0
             oldest_saved_at = min(oldest_saved_at, cached[0])

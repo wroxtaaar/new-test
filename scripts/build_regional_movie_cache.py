@@ -46,6 +46,21 @@ def movie_key(movie):
     return norm(movie.get("title")) + "|" + str(movie.get("year") or "")
 
 
+def verified_bollywood_latest_pages(pages):
+    return [
+        {
+            **saved_page,
+            "results": [
+                movie for movie in saved_page.get("results", [])
+                if isinstance(movie, dict)
+                and movie.get("nexStreamPlayable") is True
+            ],
+        }
+        for saved_page in pages
+        if isinstance(saved_page, dict)
+    ]
+
+
 def main():
     old = {}
     if CACHE.exists():
@@ -119,6 +134,8 @@ def main():
             # Keep the previous known-good catalogue if refresh failed at any page.
             if prior.get("pages"):
                 pages = prior["pages"]
+                if cat == "latest-bollywood":
+                    pages = verified_bollywood_latest_pages(pages)
                 print(json.dumps({"event": "catalogue_preserved", "catalogue": cat, "movies": sum(len(p.get("results", [])) for p in pages)}), flush=True)
             else:
                 print(json.dumps({"event": "catalogue_incomplete", "catalogue": cat, "movies": count, "target": TARGET_PER_CATALOGUE}), flush=True)

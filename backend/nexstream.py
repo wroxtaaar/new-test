@@ -170,6 +170,104 @@ def _env_values(*names: str) -> list[str]:
     return values
 
 
+def nexstream_api_key_configured() -> bool:
+    return bool(os.getenv("NEXSTREAM_API_KEY", "").strip())
+
+
+async def resolve_nexstream_movie(tmdb_id: int) -> dict:
+    """Resolve a movie through NexStream, returning only supported player sources."""
+    if tmdb_id <= 0:
+        raise HTTPException(status_code=404, detail="Unknown movie.")
+    api_key = os.getenv("NEXSTREAM_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="NEXSTREAM_API_KEY is not configured on the server.",
+        )
+
+    media_type = "movie"
+    cache_key = f"resolve:{media_type}:{tmdb_id}:0:0"
+    cached = _get_nexstream_cache(cache_key, _NEXSTREAM_RESOLVE_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        async with _InstrumentedAsyncClient(timeout=httpx.Timeout(15.0)) as client:
+            response = await client.get(
+                f"{NEXSTREAM_API_BASE}/api/movie/{tmdb_id}",
+                params={"apikey": api_key},
+                headers={"Accept": "application/json"},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not connect to NexStream. Try again later.",
+        ) from exc
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NexStream returned HTTP {response.status_code}.",
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="NexStream returned an invalid response.",
+        ) from exc
+
+    if not isinstance(payload, dict) or not payload.get("success"):
+        message = payload.get("message") if isinstance(payload, dict) else None
+        result = {
+            "success": False,
+            "type": media_type,
+            "tmdbId": str(tmdb_id),
+            "message": str(message or "NexStream could not resolve this title."),
+            "sources": [],
+        }
+        _set_nexstream_cache(cache_key, result)
+        return result
+
+    safe_sources = []
+    sources = payload.get("sources")
+    for source in sources if isinstance(sources, list) else []:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.hostname not in ALLOWED_EMBED_HOSTS:
+            continue
+        safe_sources.append({
+            "name": str(source.get("name") or "NexStream source")[:80],
+            "url": url,
+        })
+
+    if not safe_sources:
+        result = {
+            "success": False,
+            "type": media_type,
+            "tmdbId": str(tmdb_id),
+            "message": "NexStream returned no supported EmbedMaster player source.",
+            "sources": [],
+        }
+        _set_nexstream_cache(cache_key, result)
+        return result
+
+    result = {
+        "success": True,
+        "type": media_type,
+        "tmdbId": str(tmdb_id),
+        "season": None,
+        "episode": None,
+        "meta": payload.get("meta") if isinstance(payload.get("meta"), dict) else {},
+        "sources": safe_sources,
+    }
+    _set_nexstream_cache(cache_key, result)
+    return result
+
+
 @router.get("/api/nexstream/search")
 async def search_titles(
     query: str = Query(..., min_length=2, max_length=120),
@@ -386,6 +484,15 @@ async def resolve_nexstream(
     episode: int | None = Query(None, ge=1),
 ):
     """Resolve a movie or TV episode through NexStream without exposing its key."""
+    if media_type == "movie":
+        result = await resolve_nexstream_movie(tmdb_id)
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=502,
+                detail=str(result.get("message") or "NexStream could not resolve this title."),
+            )
+        return result
+
     api_key = os.getenv("NEXSTREAM_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(

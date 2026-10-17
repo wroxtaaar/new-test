@@ -96,6 +96,8 @@ export interface MovieCatalogueItem {
   trendingWeek?: string;
   trendingRank?: number;
   trendingWeeks?: string[];
+  nexStreamPlayable?: boolean;
+  nexStreamCheckedAt?: string;
   imdbRatingStatus?: ImdbRatingResult['status'];
   imdbRating?: number | null;
   imdbVotes?: string | null;
