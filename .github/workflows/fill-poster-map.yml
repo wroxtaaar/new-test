@@ -1,0 +1,49 @@
+name: Fill Missing Poster Links
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fill-poster-map.yml'
+      - 'scripts/build_poster_map.py'
+      - 'backend/cache-seed/**.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fill-poster-map-main
+  cancel-in-progress: false
+
+jobs:
+  fill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fill missing poster links from the live resolver
+        run: |
+          python scripts/build_poster_map.py --api https://new-test-dmkr.onrender.com --workers 4
+
+      - name: Commit updated poster map
+        run: |
+          if git diff --quiet -- backend/cache-seed/poster_map.json; then
+            echo "Poster map is already complete for the currently bundled catalogues."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/cache-seed/poster_map.json
+          git commit -m "Fill remaining poster map entries"
+          git push origin HEAD:main
