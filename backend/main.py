@@ -4486,6 +4486,7 @@ def _canonical_catalogue_poster_url(item: dict[str, Any]) -> str:
 _EXCLUDED_FRANCHISE_TITLE_KEYS = {
     "avengersconfidentialblackwidowpunisher",
     "ironmanrisetechnovore",
+    "nextavengersheroesoftomorrow",
 }
 
 
@@ -5148,7 +5149,7 @@ async def resolve_search_magnet(body: dict[str, Any]):
 # One-time Marvel catalogue. Results are shared by every visitor to this Home
 # instance and never expire; the deployment mounts /app/data on persistent VPS
 # storage so a container replacement does not force another provider crawl.
-MARVEL_CATALOGUE_VERSION = 10
+MARVEL_CATALOGUE_VERSION = 11
 MARVEL_CATALOGUE_PATH = Path(os.getenv("MARVEL_CATALOGUE_PATH", "/app/data/marvel_catalogue.json"))
 # Curated live-action theatrical Marvel films across studios (Marvel Studios, Fox,
 # Sony, Universal, etc.). Excludes TV films, specials, documentaries, and animated
@@ -5243,7 +5244,6 @@ MARVEL_MOVIE_SEARCHES: tuple[tuple[str, int], ...] = (
     ("Ultimate Avengers 2", 2006),
     ("The Invincible Iron Man", 2007),
     ("Doctor Strange: The Sorcerer Supreme", 2007),
-    ("Next Avengers: Heroes of Tomorrow", 2008),
     ("Hulk Vs.", 2009),
     ("Planet Hulk", 2010),
     ("Thor: Tales of Asgard", 2011),
@@ -5888,12 +5888,13 @@ async def _build_marvel_catalogue() -> None:
 # catalogues are refreshed monthly and keep serving the previous good cache during refresh.
 _EXTRA_CATALOGUES: dict[str, dict[str, Any]] = {
     "dc-live-action": {
-        "file": "dc_live_action_catalogue.json", "version": 5, "refresh_days": 36500,
+        "file": "dc_live_action_catalogue.json", "version": 6, "refresh_days": 36500,
         "minimum_movies": 5, "mode": "fixed", "language": "english",
         "exclude_titles": [
             "The Old Guard", "The Old Guard 2", "RED 2", "The Kitchen", "RED",
             "The Losers", "Stardust", "A History of Violence", "The League of Extraordinary Gentlemen",
             "Road to Perdition", "Steel", "The Spirit", "Batman: Mask of the Phantasm",
+            "Superman II: The Richard Donner Cut", "Watchmen: Chapter I", "Watchmen: Chapter II",
         ],
         "titles": [
             ("Superman", 2025), ("Supergirl", 2026), ("The Batman Part II", 2027),
@@ -5993,7 +5994,7 @@ _EXTRA_CATALOGUES: dict[str, dict[str, Any]] = {
 _EXTRA_CATALOGUES["dc-live-action-hindi"] = {
     **_EXTRA_CATALOGUES["dc-live-action"],
     "file": "dc_live_action_hindi_catalogue.json",
-    "version": 5,
+    "version": 6,
     "language": "hindi",
     "titles": list(_EXTRA_CATALOGUES["dc-live-action"]["titles"]),
 }

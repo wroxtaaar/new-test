@@ -28,6 +28,19 @@ CHRONOLOGICAL_CATALOGUES = {
     "dc-animated",
     "classics",
 }
+EXCLUDED_TITLES = {
+    "marvel": {"nextavengersheroesoftomorrow"},
+    "dc-live-action": {
+        "supermaniithericharddonnercut",
+        "watchmenchapteri",
+        "watchmenchapterii",
+    },
+    "dc-live-action-hindi": {
+        "supermaniithericharddonnercut",
+        "watchmenchapteri",
+        "watchmenchapterii",
+    },
+}
 
 
 def group_key(item, index=0):
@@ -121,6 +134,14 @@ def main():
             continue
         payload = json.loads(path.read_text(encoding="utf-8"))
         rows = [r for r in payload.get("results", []) if isinstance(r, dict)]
+        excluded_titles = EXCLUDED_TITLES.get(key, set())
+        rows = [
+            row for row in rows
+            if re.sub(r"[^a-z0-9]+", "", str(
+                row.get("catalogueTitle") or row.get("marvelCatalogueTitle")
+                or row.get("mediaTitle") or row.get("title") or ""
+            ).casefold()) not in excluded_titles
+        ]
         for row in rows:
             apply_bundled_poster(row, posters)
         groups = {}
