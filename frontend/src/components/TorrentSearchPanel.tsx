@@ -1461,9 +1461,12 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     if (isDcLiveActionEnglishResults) {
       movies = movies.filter(movie => !/batman\s*:\s*mask of the phantasm/i.test(String(movie.title || '')));
     }
-    // Apply the shared release-date comparator to every catalogue so the
-    // ordering is consistent across Marvel/DC and the other movie sections.
-    movies = [...movies].sort(compareReleaseDateDescending);
+    // Regional catalogues arrive pre-sorted by popularity, release date, or
+    // weekly trend history; re-sorting them by release date would discard that ranking.
+    const isRegionalMovieCatalogue = /^(popular|trending|latest)-(bollywood|hollywood)$/.test(
+      String(movieCatalogue?.catalogue || ''),
+    );
+    if (!isRegionalMovieCatalogue) movies = [...movies].sort(compareReleaseDateDescending);
     if (streamingOnly) movies = movies.filter(movie => ottAvailabilityForMovie(movie)?.status === 'streaming');
     return movies;
   }, [movieCatalogue, streamingOnly, ottAvailability, isMarvelEnglishResults, showMarvelWebSeries, marvelFilmFilter, isDcLiveActionEnglishResults]);
@@ -4778,6 +4781,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
                   year={movie.year}
                   imdb={movieImdb}
                   tmdbRating={movie.rating}
+                  trendWeekLabel={movieCatalogue.catalogue.startsWith('trending-') && movie.trendingWeek
+                    ? 'Week of ' + new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(movie.trendingWeek + 'T00:00:00Z')) + (movie.trendingRank ? ' · #' + movie.trendingRank : '')
+                    : undefined}
                   overview={movie.overview || 'No synopsis available from TMDB for this title.'}
                   posterSrc={lowQualityPosterUrl(cataloguePosterSource(movie), 'w185')}
                   posterAlt={movie.title}

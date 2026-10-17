@@ -37,7 +37,7 @@ At Docker image build time, bundled catalogue pages replace mapped `/api/poster`
 
 The separate **TMDB movie discovery** control lets visitors select Marvel, DC Live-Action or DC Animated and browse paginated TMDB movie metadata. For these three franchise views, OTT details come from the saved enriched Marvel/DC torrent catalogues; titles without a saved match are shown as unconfirmed rather than starting a live per-card availability scan. Other TMDB catalogues can continue checking availability in the background. Torrent-provider searches happen only when a movie's **Prepare** action is selected. The **Clear TMDB cache & reload** button deletes the server's in-memory and persistent TMDB catalogue, OTT availability and company-discovery caches, then requests the selected catalogue again. The clear-cache endpoint has a short global cooldown to protect the TMDB API quota.
 
-Popular Hollywood, Trending Hollywood and Popular Bollywood browse paginated movie metadata from TMDB. Popular categories sort by TMDB popularity; trending categories use only TMDB's weekly trending feed, filtered to the selected original language, and are not padded with popularity-ranked Discover results. Because TMDB's trending feed is global, Trending Bollywood or Trending Hollywood pages may contain fewer results when relatively few titles in that language are trending. Trending caches are short-lived so the lists can follow the weekly feed; Popular remains popularity-ranked. The Latest Hollywood, Latest Bollywood and Trending Bollywood shortcuts are intentionally omitted from the current UI.
+Hollywood and Bollywood Popular, Trending and Latest use 18-title pages. Popular is sorted by TMDB popularity, Latest by release date, and Trending by TMDB's weekly trending order, filtered to the original language. The Oracle backend refreshes and saves the first three Popular and Latest pages weekly; later pages are fetched from TMDB on demand and cached on the VPS. Trending snapshots are archived weekly and deduplicated by movie, retaining the most recent trending week and rank on each card; browsing farther back shows earlier unique chart entries. Since TMDB may return fewer than 18 eligible titles for a language in a given week, the archive grows as later snapshots add newly trending titles.
 
 For non-commercial use, request a free TMDB API credential in your TMDB account under **Settings → API**. Add either variable to the private `.env.debug` file on the VPS (never commit credentials):
 
@@ -48,7 +48,7 @@ WATCHMODE_API_KEY=<your Watchmode API key>
 # TMDB_API_KEY=<your TMDB API key>
 ```
 
-The deployment workflow recreates the container from `.env.debug`, so rerun the Home VPS deployment after saving the variable. TMDB requires its logo and attribution notice in the app; the movie-browser UI includes both. Its free developer access is for non-commercial use—commercial use needs a separate TMDB agreement.
+The VPS deployment workflow passes the private `$APP_DIR/.env` file to the Docker container. Keep TMDB credentials there, set `CACHE_ONLY_MODE=false` on the Oracle VPS, and redeploy after saving changes. The separate Render service remains cache-only and receives refreshed cache snapshots through the scheduled GitHub cache-sync workflow. TMDB requires its logo and attribution notice in the app; the movie-browser UI includes both. Its free developer access is for non-commercial use—commercial use needs a separate TMDB agreement.
 
 ## OTT availability
 

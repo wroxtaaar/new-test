@@ -93,6 +93,9 @@ export interface MovieCatalogueItem {
   genres?: number[];
   source?: string;
   tmdbId?: number | string;
+  trendingWeek?: string;
+  trendingRank?: number;
+  trendingWeeks?: string[];
   imdbId?: string | null;
   verified?: boolean;
   tmdbUrl?: string;

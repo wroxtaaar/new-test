@@ -247,6 +247,7 @@ export interface MovieCompactCardProps {
   imdb?: MovieCardImdb;
   /** Shown only when there is no IMDb rating. */
   tmdbRating?: number | null;
+  trendWeekLabel?: string;
   overview: string;
   posterSrc: string;
   posterAlt: string;
@@ -265,6 +266,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
   year,
   imdb,
   tmdbRating,
+  trendWeekLabel,
   overview,
   posterSrc,
   posterAlt,
@@ -366,6 +368,7 @@ export const MovieCompactCard: React.FC<MovieCompactCardProps> = ({
           </h3>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] sm:text-xs">
             {year ? <span className="text-slate-400">{year}</span> : null}
+            {trendWeekLabel ? <span className="text-cyan-300">{trendWeekLabel}</span> : null}
             {showImdb ? (
               <a
                 href={imdbBadgeHref(imdb)}

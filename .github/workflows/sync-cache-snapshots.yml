@@ -76,7 +76,7 @@ jobs:
             test -s "$destination"
           }
 
-          DATA_DIR="/home/$VPS_USER/home-data"
+          DATA_DIR="/home/$VPS_USER/new-test-data"
           for name in \
             marvel_catalogue.json \
             marvel_web_series_catalogue.json \
@@ -102,6 +102,7 @@ jobs:
             marvel_tv_catalogue_cache.json \
             dc_tv_catalogue_cache.json \
             regional_movie_prebuilt_cache.json \
+            regional_movie_trending_archive.json \
             nexstream_cache.json \
             nexstream_episode_metadata_cache.json; do
             sync_remote_file "$DATA_DIR/$name" "backend/cache-seed/runtime/$name"
