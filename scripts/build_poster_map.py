@@ -91,6 +91,14 @@ def resolve(api, title, year):
         found = resolve_one(api, alias, year)
         if found is None or found:
             return found
+    # Release names often carry a junk prefix ("www 5MovieRulz company - Title",
+    # "pany - Title"). Try the part after the last " - " as the real title.
+    if " - " in str(title):
+        tail = str(title).rsplit(" - ", 1)[1].strip()
+        if len(tail) >= 3 and tail.casefold() != str(title).casefold():
+            found = resolve_one(api, tail, year)
+            if found is None or found:
+                return found
     return ""
 
 
