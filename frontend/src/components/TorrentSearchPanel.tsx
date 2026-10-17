@@ -812,7 +812,175 @@ function groupTorrentResults(results: TorrentSearchResult[]): TorrentQualityGrou
   return groups;
 }
 
-// Fully loaded catalogue rows per section, kept for the session so revisits are instant.
+type CachedFranchiseSearchMode = 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'classics';
+type FranchisePageCacheEntry = {
+  results: TorrentSearchResult[];
+  totalMovies: number;
+  totalPages: number;
+  savedAt: number;
+};
+
+const FRANCHISE_PAGE_CACHE_STORAGE_KEY = 'home_franchise_catalogue_pages_v1';
+const FRANCHISE_PAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const FRANCHISE_PAGE_CACHE_MAX_ENTRIES = 48;
+const SEARCH_METADATA_CACHE_STORAGE_KEY = 'home_search_media_metadata_v1';
+const SEARCH_METADATA_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SEARCH_METADATA_CACHE_MAX_ENTRIES = 500;
+const SEARCH_AVAILABILITY_CACHE_STORAGE_KEY = 'home_search_ott_availability_v1';
+const SEARCH_AVAILABILITY_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const IMDB_RATINGS_CACHE_STORAGE_KEY = 'home_imdb_ratings_v1';
+const IMDB_RATINGS_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function readFranchisePageCache(mode: CachedFranchiseSearchMode, page: number): FranchisePageCacheEntry | null {
+  try {
+    const stored = JSON.parse(localStorage.getItem(FRANCHISE_PAGE_CACHE_STORAGE_KEY) || '{}');
+    const entry = stored?.[mode + ':' + page] as FranchisePageCacheEntry | undefined;
+    if (
+      entry &&
+      Array.isArray(entry.results) &&
+      Date.now() - Number(entry.savedAt) < FRANCHISE_PAGE_CACHE_TTL_MS
+    ) return entry;
+  } catch {
+    console.warn('Could not read the saved catalogue page from browser storage.');
+  }
+  return null;
+}
+
+function writeFranchisePageCache(
+  mode: CachedFranchiseSearchMode,
+  page: number,
+  results: TorrentSearchResult[],
+  totalMovies: number,
+  totalPages: number,
+): void {
+  try {
+    const now = Date.now();
+    const stored = JSON.parse(localStorage.getItem(FRANCHISE_PAGE_CACHE_STORAGE_KEY) || '{}');
+    const entries = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+    entries[mode + ':' + page] = { results, totalMovies, totalPages, savedAt: now };
+    const retained = Object.entries(entries)
+      .filter(([, entry]) => entry && now - Number((entry as FranchisePageCacheEntry).savedAt) < FRANCHISE_PAGE_CACHE_TTL_MS)
+      .sort((a, b) => Number((b[1] as FranchisePageCacheEntry).savedAt) - Number((a[1] as FranchisePageCacheEntry).savedAt))
+      .slice(0, FRANCHISE_PAGE_CACHE_MAX_ENTRIES);
+    localStorage.setItem(FRANCHISE_PAGE_CACHE_STORAGE_KEY, JSON.stringify(Object.fromEntries(retained)));
+  } catch {
+    console.warn('Could not save the catalogue page in browser storage; it will be fetched again next time.');
+  }
+}
+
+function readPersistentSearchMetadata(): SearchMediaMetadata[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SEARCH_METADATA_CACHE_STORAGE_KEY) || '{}');
+    const now = Date.now();
+    return (Array.isArray(stored?.entries) ? stored.entries : [])
+      .filter((entry: any) =>
+        entry?.item &&
+        typeof entry.item.title === 'string' &&
+        now - Number(entry.savedAt) < SEARCH_METADATA_CACHE_TTL_MS
+      )
+      .map((entry: any) => entry.item);
+  } catch {
+    console.warn('Could not read saved movie details from browser storage.');
+    return [];
+  }
+}
+
+function persistSearchMetadata(items: SearchMediaMetadata[]): void {
+  try {
+    const now = Date.now();
+    const existing = readPersistentSearchMetadata();
+    const merged = mergeSearchMetadataItems(existing, items);
+    const entries = merged.slice(-SEARCH_METADATA_CACHE_MAX_ENTRIES)
+      .map(item => ({ item, savedAt: now }));
+    localStorage.setItem(SEARCH_METADATA_CACHE_STORAGE_KEY, JSON.stringify({ entries }));
+  } catch {
+    console.warn('Could not save movie details in browser storage; they may be fetched again.');
+  }
+}
+
+function readPersistentSearchAvailability(): Record<string, {
+  status: 'ready' | 'not_found' | 'not_confirmed' | 'unavailable' | 'loading';
+  query: string;
+  title?: string;
+  year?: number | string;
+  matches?: Array<{
+    id: string;
+    title: string;
+    year?: number | string;
+    type?: string;
+    tmdbId?: number | string;
+    status: 'ready' | 'not_found' | 'not_confirmed' | 'unavailable';
+    providers: Array<{ name: string; region: string; type: string; webUrl?: string }>;
+  }>;
+  providers: Array<{ name: string; region: string; type: string; webUrl?: string }>;
+  message?: string;
+}> {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SEARCH_AVAILABILITY_CACHE_STORAGE_KEY) || '{}');
+    const now = Date.now();
+    const result: Record<string, any> = {};
+    for (const [key, entry] of Object.entries(stored || {})) {
+      const value = entry as { savedAt?: number; value?: any };
+      if (
+        value?.value &&
+        ['ready', 'not_confirmed', 'not_found'].includes(value.value.status) &&
+        now - Number(value.savedAt) < SEARCH_AVAILABILITY_CACHE_TTL_MS
+      ) result[key] = value.value;
+    }
+    return result;
+  } catch {
+    console.warn('Could not read saved streaming details from browser storage.');
+    return {};
+  }
+}
+
+function persistSearchAvailability(value: ReturnType<typeof readPersistentSearchAvailability>): void {
+  try {
+    const now = Date.now();
+    const entries = Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => ['ready', 'not_confirmed', 'not_found'].includes(item.status))
+        .map(([key, item]) => [key, { value: item, savedAt: now }]),
+    );
+    localStorage.setItem(SEARCH_AVAILABILITY_CACHE_STORAGE_KEY, JSON.stringify(entries));
+  } catch {
+    console.warn('Could not save streaming details in browser storage; they may be checked again.');
+  }
+}
+
+function readPersistentImdbRatings(): Record<string, ImdbRatingResult> {
+  try {
+    const stored = JSON.parse(localStorage.getItem(IMDB_RATINGS_CACHE_STORAGE_KEY) || '{}');
+    const now = Date.now();
+    const result: Record<string, ImdbRatingResult> = {};
+    for (const [key, entry] of Object.entries(stored || {})) {
+      const cached = entry as { savedAt?: number; value?: ImdbRatingResult };
+      if (
+        cached?.value &&
+        ['found', 'not_found'].includes(cached.value.status) &&
+        now - Number(cached.savedAt) < IMDB_RATINGS_CACHE_TTL_MS
+      ) result[key] = cached.value;
+    }
+    return result;
+  } catch {
+    console.warn('Could not read saved IMDb ratings from browser storage.');
+  }
+  return {};
+}
+
+function persistImdbRatings(value: Record<string, ImdbRatingResult>): void {
+  try {
+    const now = Date.now();
+    const entries = Object.fromEntries(
+      Object.entries(value)
+        .filter(([, rating]) => ['found', 'not_found'].includes(rating.status))
+        .map(([key, rating]) => [key, { value: rating, savedAt: now }]),
+    );
+    localStorage.setItem(IMDB_RATINGS_CACHE_STORAGE_KEY, JSON.stringify(entries));
+  } catch {
+    console.warn('Could not save IMDb ratings in browser storage; they may be fetched again.');
+  }
+}
 
 export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepare, onCancelPrepare, onOpenProgress, seedrFiles = [], seedrDeletedFolderIds = [], onPlaySeedrFile }) => {
   const [query, setQuery] = useState('');
@@ -828,31 +996,15 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [nexStreamError, setNexStreamError] = useState('');
   const [nexStreamPlayer, setNexStreamPlayer] = useState<{ title: string; sourceName: string; url: string; type: 'movie' | 'tv'; season?: number; episode?: number } | null>(null);
   const [nexStreamResolvingId, setNexStreamResolvingId] = useState<string | null>(null);
-  const [searchMetadata, setSearchMetadata] = useState<SearchMediaMetadata[]>([]);
+  const [searchMetadata, setSearchMetadata] = useState<SearchMediaMetadata[]>(readPersistentSearchMetadata);
   const [searchMetadataStatus, setSearchMetadataStatus] = useState<'idle' | 'loading' | 'ready' | 'not_found' | 'unavailable'>('idle');
-  const [imdbRatingsByKey, setImdbRatingsByKey] = useState<Record<string, ImdbRatingResult>>({});
+  const [imdbRatingsByKey, setImdbRatingsByKey] = useState<Record<string, ImdbRatingResult>>(readPersistentImdbRatings);
   const imdbRatingRequestedRef = useRef(new Set<string>());
   const [imdbRetryTick, setImdbRetryTick] = useState(0);
   const imdbInFlightRef = useRef(0);
   const imdbRetryCountRef = useRef(0);
   const tvMetadataRequestedRef = useRef(new Set<string>());
-  const [searchAvailabilityByGroup, setSearchAvailabilityByGroup] = useState<Record<string, {
-    status: 'ready' | 'not_found' | 'not_confirmed' | 'unavailable' | 'loading';
-    query: string;
-    title?: string;
-    year?: number | string;
-    matches?: Array<{
-      id: string;
-      title: string;
-      year?: number | string;
-      type?: string;
-      tmdbId?: number | string;
-      status: 'ready' | 'not_found' | 'not_confirmed' | 'unavailable';
-      providers: Array<{ name: string; region: string; type: string; webUrl?: string }>;
-    }>;
-    providers: Array<{ name: string; region: string; type: string; webUrl?: string }>;
-    message?: string;
-  }>>({});
+  const [searchAvailabilityByGroup, setSearchAvailabilityByGroup] = useState(readPersistentSearchAvailability);
   const [selectedQualityByGroup, setSelectedQualityByGroup] = useState<Record<string, string>>({});
   // Search results are compact cards until the user opens one with Get.
   // The live search, posters, OTT lookups and metadata prefetch keep running independently.
@@ -963,7 +1115,6 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const [marvelContentTab, setMarvelContentTab] = useState<RegionalContentTab>(null);
   type ClassicsContentTab = 'movies' | 'web-series' | 'anime';
   const [classicsContentTab, setClassicsContentTab] = useState<ClassicsContentTab>('movies');
-  type CachedFranchiseSearchMode = 'marvel' | 'marvel-hindi' | 'dc-live-action' | 'dc-live-action-hindi' | 'dc-animated' | 'classics';
   const [activeFranchiseSearchMode, setActiveFranchiseSearchMode] = useState<CachedFranchiseSearchMode | null>(null);
   const franchisePageRequestRef = useRef<AbortController | null>(null);
   const franchisePageGenerationRef = useRef(0);
@@ -977,6 +1128,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   const posterFirstPageReadyRef = useRef(false);
   const [catalogueExpectedTitles, setCatalogueExpectedTitles] = useState(0);
   const franchiseGridPageSize = 18;
+  useEffect(() => persistSearchMetadata(searchMetadata), [searchMetadata]);
+  useEffect(() => persistSearchAvailability(searchAvailabilityByGroup), [searchAvailabilityByGroup]);
+  useEffect(() => persistImdbRatings(imdbRatingsByKey), [imdbRatingsByKey]);
   const renderFranchisePagination = (total: number) => total > franchiseGridPageSize ? <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2"><button type="button" disabled={franchiseGridPage <= 1} onClick={() => navigateFranchisePage(Math.max(1, franchiseGridPage - 1))} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40">← Previous</button><span className="text-xs text-slate-400">Page {franchiseGridPage} of {Math.max(1, Math.ceil(total / franchiseGridPageSize))} · {total} titles</span><button type="button" disabled={franchiseGridPage >= Math.ceil(total / franchiseGridPageSize)} onClick={() => navigateFranchisePage(Math.min(Math.ceil(total / franchiseGridPageSize), franchiseGridPage + 1))} className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-bold text-slate-950 disabled:opacity-40">Next →</button></div> : null;
   type RegionalCatalogueGroup = 'bollywood' | 'hollywood';
   type RegionalCatalogueMode = 'popular' | 'trending' | 'latest';
@@ -1862,7 +2016,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     setShowRecentSearches(false);
     setMovieCatalogue(null);
     setResults([]);
-    setSearchAvailabilityByGroup({});
+    setSearchAvailabilityByGroup(readPersistentSearchAvailability());
     setSearched(false);
   };
 
@@ -2157,9 +2311,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       setShowRecentSearches(false);
       setError('');
       setResults([]);
-      setSearchMetadata([]);
+      setSearchMetadata(readPersistentSearchMetadata());
       setSearchMetadataStatus('idle');
-      setSearchAvailabilityByGroup({});
+      setSearchAvailabilityByGroup(readPersistentSearchAvailability());
       setSelectedQualityByGroup({});
       setExpandedSearchGroupKey(null);
       setSearched(false);
@@ -2294,7 +2448,18 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
           ? api.getMarvelCatalogue(controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE })
           : api.getCatalogue(searchMode, controller.signal, { page, pageSize: CATALOGUE_PAGE_SIZE });
 
-        let catalogue = await fetchCataloguePage(1);
+        const browserCachedPage = readFranchisePageCache(searchMode, 1);
+        let catalogue: MarvelCatalogueResponse = browserCachedPage
+          ? {
+              status: 'ready' as const,
+              results: browserCachedPage.results,
+              completed: browserCachedPage.totalMovies,
+              total: browserCachedPage.totalMovies,
+              totalMovies: browserCachedPage.totalMovies,
+              totalPages: browserCachedPage.totalPages,
+              refreshing: false,
+            }
+          : await fetchCataloguePage(1);
         let catalogueAttempts = 0;
         while (
           (catalogue.status === 'building' || catalogue.status === 'idle') &&
@@ -2317,6 +2482,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         const totalCataloguePages = Number(catalogue.totalPages) || 1;
         const expectedTitles = Number(catalogue.totalMovies) || (totalCataloguePages * CATALOGUE_PAGE_SIZE);
         setCatalogueExpectedTitles(totalCataloguePages > 1 ? expectedTitles : 0);
+        if (!browserCachedPage) {
+          writeFranchisePageCache(searchMode, 1, data, expectedTitles, totalCataloguePages);
+        }
         franchiseLoadedPagesRef.current.set(searchMode, new Set([1]));
         setCatalogueBuildProgress(
           catalogue.refreshing
@@ -3160,9 +3328,35 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   };
 
   async function loadCachedFranchisePage(mode: CachedFranchiseSearchMode, page: number): Promise<void> {
-    const loaded = franchiseLoadedPagesRef.current.get(mode);
-    if (loaded?.has(page)) return;
     franchisePageRequestRef.current?.abort();
+    franchisePageRequestRef.current = null;
+    franchisePageGenerationRef.current += 1;
+    const loaded = franchiseLoadedPagesRef.current.get(mode);
+    if (loaded?.has(page)) {
+      setIsSearching(false);
+      setCatalogueBuildProgress('');
+      return;
+    }
+    const browserCachedPage = readFranchisePageCache(mode, page);
+    if (browserCachedPage) {
+      setResults(previous => {
+        const byKey = new Map<string, TorrentSearchResult>();
+        [...previous, ...browserCachedPage.results].forEach(row => {
+          const key = torrentResultKey(row);
+          if (!byKey.has(key)) byKey.set(key, row);
+        });
+        return Array.from(byKey.values());
+      });
+      const nowLoaded = loaded || new Set<number>();
+      nowLoaded.add(page);
+      franchiseLoadedPagesRef.current.set(mode, nowLoaded);
+      if (browserCachedPage.totalMovies > 0) setCatalogueExpectedTitles(browserCachedPage.totalMovies);
+      setSearched(true);
+      setError('');
+      setCatalogueBuildProgress('');
+      setIsSearching(false);
+      return;
+    }
     const controller = new AbortController();
     franchisePageRequestRef.current = controller;
     const generation = ++franchisePageGenerationRef.current;
@@ -3202,6 +3396,8 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       nowLoaded.add(page);
       franchiseLoadedPagesRef.current.set(mode, nowLoaded);
       const totalTitles = Number(catalogue.totalMovies) || Number(catalogue.total) || 0;
+      const totalPages = Number(catalogue.totalPages) || Math.max(1, Math.ceil(totalTitles / franchiseGridPageSize));
+      writeFranchisePageCache(mode, page, pageRows, totalTitles, totalPages);
       if (totalTitles > 0) setCatalogueExpectedTitles(totalTitles);
       setSearched(true);
       setCatalogueBuildProgress(
@@ -3337,7 +3533,9 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
   useEffect(() => {
     if (!activeFranchiseSearchMode) return;
     const start = (franchiseGridPage - 1) * franchiseGridPageSize;
-    const pageGroups = groupedResults.slice(start, start + franchiseGridPageSize);
+    const pageGroups = groupedResults
+      .slice(start, start + franchiseGridPageSize)
+      .filter(group => !searchAvailabilityByGroup[group.key]);
     if (!pageGroups.length) return;
     const titles = Array.from(new Set(pageGroups.map(group => String(group.title || '').trim()).filter(Boolean)));
     if (!titles.length) return;
@@ -3366,7 +3564,21 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
         for (const group of pageGroups) {
           const titleKey = normalizeSavedOttTitle(episodeSeriesTitle(group.title) || group.title);
           const entry = savedByTitle.get(titleKey) || savedByTitle.get(normalizeSavedOttTitle(group.title));
-          if (!entry) continue;
+          if (!entry) {
+            const hasTmdbId = group.variants.some(variant => {
+              const id = Number((variant as TorrentSearchResult & { tmdbId?: number | string }).tmdbId);
+              return Number.isInteger(id) && id > 0;
+            });
+            if (!hasTmdbId) {
+              next[group.key] = {
+                status: 'not_found',
+                query: group.title,
+                providers: [],
+                message: 'No saved streaming details or TMDB ID for this title.',
+              };
+            }
+            continue;
+          }
           const saved = entry.ottAvailability && typeof entry.ottAvailability === 'object' ? entry.ottAvailability : entry;
           const region = String(saved.region || 'IN');
           const providers = uniqueOttProviders([
@@ -3527,6 +3739,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const visibleGroups = groupedResults.slice(pageStart, pageStart + franchiseGridPageSize);
     const titles = Array.from(new Set(visibleGroups
       .map(group => {
+        if (searchMetadataForGroup(group, searchMetadata)) return '';
         const title = String(group.title || '').trim();
         const year = String(group.year || '').trim();
         // group.title can already include its release year (parsed from the
@@ -3555,7 +3768,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [groupedResults, franchiseGridPage]);
+  }, [groupedResults, franchiseGridPage, searchMetadata]);
 
   // Search TMDB by show name for episode-shaped torrent titles. A broad search for
   // the episode name (e.g. "Escape Plan") cannot resolve "The Rookie" or "NCIS: New Orleans".
@@ -3569,7 +3782,10 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
       .slice(0, 12);
     const seriesTitles = discoveredSeriesTitles.filter(title => {
       const key = normalizeSavedOttTitle(title);
-      if (!key || tvMetadataRequestedRef.current.has(key)) return false;
+      const hasCachedMetadata = searchMetadata.some(item =>
+        item.mediaType === 'tv' && normalizeSavedOttTitle(item.title) === key
+      );
+      if (!key || hasCachedMetadata || tvMetadataRequestedRef.current.has(key)) return false;
       tvMetadataRequestedRef.current.add(key);
       return true;
     });
@@ -3596,7 +3812,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     });
 
     return () => controller.abort();
-  }, [groupedResults, franchiseGridPage]);
+  }, [groupedResults, franchiseGridPage, searchMetadata]);
 
   // Staged loading: every new result set starts with low-bandwidth thumbnails.
   // High-quality upgrades remain paused until the visible page's initial details settle.
@@ -3764,6 +3980,11 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     const pending = new Map<string, { title: string; mediaType: 'movie' | 'tv'; tmdbId?: number }>();
     for (const item of candidates) {
       const key = imdbRatingKey(item.title, item.year, item.mediaType);
+      const cachedRating = imdbRatingsByKey[key];
+      if (cachedRating && ['found', 'not_found'].includes(cachedRating.status)) {
+        imdbRatingRequestedRef.current.add(key);
+        continue;
+      }
       if (!key.startsWith('movie||') && !key.startsWith('tv||') && !imdbRatingRequestedRef.current.has(key)) {
         pending.set(key, {
           title: imdbRatingQueryTitle(item.title, item.year),
@@ -3830,7 +4051,7 @@ export const TorrentSearchPanel: React.FC<TorrentSearchPanelProps> = ({ onPrepar
     }).finally(() => {
       imdbInFlightRef.current = Math.max(0, imdbInFlightRef.current - 1);
     });
-  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRetryTick, franchiseGridPage]);
+  }, [movieCatalogue?.results, searchMetadata, groupedResults, imdbRatingsByKey, imdbRetryTick, franchiseGridPage]);
 
   const clearTmdbCacheAndReload = async () => {
     const currentCatalogue = movieCatalogue;
